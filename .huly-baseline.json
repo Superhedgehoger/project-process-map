@@ -17,13 +17,17 @@
   "deployCommands": [
     "git clone https://github.com/hcengineering/huly-selfhost.git artifacts/huly/huly-selfhost",
     "git -C artifacts/huly/huly-selfhost checkout --detach 865584594cc582d9e0f7013be66c22f153df1176",
-    "cd artifacts/huly/huly-selfhost && ./setup.sh --quick",
-    "cd artifacts/huly/huly-selfhost && docker compose ps"
+    "pnpm huly:up",
+    "pnpm huly:ps",
+    "pnpm huly:down"
   ],
   "sbom": {
     "format": "CycloneDX",
-    "path": "artifacts/huly/sbom.cdx.json",
-    "status": "pending"
+    "path": "docs/reports/P0-01-sbom-summary.md",
+    "status": "generated"
   },
-  "decision": "pending-deployment-verification"
+  "licenseCatalogPath": "docs/reports/P0-01-license-summary.md",
+  "imageLockPath": "infra/huly/image-lock.arm64.json",
+  "deploymentEvidencePath": "docs/reports/P0-02-selfhost-replay.md",
+  "decision": "pending-license-review"
 }

@@ -1,10 +1,14 @@
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 
 type Baseline = {
   platform?: { repository?: string; commit?: string };
   selfhost?: { repository?: string; commit?: string };
   licenseEvidence?: string[];
   deployCommands?: string[];
+  sbom?: { path?: string; status?: string };
+  licenseCatalogPath?: string;
+  imageLockPath?: string;
+  deploymentEvidencePath?: string;
   decision?: string;
 };
 
@@ -16,6 +20,23 @@ for (const [name, repository] of [["platform", baseline.platform], ["selfhost", 
 }
 if ((baseline.licenseEvidence?.length ?? 0) < 2) failures.push("both repository licenses require evidence");
 if (!baseline.deployCommands?.length) failures.push("reproducible deploy commands are required");
+
+for (const [name, path] of [
+  ["SBOM summary", baseline.sbom?.path],
+  ["license catalog summary", baseline.licenseCatalogPath],
+  ["image lock", baseline.imageLockPath],
+  ["deployment evidence", baseline.deploymentEvidencePath],
+] as const) {
+  if (!path) {
+    failures.push(`${name} path is required`);
+    continue;
+  }
+  try {
+    await access(path);
+  } catch {
+    failures.push(`${name} does not exist: ${path}`);
+  }
+}
 
 if (failures.length > 0) {
   console.error(JSON.stringify({ status: "blocked", failures }, null, 2));

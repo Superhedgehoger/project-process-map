@@ -15,27 +15,29 @@
 | Platform 构建工具 | Node 22、Rush 5.158.1、pnpm 10.15.1 |
 | Selfhost 最低资源 | 2 vCPU / 8 GB RAM；推荐 4 vCPU / 16 GB RAM |
 
-## 尚未满足的不可变性要求
+## 镜像不可变性结果
 
-锁定的 Selfhost `compose.yml` 包含以下非 digest 镜像引用：
+锁定的 Selfhost `compose.yml` 原本包含浮动或可变 tag。现已把 14 个 Linux ARM64 镜像解析为平台 digest，并由 `infra/huly/compose.digest.arm64.yml` 在本地验证时覆盖；`pnpm huly:images` 会检查服务覆盖完整性与 digest 一致性。上游文件保持不变。
 
-- `cockroachdb/cockroach:latest-v24.2`
-- `minio/minio`（未指定 tag）
-- 其他固定 tag 或 `${HULY_VERSION}` 镜像也尚未解析为 digest
-
-因此不能直接把官方 Compose 文件视为可重复部署证据。P0-02 前应生成一份仅用于验证环境的 digest override，不修改上游源码，并保存解析时间与目标架构。
+该锁只覆盖 2026-09-02 解析的 Linux ARM64 验证环境；其他架构或生产升级必须重新解析并复验，不能复用平台 digest。
 
 ## 本地环境差异
 
-- 默认 Node 为 24.15.0；Huly Platform 文档要求 Node 22。
-- Docker Client 为 28.3.2；本次检查没有可用的 Docker Server 版本。
-- `syft` 与 `trivy` 未安装，尚未生成依赖和镜像 SBOM。
+- 默认 Node 为 24.15.0；已通过 nvm 安装隔离的 Node 22.23.2，供 Huly 构建使用。
+- Docker Desktop 28.3.2 已启动，分配 10 CPU、约 8.22 GB 内存，接近最低线且低于推荐余量。
+- 已用临时、经 SHA-256 校验的 Syft 1.51.1 生成源码 SBOM；另从 npm 官方注册表补取 2,887 个精确包版本的声明许可证，详见许可证摘要。
 - Platform 开发依赖可能需要 GitHub Packages `read:packages` 授权；任何令牌只能通过环境或登录助手注入，不得写入仓库。
 
 ## 下一步通过条件
 
-1. 为 Huly 构建准备隔离的 Node 22 环境，不改变本项目 Node 24 骨架。
-2. 安装或使用容器化 SBOM 工具，对两个锁定工作树和部署镜像生成 CycloneDX 清单。
-3. 将 Compose 镜像全部解析为不可变 digest，并生成验证环境 override。
-4. 启动 Docker 服务后运行 quick setup，保存健康状态、镜像 digest、耗时和日志。
-5. 在第二个干净环境复跑，再决定 ADR-001 是否 Accepted。
+1. 人工复核 2 个未解析包、18 个 `UNKNOWN`、强 copyleft 与自定义服务条款。
+2. 明确部署镜像自身的软件清单与许可证交付方式；源码 npm 目录不能替代镜像清单。
+3. 法务/合规结论和两次部署证据一起通过后，再决定 ADR-001 是否 Accepted。
+
+## 第一次启动发现
+
+- 官方 `setup.sh --quick` 在缺少 `envsubst` 时不会失败退出，仍会打印完成信息；同时会尝试执行不适用于本地验证的 sudo nginx 操作。
+- 官方 Compose 的 Redpanda 健康检查携带 SASL 用户名/密码，但对应启动命令没有启用 SASL，持续返回 `ILLEGAL_SASL_STATE`；无凭据 `rpk cluster info` 成功且 6 个 Huly topics 均存在。
+- 本仓库的本地 override 仅修正该健康检查假阴性，不改变生产认证决策。
+- Cockroach、Account 与 KVS 的密码哈希一致；启动早期的连接拒绝/认证错误在数据库初始化后停止，KVS 最终恢复运行。
+- Huly 登录页已通过 HTTP 200 与 Cindy 浏览器真实渲染验证。

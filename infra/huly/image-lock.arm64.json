@@ -1,0 +1,21 @@
+{
+  "platform": "linux/arm64",
+  "resolvedAt": "2026-09-02T16:40:00+08:00",
+  "hulyVersion": "v0.7.426",
+  "images": [
+    { "image": "elasticsearch:7.14.2", "indexDigest": "sha256:f05ab7f4d2aa5040813a0ea4eb76fa99bb31459937a4539efe2f2c2dbb2109fb", "platformDigest": "sha256:8f99dc1f4a95a4f440de70556125bc0fdb4ab9ccdfa67538186b3da01059b7dd" },
+    { "image": "cockroachdb/cockroach:latest-v24.2", "indexDigest": "sha256:885d9b0e3243f262976763717e547dbbe75ca999548f7a4ea95fcd30a9aee66c", "platformDigest": "sha256:7211206a2d5b0d4411f76431a3ad96c617e9df50259fd7adcc7d78c7be4908f9" },
+    { "image": "hardcoreeng/account:v0.7.426", "indexDigest": "sha256:a77b42617b7c88e886458966c0001952c22f882feb44f78e9f6f8d89d7e73c1c", "platformDigest": "sha256:1dece46df0bd753f069b39098f834a337768edc04e9ad595c53538770b55bfc9" },
+    { "image": "hardcoreeng/hulykvs:v0.7.426", "indexDigest": "sha256:765ca15bb643e4f8d42dba9bc0bf0d0e668ee5ced8fb1c432abb142946b09d4f", "platformDigest": "sha256:59ab34b098319e4ecaccaa188e2487c56a99b6c41d2a1d752f58c08ebc444590" },
+    { "image": "hardcoreeng/transactor:v0.7.426", "indexDigest": "sha256:4bbf156ff7ba06c665930d40bb577f6b549d1f9eeaa7270de5d98ac7fdd7465c", "platformDigest": "sha256:7d9b934d7cb80ac5b4538b88d4246b0f990ee8011efc190ff1039a10f3d49f7d" },
+    { "image": "hardcoreeng/fulltext:v0.7.426", "indexDigest": "sha256:e8670c41aab79b0e4e15230aad61e2e7e886e57cc83796e92ecb3c4d1f99209a", "platformDigest": "sha256:202277f76fa56da3c5f7983fd61154845e6184a94512b9e4c3fc6e4d18ef06dc" },
+    { "image": "nginx:1.21.3", "indexDigest": "sha256:644a70516a26004c97d0d85c7fe1d0c3a67ea8ab7ddf4aff193d9f301670cf36", "platformDigest": "sha256:bf6ac873f0bc7e0a3454ffea4ecf93145c712508a1ca4f125c82a004f5d798a5" },
+    { "image": "hardcoreeng/workspace:v0.7.426", "indexDigest": "sha256:9a95e4fc7616fb427111400191a9cff42e5e8e56c893c61bfa15055b1bfadb53", "platformDigest": "sha256:af512493cdf0d83cd205231d06ceeb958b1110564a3ad7f43a0415eb46e17a9e" },
+    { "image": "hardcoreeng/rekoni-service:v0.7.426", "indexDigest": "sha256:d148cefc5e55372a4d5d513626136618f814ee341eff1be9deffbeb74c8b5fed", "platformDigest": "sha256:94ffa8cf15ec8eb52fb91cd44e519b57e2f65ac06d27c1b0516f3cab1ee34879" },
+    { "image": "hardcoreeng/collaborator:v0.7.426", "indexDigest": "sha256:2747295c2cf5de05d6ea8ec90173891f28ede3064d45354a8069ebfe769f279f", "platformDigest": "sha256:cdcb756cee7ee3cf735a416a97ea51f54743cf05bcb809aa4269c54e0919e088" },
+    { "image": "minio/minio", "indexDigest": "sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e", "platformDigest": "sha256:9966a92a734f9411e32f4f41d7d9d826fcdc0f68c4e20b70295bd4e7c11f8a2f" },
+    { "image": "hardcoreeng/stats:v0.7.426", "indexDigest": "sha256:9a08a6ec7f80e13d3d3694247087751727227152bb23fdc88f53f8fae1a07183", "platformDigest": "sha256:81a6e78d376ff1a4248c4f4e56c42d276eae8ae9d2b78d37d99a295d75fdb16c" },
+    { "image": "docker.redpanda.com/redpandadata/redpanda:v24.3.6", "indexDigest": "sha256:04baa40ed34edf86028396f762be802f3b6b0acaab65e9de696a3f15d54c550f", "platformDigest": "sha256:50e95bd5913ea9b99e5d38f86d1e1ed2b884bc6a3c3c749a329d07da2d765799" },
+    { "image": "hardcoreeng/front:v0.7.426", "indexDigest": "sha256:96d5270cb1f46cbe2d67a9cee79a83f184bbf5b6daf02ee8e2cbbb2522ce759f", "platformDigest": "sha256:e84d1647594cdb92d86b6f63482e4c99d2ba720b33148eb4b3828b024f711e53" }
+  ]
+}

@@ -4,14 +4,14 @@
 
 | 任务 | 状态 | 当前证据 | 下一闸门 |
 |---|---|---|---|
-| P0-01 Huly 基线 | 进行中 | 两个锁定源码 HEAD 已核对；迁移说明已核验 | 固定浮动镜像、准备 Node 22、生成 SBOM、完成部署复核 |
-| P0-02 自托管环境 | 未开始 | 无 | P0-01 通过后从干净环境部署 |
+| P0-01 Huly 基线 | 进行中 | HEAD、迁移、Node 22、源码 SBOM、14 个 ARM64 镜像 digest、2,887 项 npm 许可证声明已核对 | 人工复核 2 个未解析包、18 个 UNKNOWN 及强 copyleft/自定义条款 |
+| P0-02 自托管环境 | 证据就绪，等待前置闸门 | 两个隔离实例均以 14 个 digest 镜像启动并返回 HTTP 200；登录页完成真实浏览器渲染 | P0-01 许可证复核通过后正式验收 |
 | P0-03 API/Worker/Adapter | 预备骨架已验证 | API `/health`、Worker、内存 Adapter、5 项测试 | P0-02 后连接真实 Huly 环境复验 |
 
 ## 启动条件
 
 - [x] 已登记 Huly Platform 与 Selfhost 完整 commit 候选
-- [ ] 可重复的 Huly 构建与部署说明
+- [x] 可重复的 Huly 自托管部署说明与 ARM64 镜像锁
 - [ ] 普通成员、无敏感权限成员两组测试身份
 - [x] 200 节点、300 关系、2,000 任务的脱敏数据生成器
 - [x] 最小签字模板 fixture
@@ -20,4 +20,4 @@
 
 P0-03 的代码当前只是无外部依赖的预备骨架，不能绕过 P0-01/P0-02 宣称技术闸门通过。
 
-当前 P0-01 差异详见 `docs/reports/P0-01-source-audit.md`。
+当前 P0-01 差异详见 `docs/reports/P0-01-source-audit.md`；部署复跑见 `docs/reports/P0-02-selfhost-replay.md`。P0-02 虽已有运行证据，仍按依赖顺序等待 P0-01 正式通过。

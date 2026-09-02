@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Locked Huly upstream baseline",
   "type": "object",
-  "required": ["platform", "selfhost", "licenseEvidence", "deployCommands", "sbom", "decision"],
+  "required": ["platform", "selfhost", "licenseEvidence", "deployCommands", "sbom", "licenseCatalogPath", "imageLockPath", "deploymentEvidencePath", "decision"],
   "properties": {
     "$schema": { "type": "string" },
     "platform": { "$ref": "#/$defs/repositoryBaseline" },
@@ -19,7 +19,10 @@
       },
       "additionalProperties": false
     },
-    "decision": { "enum": ["pending-deployment-verification", "go", "no-go"] }
+    "licenseCatalogPath": { "type": "string" },
+    "imageLockPath": { "type": "string" },
+    "deploymentEvidencePath": { "type": "string" },
+    "decision": { "enum": ["pending-deployment-verification", "pending-license-review", "go", "no-go"] }
   },
   "$defs": {
     "repositoryBaseline": {
