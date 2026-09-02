@@ -2,6 +2,8 @@
 
 本仓库是 PRD V1.3 / FC-1.2 的实现工作区。目前处于 Phase 0：验证 Huly 底座、自托管、适配器边界、权限与事件一致性，不代表生产架构已经批准。
 
+GitHub：<https://github.com/Superhedgehoger/project-process-map>
+
 ## 当前可运行内容
 
 - Product API 健康检查：`pnpm dev:api`
@@ -19,3 +21,14 @@
 
 详见 `docs/phase0-status.md`。
 
+## Antigravity IDE 接续入口
+
+Antigravity IDE 只接收边界明确的任务，Cindy 以 Git 差异和自动测试回收结果。P0-01 的任务文件已准备在 `docs/agent-tasks/P0-01.md`：
+
+```bash
+antigravity-ide chat --mode agent --reuse-window \
+  --add-file docs/agent-tasks/P0-01.md \
+  "按任务文件继续核验，不扩大范围；完成后保留代码和测试证据供 Cindy 验收"
+```
+
+该命令会打开图形界面，且 CLI 没有可靠的无头完成回调，因此不会作为 CI 步骤运行。
