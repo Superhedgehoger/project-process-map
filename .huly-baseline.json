@@ -1,0 +1,29 @@
+{
+  "$schema": "./schemas/huly-baseline.schema.json",
+  "platform": {
+    "repository": "https://github.com/hcengineering/platform",
+    "stableTag": "v0.7.426",
+    "commit": "ccefccd8d0361d3c8612d508071b777aa833826d",
+    "releasePublishedAt": "2026-07-05T03:43:54Z"
+  },
+  "selfhost": {
+    "repository": "https://github.com/hcengineering/huly-selfhost",
+    "commit": "865584594cc582d9e0f7013be66c22f153df1176"
+  },
+  "licenseEvidence": [
+    "https://github.com/hcengineering/platform/blob/ccefccd8d0361d3c8612d508071b777aa833826d/LICENSE",
+    "https://github.com/hcengineering/huly-selfhost/blob/865584594cc582d9e0f7013be66c22f153df1176/LICENSE"
+  ],
+  "deployCommands": [
+    "git clone https://github.com/hcengineering/huly-selfhost.git artifacts/huly/huly-selfhost",
+    "git -C artifacts/huly/huly-selfhost checkout --detach 865584594cc582d9e0f7013be66c22f153df1176",
+    "cd artifacts/huly/huly-selfhost && ./setup.sh --quick",
+    "cd artifacts/huly/huly-selfhost && docker compose ps"
+  ],
+  "sbom": {
+    "format": "CycloneDX",
+    "path": "artifacts/huly/sbom.cdx.json",
+    "status": "pending"
+  },
+  "decision": "pending-deployment-verification"
+}

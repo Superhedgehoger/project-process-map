@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Locked Huly upstream baseline",
+  "type": "object",
+  "required": ["platform", "selfhost", "licenseEvidence", "deployCommands", "sbom", "decision"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "platform": { "$ref": "#/$defs/repositoryBaseline" },
+    "selfhost": { "$ref": "#/$defs/repositoryBaseline" },
+    "licenseEvidence": { "type": "array", "minItems": 2, "items": { "type": "string", "format": "uri" } },
+    "deployCommands": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+    "sbom": {
+      "type": "object",
+      "required": ["format", "path", "status"],
+      "properties": {
+        "format": { "const": "CycloneDX" },
+        "path": { "type": "string" },
+        "status": { "enum": ["pending", "generated", "verified"] }
+      },
+      "additionalProperties": false
+    },
+    "decision": { "enum": ["pending-deployment-verification", "go", "no-go"] }
+  },
+  "$defs": {
+    "repositoryBaseline": {
+      "type": "object",
+      "required": ["repository", "commit"],
+      "properties": {
+        "repository": { "type": "string", "format": "uri" },
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "stableTag": { "type": "string" },
+        "releasePublishedAt": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,24 @@
+{
+  "name": "project-process-map",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Project Process Map — Phase 0 verification workspace",
+  "packageManager": "pnpm@10.28.2",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "check": "pnpm typecheck && pnpm test",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/**/*.test.ts",
+    "dev:api": "node --experimental-strip-types apps/product-api/src/main.ts",
+    "dev:worker": "node --experimental-strip-types apps/worker/src/main.ts",
+    "fixtures:generate": "node --experimental-strip-types tools/generate-phase0-fixtures.ts",
+    "huly:verify": "node --experimental-strip-types tools/verify-huly-baseline.ts"
+  },
+  "devDependencies": {
+    "@types/node": "24.5.2",
+    "typescript": "5.9.2"
+  }
+}
