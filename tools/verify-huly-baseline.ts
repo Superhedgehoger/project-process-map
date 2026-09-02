@@ -6,6 +6,7 @@ type Baseline = {
   licenseEvidence?: string[];
   deployCommands?: string[];
   sbom?: { path?: string; status?: string };
+  imageSbomSummaryPath?: string;
   licenseCatalogPath?: string;
   imageLockPath?: string;
   deploymentEvidencePath?: string;
@@ -23,6 +24,7 @@ if (!baseline.deployCommands?.length) failures.push("reproducible deploy command
 
 for (const [name, path] of [
   ["SBOM summary", baseline.sbom?.path],
+  ["image SBOM summary", baseline.imageSbomSummaryPath],
   ["license catalog summary", baseline.licenseCatalogPath],
   ["image lock", baseline.imageLockPath],
   ["deployment evidence", baseline.deploymentEvidencePath],

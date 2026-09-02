@@ -17,6 +17,7 @@
     "fixtures:generate": "node --experimental-strip-types tools/generate-phase0-fixtures.ts",
     "huly:verify": "node --experimental-strip-types tools/verify-huly-baseline.ts",
     "huly:images": "node --experimental-strip-types tools/verify-huly-image-lock.ts",
+    "huly:image-sboms": "node --experimental-strip-types tools/catalog-huly-image-sboms.ts",
     "huly:licenses": "node --experimental-strip-types tools/catalog-huly-npm-licenses.ts",
     "huly:up": "bash tools/huly-local.sh up",
     "huly:ps": "bash tools/huly-local.sh ps",

@@ -11,6 +11,7 @@ GitHub：<https://github.com/Superhedgehoger/project-process-map>
 - Phase 0 大样例与最小签字模板：`pnpm fixtures:generate`
 - Huly 基线文件检查：`pnpm huly:verify`
 - Huly ARM64 镜像锁检查：`pnpm huly:images`
+- Huly 本地镜像 SBOM：`SYFT_BIN=/path/to/syft pnpm huly:image-sboms`
 - Huly 本地验证环境：`pnpm huly:up` / `pnpm huly:ps` / `pnpm huly:down`
 - 全部静态检查与测试：`pnpm check`
 

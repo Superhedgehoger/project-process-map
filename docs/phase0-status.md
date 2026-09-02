@@ -4,7 +4,7 @@
 
 | 任务 | 状态 | 当前证据 | 下一闸门 |
 |---|---|---|---|
-| P0-01 Huly 基线 | 进行中 | HEAD、迁移、Node 22、源码 SBOM、14 个 ARM64 镜像 digest、2,887 项 npm 许可证声明已核对 | 人工复核 2 个未解析包、18 个 UNKNOWN 及强 copyleft/自定义条款 |
+| P0-01 Huly 基线 | 进行中 | HEAD、迁移、Node 22、源码与 14 镜像 SBOM、ARM64 digest、2,887 项 npm 许可证声明已核对 | 人工复核未解析项、强 copyleft、SSPL 与自定义条款 |
 | P0-02 自托管环境 | 证据就绪，等待前置闸门 | 两个隔离实例均以 14 个 digest 镜像启动并返回 HTTP 200；登录页完成真实浏览器渲染 | P0-01 许可证复核通过后正式验收 |
 | P0-03 API/Worker/Adapter | 预备骨架已验证 | API `/health`、Worker、内存 Adapter、5 项测试 | P0-02 后连接真实 Huly 环境复验 |
 
