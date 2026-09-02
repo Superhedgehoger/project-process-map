@@ -1,0 +1,7 @@
+services:
+  front:
+    image: ${HULY_FRONT_IMAGE:-project-process-map/huly-front:p0-04}
+  transactor:
+    image: ${HULY_TRANSACTOR_IMAGE:-project-process-map/huly-transactor:p0-04}
+  workspace:
+    image: ${HULY_WORKSPACE_IMAGE:-project-process-map/huly-workspace:p0-04}

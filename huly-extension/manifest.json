@@ -1,0 +1,34 @@
+{
+  "name": "project-process-map-shell-prototype",
+  "upstreamRepository": "https://github.com/hcengineering/platform",
+  "upstreamCommit": "ccefccd8d0361d3c8612d508071b777aa833826d",
+  "reason": "Register the Phase 0 Project Process Map application in the Huly Workbench shell without changing Workbench internals.",
+  "regressionCoverage": [
+    "pnpm huly:extension:verify",
+    "rush validate --to @hcengineering/model-all",
+    "rush svelte-check --to @hcengineering/project-process-map-resources",
+    "rush bundle --to @hcengineering/model-all --to @hcengineering/pod-workspace",
+    "rush package --to @hcengineering/prod",
+    "rush bundle --to @hcengineering/pod-server",
+    "docs/reports/P0-04-huly-shell.md"
+  ],
+  "removalCondition": "Remove the static composition patch when Huly provides a supported runtime plugin registration mechanism or this application is upstreamed.",
+  "packages": [
+    "plugins/project-process-map",
+    "plugins/project-process-map-assets",
+    "plugins/project-process-map-resources",
+    "models/project-process-map"
+  ],
+  "compositionFiles": [
+    "rush.json",
+    "models/all/package.json",
+    "models/all/src/index.ts",
+    "dev/prod/package.json",
+    "dev/prod/src/platform.ts"
+  ],
+  "runtimeServices": [
+    "front",
+    "transactor",
+    "workspace"
+  ]
+}

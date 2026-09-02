@@ -13,8 +13,21 @@ GitHub：<https://github.com/Superhedgehoger/project-process-map>
 - Huly 基线文件检查：`pnpm huly:verify`
 - Huly ARM64 镜像锁检查：`pnpm huly:images`
 - Huly 本地镜像 SBOM：`SYFT_BIN=/path/to/syft pnpm huly:image-sboms`
+- Huly Shell 扩展静态校验：`pnpm huly:extension:verify`
+- 将 Shell 扩展装配到锁定源码：`pnpm huly:extension:apply`
 - Huly 本地验证环境：`pnpm huly:up` / `pnpm huly:ps` / `pnpm huly:down`
 - 全部静态检查与测试：`pnpm check`
+
+P0-04 Shell 原型需要由同一锁定源码构建 Front、Transactor、Workspace 三个本地镜像。Transactor 是浏览器运行模型的权威提供者，不能只替换 Front 与 Workspace。镜像就绪后可用独立端口启动：
+
+```bash
+HULY_COMPOSE_OVERRIDE="$PWD/infra/huly/compose.shell-prototype.yml" \
+HULY_INSTANCE_NAME=project_process_map_p0_shell \
+HULY_HTTP_PORT=8089 \
+pnpm huly:up
+```
+
+以上三个 `project-process-map/*:p0-04` 镜像仅在本地生成，未推送到公共镜像仓库。
 
 ## 开发顺序
 
@@ -23,7 +36,7 @@ GitHub：<https://github.com/Superhedgehoger/project-process-map>
 3. `P0-03`：验证 Product API、Worker 和内存 Adapter 骨架。
 4. `P0-04/P0-05`：Huly Shell 页面以及 Node → Task → File 纵向演示。
 
-许可证审查未通过前，只推进不连接、不修改、不分发 Huly 的本地探索切片；这些证据不提前改变正式 Gate 状态。
+项目负责人已批准 P0-01 许可证风险闸门，可继续本地 Phase 0 集成；该批准是项目风险接受，不替代生产发布前的正式法律审查。
 
 详见 `docs/phase0-status.md`。
 

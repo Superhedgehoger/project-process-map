@@ -6,6 +6,7 @@ script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 project_root="$(CDPATH= cd -- "$script_dir/.." && pwd)"
 selfhost_dir="${HULY_SELFHOST_DIR:-$project_root/artifacts/huly/huly-selfhost}"
 compose_override="$project_root/infra/huly/compose.digest.arm64.yml"
+extension_override="${HULY_COMPOSE_OVERRIDE:-}"
 expected_selfhost_commit="865584594cc582d9e0f7013be66c22f153df1176"
 instance_name="${HULY_INSTANCE_NAME:-huly_v7}"
 http_port="${HULY_HTTP_PORT:-8087}"
@@ -22,6 +23,13 @@ if [[ "$actual_commit" != "$expected_selfhost_commit" ]]; then
 fi
 
 compose=(docker compose -f "$selfhost_dir/compose.yml" -f "$compose_override")
+if [[ -n "$extension_override" ]]; then
+  if [[ ! -f "$extension_override" ]]; then
+    echo "Huly Compose override is missing: $extension_override" >&2
+    exit 1
+  fi
+  compose+=(-f "$extension_override")
+fi
 
 case "$action" in
   up)

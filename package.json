@@ -9,7 +9,7 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "check": "pnpm typecheck && pnpm test && pnpm huly:images",
+    "check": "pnpm typecheck && pnpm test && pnpm huly:images && pnpm huly:extension:verify",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test tests/**/*.test.ts",
     "dev:api": "node --experimental-strip-types apps/product-api/src/main.ts",
@@ -19,6 +19,8 @@
     "huly:images": "node --experimental-strip-types tools/verify-huly-image-lock.ts",
     "huly:image-sboms": "node --experimental-strip-types tools/catalog-huly-image-sboms.ts",
     "huly:licenses": "node --experimental-strip-types tools/catalog-huly-npm-licenses.ts",
+    "huly:extension:apply": "node --experimental-strip-types tools/apply-huly-extension.ts",
+    "huly:extension:verify": "node --experimental-strip-types tools/verify-huly-extension.ts",
     "huly:up": "bash tools/huly-local.sh up",
     "huly:ps": "bash tools/huly-local.sh ps",
     "huly:down": "bash tools/huly-local.sh down"
