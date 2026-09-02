@@ -1,7 +1,8 @@
-# ADR-001：Huly 基线候选
+# ADR-001：Huly 基线
 
-- 状态：Proposed
+- 状态：Accepted
 - 日期：2026-09-02
+- 批准日期：2026-09-02
 - 对应任务：P0-01
 
 ## 候选
@@ -15,17 +16,18 @@
 
 锁定源码的 `MIGRATION.md` 对 `v0.7.426` 标注为 `No changes required`。这只证明该版本没有额外迁移步骤，不代表整个部署已通过。
 
-## 当前决定
+## 决定
 
-只锁定候选，不批准 Go。以下证据补齐后才能将 ADR 改为 Accepted：
+批准以下不可变基线进入后续 Phase 0 开发：
 
-1. 从锁定 commit 检查仓库内许可证边界并生成依赖、镜像 SBOM。
-2. 确认 Selfhost commit 与 Platform `v0.7.426` 的迁移说明和镜像配置兼容。
-3. 在干净环境运行 quick setup，保存镜像 digest、健康状态、日志和耗时。
-4. 第二个干净环境复跑部署命令。
-5. 完成 EPL-2.0 分发方式与修改文件义务复核。
+1. Platform `ccefccd8d0361d3c8612d508071b777aa833826d`。
+2. Selfhost `865584594cc582d9e0f7013be66c22f153df1176`。
+3. `infra/huly/image-lock.arm64.json` 中的 14 个 Linux ARM64 平台 digest。
+4. `tools/huly-local.sh` 作为本地验证入口；它不是生产部署脚本。
 
-当前已知阻塞：Platform 构建要求 Node 22，而本机默认是 Node 24；Selfhost Compose 仍包含浮动镜像标签，必须先解析并冻结为 digest。详见 P0-01 源码审计报告。
+批准依据包括源码与镜像 SBOM、npm 许可证目录、两次隔离自托管复跑、HTTP 200 和真实浏览器登录页验证。项目负责人于 2026-09-02 明确确认“通过、继续”。许可证报告中的 SSPL、AGPL/GPL/LGPL、自定义条款和未解析项作为已知风险继续保留；本 ADR 的 Accepted 表示允许继续 Phase 0 技术开发，不替代未来生产发布前的法务/合规审查。
+
+任何架构、Huly tag、Selfhost commit 或目标平台变化都必须重新生成镜像锁、SBOM 并复跑部署，不能静默沿用本决定。
 
 ## 未在本 ADR 决定
 

@@ -49,4 +49,4 @@
 
 ## 闸门结论
 
-14 个锁定镜像均已生成完整本地 SBOM，复现入口为 `SYFT_BIN=/path/to/syft pnpm huly:image-sboms`。技术证据已补齐，但许可证义务仍需人工审查，因此基线决策继续保持 `pending-license-review`。
+14 个锁定镜像均已生成完整本地 SBOM，复现入口为 `SYFT_BIN=/path/to/syft pnpm huly:image-sboms`。项目负责人于 2026-09-02 接受已知风险并批准继续 Phase 0 技术开发，基线决策改为 `go`；生产发布前仍必须完成正式法务/合规复核。

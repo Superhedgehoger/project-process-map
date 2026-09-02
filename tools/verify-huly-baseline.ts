@@ -44,5 +44,5 @@ if (failures.length > 0) {
   console.error(JSON.stringify({ status: "blocked", failures }, null, 2));
   process.exitCode = 1;
 } else {
-  console.log(JSON.stringify({ status: "candidate-locked", decision: baseline.decision }));
+  console.log(JSON.stringify({ status: baseline.decision === "go" ? "accepted" : "candidate-locked", decision: baseline.decision }));
 }

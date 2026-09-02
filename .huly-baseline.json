@@ -24,11 +24,11 @@
   "sbom": {
     "format": "CycloneDX",
     "path": "docs/reports/P0-01-sbom-summary.md",
-    "status": "generated"
+    "status": "verified"
   },
   "imageSbomSummaryPath": "docs/reports/P0-01-image-sbom-summary.md",
   "licenseCatalogPath": "docs/reports/P0-01-license-summary.md",
   "imageLockPath": "infra/huly/image-lock.arm64.json",
   "deploymentEvidencePath": "docs/reports/P0-02-selfhost-replay.md",
-  "decision": "pending-license-review"
+  "decision": "go"
 }
