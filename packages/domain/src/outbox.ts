@@ -1,44 +1,141 @@
-export type DomainEvent = {
+import { createHash } from "node:crypto";
+
+export type ProjectNode = {
   id: string;
+  projectId: string;
+  title: string;
+  securityDomainId: string | null;
+  version: number;
+};
+
+export type DomainEvent = {
+  eventId: string;
+  projectId: string;
+  projectSequence: number;
+  aggregateType: "project_node";
   aggregateId: string;
-  type: string;
-  occurredAt: string;
-  payload: Readonly<Record<string, unknown>>;
+  aggregateVersion: number;
+  eventType: "project-map.node.created.v1";
+  actorId: string;
+  occurredAtUtc: string;
+  correlationId: string;
+  causationId: string;
+  originalSecurityDomainId: string | null;
+  before: null;
+  after: Readonly<ProjectNode>;
+  schemaVersion: 1;
 };
 
 export type OutboxMessage = {
   id: string;
   eventId: string;
   topic: string;
-  payload: Readonly<Record<string, unknown>>;
+  payload: Readonly<DomainEvent>;
   publishedAt?: string;
 };
 
+export type CreateNodeCommand = {
+  commandId: string;
+  idempotencyKey: string;
+  correlationId: string;
+  actorId: string;
+  projectId: string;
+  nodeId: string;
+  title: string;
+  securityDomainId: string | null;
+  occurredAtUtc: string;
+};
+
+export type CreateNodeResult = {
+  node: ProjectNode;
+  event: DomainEvent;
+  outbox: OutboxMessage;
+  replayed: boolean;
+};
+
+export type FailurePoint = "after_aggregate" | "after_event" | "after_outbox" | "after_idempotency";
+
+type StoredCommand = {
+  fingerprint: string;
+  result: Omit<CreateNodeResult, "replayed">;
+};
+
 type StoreState = {
-  aggregates: Map<string, Readonly<Record<string, unknown>>>;
+  aggregates: Map<string, Readonly<ProjectNode>>;
   events: DomainEvent[];
   outbox: OutboxMessage[];
+  commands: Map<string, StoredCommand>;
+  projectSequences: Map<string, number>;
 };
 
 export type Transaction = {
-  putAggregate(id: string, value: Readonly<Record<string, unknown>>): void;
+  getAggregate(id: string): Readonly<ProjectNode> | undefined;
+  putAggregate(id: string, value: Readonly<ProjectNode>): void;
   appendEvent(event: DomainEvent): void;
   enqueue(message: OutboxMessage): void;
+  getCommand(key: string): StoredCommand | undefined;
+  putCommand(key: string, command: StoredCommand): void;
+  nextProjectSequence(projectId: string): number;
 };
 
+function cloneState(state: StoreState): StoreState {
+  return {
+    aggregates: new Map(structuredClone([...state.aggregates])),
+    events: structuredClone(state.events),
+    outbox: structuredClone(state.outbox),
+    commands: new Map(structuredClone([...state.commands])),
+    projectSequences: new Map(state.projectSequences),
+  };
+}
+
 export class InMemoryTransactionalStore {
-  #state: StoreState = { aggregates: new Map(), events: [], outbox: [] };
+  #state: StoreState = {
+    aggregates: new Map(),
+    events: [],
+    outbox: [],
+    commands: new Map(),
+    projectSequences: new Map(),
+  };
 
   transaction<T>(operation: (transaction: Transaction) => T): T {
-    const draft: StoreState = {
-      aggregates: new Map(this.#state.aggregates),
-      events: structuredClone(this.#state.events),
-      outbox: structuredClone(this.#state.outbox),
-    };
+    const draft = cloneState(this.#state);
     const transaction: Transaction = {
-      putAggregate: (id, value) => draft.aggregates.set(id, structuredClone(value)),
-      appendEvent: (event) => draft.events.push(structuredClone(event)),
-      enqueue: (message) => draft.outbox.push(structuredClone(message)),
+      getAggregate: (id) => {
+        const aggregate = draft.aggregates.get(id);
+        return aggregate ? structuredClone(aggregate) : undefined;
+      },
+      putAggregate: (id, value) => {
+        if (draft.aggregates.has(id)) throw new Error(`Aggregate already exists: ${id}`);
+        draft.aggregates.set(id, structuredClone(value));
+      },
+      appendEvent: (event) => {
+        if (draft.events.some((item) => item.aggregateId === event.aggregateId && item.aggregateVersion === event.aggregateVersion)) {
+          throw new Error(`Aggregate version already exists: ${event.aggregateId}@${event.aggregateVersion}`);
+        }
+        if (draft.events.some((item) => item.projectId === event.projectId && item.projectSequence === event.projectSequence)) {
+          throw new Error(`Project sequence already exists: ${event.projectId}@${event.projectSequence}`);
+        }
+        draft.events.push(structuredClone(event));
+      },
+      enqueue: (message) => {
+        if (draft.outbox.some((item) => item.id === message.id || item.eventId === message.eventId)) {
+          throw new Error(`Outbox event already exists: ${message.eventId}`);
+        }
+        draft.outbox.push(structuredClone(message));
+      },
+      getCommand: (key) => {
+        const command = draft.commands.get(key);
+        return command ? structuredClone(command) : undefined;
+      },
+      putCommand: (key, command) => {
+        if (draft.commands.has(key)) throw new Error(`Idempotency record already exists: ${key}`);
+        draft.commands.set(key, structuredClone(command));
+      },
+      nextProjectSequence: (projectId) => {
+        const next = (draft.projectSequences.get(projectId) ?? 0) + 1;
+        draft.projectSequences.set(projectId, next);
+        return next;
+      },
     };
 
     const result = operation(transaction);
@@ -47,35 +144,107 @@ export class InMemoryTransactionalStore {
   }
 
   snapshot(): Readonly<StoreState> {
-    return {
-      aggregates: new Map(this.#state.aggregates),
-      events: structuredClone(this.#state.events),
-      outbox: structuredClone(this.#state.outbox),
-    };
+    return cloneState(this.#state);
   }
 }
 
-export function recordNodeCreated(
+function required(name: string, value: string): void {
+  if (value.trim().length === 0) throw new Error(`${name} is required`);
+}
+
+function validateCommand(command: CreateNodeCommand): void {
+  for (const [name, value] of [
+    ["commandId", command.commandId],
+    ["idempotencyKey", command.idempotencyKey],
+    ["correlationId", command.correlationId],
+    ["actorId", command.actorId],
+    ["projectId", command.projectId],
+    ["nodeId", command.nodeId],
+    ["title", command.title],
+  ] as const) required(name, value);
+
+  if (!command.occurredAtUtc.endsWith("Z") || Number.isNaN(Date.parse(command.occurredAtUtc))) {
+    throw new Error("occurredAtUtc must be a valid UTC timestamp");
+  }
+}
+
+function commandKey(command: CreateNodeCommand): string {
+  return `${command.actorId}\u0000create_node\u0000${command.idempotencyKey}`;
+}
+
+function commandFingerprint(command: CreateNodeCommand): string {
+  return createHash("sha256").update(JSON.stringify({
+    projectId: command.projectId,
+    nodeId: command.nodeId,
+    title: command.title,
+    securityDomainId: command.securityDomainId,
+  })).digest("hex");
+}
+
+function injectFailure(expected: FailurePoint | undefined, actual: FailurePoint): void {
+  if (expected === actual) throw new Error(`Injected failure: ${actual}`);
+}
+
+export function executeCreateNode(
   store: InMemoryTransactionalStore,
-  input: { nodeId: string; projectId: string; title: string },
-  failAfterEvent = false,
-): void {
-  const eventId = `evt:${input.nodeId}:created`;
-  store.transaction((transaction) => {
-    transaction.putAggregate(input.nodeId, input);
-    transaction.appendEvent({
-      id: eventId,
-      aggregateId: input.nodeId,
-      type: "project-map.node.created.v1",
-      occurredAt: new Date().toISOString(),
-      payload: input,
-    });
-    if (failAfterEvent) throw new Error("Injected transaction failure");
-    transaction.enqueue({
-      id: `outbox:${eventId}`,
-      eventId,
-      topic: "project-map.node.created.v1",
-      payload: input,
-    });
+  command: CreateNodeCommand,
+  failurePoint?: FailurePoint,
+): CreateNodeResult {
+  validateCommand(command);
+  const idempotencyKey = commandKey(command);
+  const fingerprint = commandFingerprint(command);
+
+  return store.transaction((transaction) => {
+    const previous = transaction.getCommand(idempotencyKey);
+    if (previous) {
+      if (previous.fingerprint !== fingerprint) throw new Error("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD");
+      return { ...structuredClone(previous.result), replayed: true };
+    }
+
+    if (transaction.getAggregate(command.nodeId)) throw new Error(`Aggregate already exists: ${command.nodeId}`);
+    const projectSequence = transaction.nextProjectSequence(command.projectId);
+    const node: ProjectNode = {
+      id: command.nodeId,
+      projectId: command.projectId,
+      title: command.title,
+      securityDomainId: command.securityDomainId,
+      version: 1,
+    };
+    transaction.putAggregate(node.id, node);
+    injectFailure(failurePoint, "after_aggregate");
+
+    const event: DomainEvent = {
+      eventId: `evt:${command.commandId}`,
+      projectId: command.projectId,
+      projectSequence,
+      aggregateType: "project_node",
+      aggregateId: node.id,
+      aggregateVersion: node.version,
+      eventType: "project-map.node.created.v1",
+      actorId: command.actorId,
+      occurredAtUtc: command.occurredAtUtc,
+      correlationId: command.correlationId,
+      causationId: command.commandId,
+      originalSecurityDomainId: command.securityDomainId,
+      before: null,
+      after: node,
+      schemaVersion: 1,
+    };
+    transaction.appendEvent(event);
+    injectFailure(failurePoint, "after_event");
+
+    const outbox: OutboxMessage = {
+      id: `outbox:${event.eventId}`,
+      eventId: event.eventId,
+      topic: event.eventType,
+      payload: event,
+    };
+    transaction.enqueue(outbox);
+    injectFailure(failurePoint, "after_outbox");
+
+    const result = { node, event, outbox };
+    transaction.putCommand(idempotencyKey, { fingerprint, result });
+    injectFailure(failurePoint, "after_idempotency");
+    return { ...structuredClone(result), replayed: false };
   });
 }

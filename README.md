@@ -8,6 +8,7 @@ GitHub：<https://github.com/Superhedgehoger/project-process-map>
 
 - Product API 健康检查：`pnpm dev:api`
 - Worker 健康检查：`pnpm dev:worker`
+- 本地 Node/事件/Outbox 原子性与幂等原型：`pnpm test`
 - Phase 0 大样例与最小签字模板：`pnpm fixtures:generate`
 - Huly 基线文件检查：`pnpm huly:verify`
 - Huly ARM64 镜像锁检查：`pnpm huly:images`
@@ -21,6 +22,8 @@ GitHub：<https://github.com/Superhedgehoger/project-process-map>
 2. `P0-02`：在干净环境完成自托管部署并保存证据。
 3. `P0-03`：验证 Product API、Worker 和内存 Adapter 骨架。
 4. `P0-04/P0-05`：Huly Shell 页面以及 Node → Task → File 纵向演示。
+
+许可证审查未通过前，只推进不连接、不修改、不分发 Huly 的本地探索切片；这些证据不提前改变正式 Gate 状态。
 
 详见 `docs/phase0-status.md`。
 
