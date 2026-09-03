@@ -30,22 +30,9 @@ try {
   const tar = spawn("tar", ["-xzf", archive, "-C", temporaryRoot], { stdio: "inherit" });
   assert.equal(await exitCode(tar), 0);
   const installRoot = join(temporaryRoot, releaseName);
-  const child = spawn(join(installRoot, "bin", "project-process-map"), [], {
-    cwd: installRoot,
-    env: {
-      ...process.env,
-      HOST: "127.0.0.1",
-      PORT: "0",
-      PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin`,
-      WORKER_HEARTBEAT_MS: "60000",
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let stderr = "";
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk: string) => { stderr += chunk; });
-  assert.ok(child.stdout);
-  const ready = await waitForReady(child, child.stdout, 10_000, () => stderr);
+  const runtimeData = join(temporaryRoot, "runtime-data");
+  const firstRuntime = await startRelease(installRoot, fakeBin, runtimeData);
+  const { child, ready } = firstRuntime;
   assert.equal(ready.component, "product-runtime");
   assert.equal(ready.status, "ready");
   assert.ok(ready.url);
@@ -63,15 +50,66 @@ try {
   const created = await fetch(`${ready.url}/api/nodes/N-04/tasks`, {
     method: "POST",
     headers: { "content-type": "application/json", "idempotency-key": "native-smoke-task" },
-    body: JSON.stringify({ title: "无 Docker 启动验证" }),
+    body: JSON.stringify({ taskId: "native-smoke-task", title: "无 Docker 启动验证" }),
   });
   assert.equal(created.status, 201);
+  const attached = await fetch(`${ready.url}/api/tasks/native-smoke-task/files`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "native-smoke-asset" },
+    body: JSON.stringify({
+      fileId: "native-smoke-asset",
+      name: "restart-proof.txt",
+      contentType: "text/plain",
+      contentBase64: Buffer.from("survives native restart").toString("base64"),
+    }),
+  });
+  assert.equal(attached.status, 201);
   child.kill("SIGTERM");
-  assert.equal(await exitCode(child), 0, stderr);
+  assert.equal(await exitCode(child), 0, firstRuntime.stderr());
+
+  const secondRuntime = await startRelease(installRoot, fakeBin, runtimeData);
+  const detailResponse = await fetch(`${secondRuntime.ready.url}/api/nodes/N-04`);
+  assert.equal(detailResponse.status, 200);
+  const detail = await detailResponse.json() as { tasks: Array<{ id: string; files: Array<{ id: string }> }> };
+  assert.equal(detail.tasks.find((task) => task.id === "native-smoke-task")?.files[0]?.id, "native-smoke-asset");
+  secondRuntime.child.kill("SIGTERM");
+  assert.equal(await exitCode(secondRuntime.child), 0, secondRuntime.stderr());
   await assert.rejects(readFile(dockerMarker), { code: "ENOENT" });
-  console.log(JSON.stringify({ status: "ok", release: basename(archive), dockerInvoked: false, verticalPath: "page -> nodes -> task" }));
+  console.log(JSON.stringify({
+    status: "ok",
+    release: basename(archive),
+    dockerInvoked: false,
+    verticalPath: "page -> nodes -> task -> asset -> restart -> readback",
+    persistence: "sqlite+filesystem",
+  }));
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });
+}
+
+async function startRelease(
+  installRoot: string,
+  fakeBin: string,
+  runtimeData: string,
+): Promise<{ child: ReturnType<typeof spawn>; ready: ReadyMessage; stderr: () => string }> {
+  const child = spawn(join(installRoot, "bin", "project-process-map"), [], {
+    cwd: installRoot,
+    env: {
+      ...process.env,
+      HOST: "127.0.0.1",
+      PORT: "0",
+      PROJECT_DATA_DIR: runtimeData,
+      PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin`,
+      WORKER_HEARTBEAT_MS: "60000",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderrText = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => { stderrText += chunk; });
+  assert.ok(child.stdout);
+  const stderr = (): string => stderrText;
+  const ready = await waitForReady(child, child.stdout, 10_000, stderr);
+  return { child, ready, stderr };
 }
 
 async function waitForReady(

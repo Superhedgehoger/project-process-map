@@ -28,5 +28,9 @@
 - [CR-003：架构修正闸门](./change-records/CR-003-architecture-correction-gate.md)
 - [ADR-003：SaaS 租户、身份与领域权威边界](./adr/ADR-003-saas-domain-authorities.md)
 - [ADR-004：持久工作单元、Outbox 与集成任务](./adr/ADR-004-durable-uow-outbox-jobs.md)
+- [ADR-005：产品 Task 生命周期与项目树权威](./adr/ADR-005-task-and-tree-authority.md)
+- [ADR-006：安全域移动的持久迁移与权限交集](./adr/ADR-006-security-domain-migration.md)
+- [ADR-007：Asset 生命周期与 Evidence 绑定边界](./adr/ADR-007-asset-evidence-boundary.md)
+- [ADR-008：最小领域事件与 Schema 演进](./adr/ADR-008-event-schema-evolution.md)
 
 CR-002 与 CR-003 的产品负责人决定在权威顺序中高于尚未同步版本号的源功能契约。完成源 PRD、FC-016、架构、数据权限、Backlog 与测试计划同步后，登记新的 PRD/FC 版本；同步前不得把旧文档中的 Compose 描述解释为最终交付约束，也不得继续扩展已知会导致双权威和不可恢复写入的原型结构。

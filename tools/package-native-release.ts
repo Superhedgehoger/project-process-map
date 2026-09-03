@@ -39,9 +39,11 @@ Runtime requirement: Node.js 24 or later. Docker is not used.
 Start: ./bin/project-process-map
 Default URL: http://127.0.0.1:4100
 SaaS bind example: HOST=0.0.0.0 PORT=4100 ./bin/project-process-map
+Persistent data: PROJECT_DATA_DIR=./data (SQLite database and Asset content)
 
-This P0-ND-01 package is a native runtime feasibility artifact. It uses in-memory
-storage by default and is not yet the production SaaS release.
+This architecture-gate package runs without Docker and uses persistent SQLite plus
+filesystem Asset content by default. Production SaaS still requires the PostgreSQL,
+managed object storage, identity, TLS, backup and multi-replica release gates.
 `);
 
 execFileSync("tar", ["-czf", archive, "-C", releaseRoot, releaseName], { stdio: "inherit" });

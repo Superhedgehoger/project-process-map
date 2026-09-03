@@ -1,3 +1,6 @@
+import type { ExternalReference } from "../../../domain/src/external-reference.ts";
+import type { TenantId } from "../../../domain/src/identity.ts";
+
 /**
  * Application-owned ports for optional external collaboration providers.
  *
@@ -6,12 +9,7 @@
  */
 export type CollaborationTaskStatus = "todo" | "in_progress" | "completed" | "canceled";
 
-export type ExternalReference = Readonly<{
-  provider: string;
-  kind: string;
-  externalId: string;
-  schemaVersion: 1;
-}>;
+export type { ExternalReference } from "../../../domain/src/external-reference.ts";
 
 export type TaskProjectionRecord = {
   reference: ExternalReference;
@@ -73,6 +71,28 @@ export interface BlobStoragePort {
   health(): Promise<"ok" | "degraded">;
   upload(blob: UploadBlobProjection): Promise<ExternalBlobObject>;
   get(reference: ExternalReference): Promise<ExternalBlobObject | undefined>;
+  remove(reference: ExternalReference): Promise<void>;
+}
+
+export type PutAssetContent = Readonly<{
+  tenantId: TenantId;
+  requestId: string;
+  contentType: string;
+  bytes: Uint8Array;
+  sha256: string;
+}>;
+
+export type StoredAssetContent = Readonly<{
+  reference: ExternalReference;
+  contentType: string;
+  size: number;
+  sha256: string;
+  scanState: BlobScanState;
+}>;
+
+export interface AssetContentPort {
+  put(content: PutAssetContent): Promise<StoredAssetContent>;
+  get(reference: ExternalReference): Promise<StoredAssetContent | undefined>;
   remove(reference: ExternalReference): Promise<void>;
 }
 

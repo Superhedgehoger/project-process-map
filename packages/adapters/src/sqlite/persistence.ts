@@ -2,9 +2,13 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { Asset, AssetBinding } from "../../../domain/src/assets.ts";
 import type { BackgroundJob, DomainEvent, OutboxMessage } from "../../../domain/src/events.ts";
+import type { ExternalBinding } from "../../../domain/src/external-reference.ts";
 import { tenantId as parseTenantId, type TenantId } from "../../../domain/src/identity.ts";
+import type { IntegrationOperation, IntegrationStepAttempt } from "../../../domain/src/integration-operations.ts";
 import type { ProjectNode } from "../../../domain/src/project-structure.ts";
+import type { ProductTask, TaskReviewCycle } from "../../../domain/src/tasks.ts";
 import type {
   ClaimOptions,
   CommandReceipt,
@@ -137,6 +141,155 @@ export class SqlitePersistence implements Persistence {
             node.securityDomainId, node.securityEpoch, node.version, node.deletedAtUtc,
           );
         },
+      },
+      tasks: {
+        get: async (taskId) => {
+          const row = this.#database.prepare("SELECT task_json FROM product_tasks WHERE tenant_id = ? AND task_id = ?").get(tenantId, taskId);
+          return row === undefined ? undefined : parseJson<ProductTask>(asString(row.task_json));
+        },
+        listByNode: async (nodeId) => this.#database.prepare(`
+          SELECT task_json FROM product_tasks
+          WHERE tenant_id = ? AND owner_node_id = ?
+          ORDER BY task_id
+        `).all(tenantId, nodeId).map((row) => parseJson<ProductTask>(asString(row.task_json))),
+        insert: async (task) => {
+          assertTenant(tenantId, task.tenantId);
+          this.#database.prepare(`
+            INSERT INTO product_tasks (tenant_id, task_id, project_id, owner_node_id, lifecycle_state, version, task_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `).run(tenantId, task.id, task.projectId, task.ownerNodeId, task.executionState, task.version, JSON.stringify(task));
+        },
+        update: async (task, expectedVersion) => {
+          assertTenant(tenantId, task.tenantId);
+          if (task.version !== expectedVersion + 1) throw new Error("TASK_VERSION_CONFLICT");
+          const result = this.#database.prepare(`
+            UPDATE product_tasks
+            SET project_id = ?, owner_node_id = ?, lifecycle_state = ?, version = ?, task_json = ?
+            WHERE tenant_id = ? AND task_id = ? AND version = ?
+          `).run(task.projectId, task.ownerNodeId, task.executionState, task.version, JSON.stringify(task), tenantId, task.id, expectedVersion);
+          if (result.changes !== 1) throw new Error("TASK_VERSION_CONFLICT");
+        },
+        appendReviewCycle: async (cycle) => {
+          assertTenant(tenantId, cycle.tenantId);
+          this.#database.prepare(`
+            INSERT INTO task_review_actions (tenant_id, task_id, cycle, action, occurred_at_utc, action_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(tenantId, cycle.taskId, cycle.cycle, cycle.action, cycle.occurredAtUtc, JSON.stringify(cycle));
+        },
+        listReviewCycles: async (taskId) => this.#database.prepare(`
+          SELECT action_json FROM task_review_actions
+          WHERE tenant_id = ? AND task_id = ?
+          ORDER BY cycle, occurred_at_utc, action
+        `).all(tenantId, taskId).map((row) => parseJson<TaskReviewCycle>(asString(row.action_json))),
+      },
+      assets: {
+        get: async (assetId) => {
+          const row = this.#database.prepare("SELECT asset_json FROM assets WHERE tenant_id = ? AND asset_id = ?").get(tenantId, assetId);
+          return row === undefined ? undefined : parseJson<Asset>(asString(row.asset_json));
+        },
+        insert: async (asset) => {
+          assertTenant(tenantId, asset.tenantId);
+          this.#database.prepare(`
+            INSERT INTO assets (tenant_id, asset_id, project_id, owner_node_id, lifecycle_state, version, asset_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `).run(tenantId, asset.id, asset.projectId, asset.ownerNodeId, asset.lifecycleState, asset.version, JSON.stringify(asset));
+        },
+        update: async (asset, expectedVersion) => {
+          assertTenant(tenantId, asset.tenantId);
+          if (asset.version !== expectedVersion + 1) throw new Error("ASSET_VERSION_CONFLICT");
+          const result = this.#database.prepare(`
+            UPDATE assets
+            SET project_id = ?, owner_node_id = ?, lifecycle_state = ?, version = ?, asset_json = ?
+            WHERE tenant_id = ? AND asset_id = ? AND version = ?
+          `).run(asset.projectId, asset.ownerNodeId, asset.lifecycleState, asset.version, JSON.stringify(asset), tenantId, asset.id, expectedVersion);
+          if (result.changes !== 1) throw new Error("ASSET_VERSION_CONFLICT");
+        },
+        insertBinding: async (binding) => {
+          assertTenant(tenantId, binding.tenantId);
+          this.#database.prepare(`
+            INSERT INTO asset_bindings (tenant_id, binding_id, asset_id, target_type, target_id, binding_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(tenantId, binding.id, binding.assetId, binding.targetType, binding.targetId, JSON.stringify(binding));
+        },
+        listBindings: async (targetType, targetId) => this.#database.prepare(`
+          SELECT binding_json FROM asset_bindings
+          WHERE tenant_id = ? AND target_type = ? AND target_id = ?
+          ORDER BY binding_id
+        `).all(tenantId, targetType, targetId).map((row) => parseJson<AssetBinding>(asString(row.binding_json))),
+      },
+      externalBindings: {
+        getByOwner: async (ownerType, ownerId, role) => {
+          const row = this.#database.prepare(`
+            SELECT binding_json FROM external_bindings
+            WHERE tenant_id = ? AND owner_type = ? AND owner_id = ? AND role = ?
+          `).get(tenantId, ownerType, ownerId, role);
+          return row === undefined ? undefined : parseJson<ExternalBinding>(asString(row.binding_json));
+        },
+        insert: async (binding) => {
+          assertTenant(tenantId, binding.tenantId);
+          this.#database.prepare(`
+            INSERT INTO external_bindings (
+              tenant_id, binding_id, owner_type, owner_id, role, provider, kind, external_id, schema_version, version, binding_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            tenantId, binding.id, binding.ownerType, binding.ownerId, binding.role,
+            binding.reference.provider, binding.reference.kind, binding.reference.externalId,
+            binding.reference.schemaVersion, binding.version, JSON.stringify(binding),
+          );
+        },
+        update: async (binding, expectedVersion) => {
+          assertTenant(tenantId, binding.tenantId);
+          if (binding.version !== expectedVersion + 1) throw new Error("EXTERNAL_BINDING_VERSION_CONFLICT");
+          const result = this.#database.prepare(`
+            UPDATE external_bindings
+            SET provider = ?, kind = ?, external_id = ?, schema_version = ?, version = ?, binding_json = ?
+            WHERE tenant_id = ? AND binding_id = ? AND version = ?
+          `).run(
+            binding.reference.provider, binding.reference.kind, binding.reference.externalId,
+            binding.reference.schemaVersion, binding.version, JSON.stringify(binding), tenantId, binding.id, expectedVersion,
+          );
+          if (result.changes !== 1) throw new Error("EXTERNAL_BINDING_VERSION_CONFLICT");
+        },
+      },
+      integrationOperations: {
+        get: async (operationId) => {
+          const row = this.#database.prepare(`
+            SELECT operation_json FROM integration_operations WHERE tenant_id = ? AND operation_id = ?
+          `).get(tenantId, operationId);
+          return row === undefined ? undefined : parseJson<IntegrationOperation>(asString(row.operation_json));
+        },
+        insert: async (operation) => {
+          assertTenant(tenantId, operation.tenantId);
+          this.#database.prepare(`
+            INSERT INTO integration_operations (
+              tenant_id, operation_id, operation_type, subject_type, subject_id, state, version, operation_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            tenantId, operation.id, operation.operationType, operation.subjectType, operation.subjectId,
+            operation.state, operation.version, JSON.stringify(operation),
+          );
+        },
+        update: async (operation, expectedVersion) => {
+          assertTenant(tenantId, operation.tenantId);
+          if (operation.version !== expectedVersion + 1) throw new Error("INTEGRATION_OPERATION_VERSION_CONFLICT");
+          const result = this.#database.prepare(`
+            UPDATE integration_operations
+            SET state = ?, version = ?, operation_json = ?
+            WHERE tenant_id = ? AND operation_id = ? AND version = ?
+          `).run(operation.state, operation.version, JSON.stringify(operation), tenantId, operation.id, expectedVersion);
+          if (result.changes !== 1) throw new Error("INTEGRATION_OPERATION_VERSION_CONFLICT");
+        },
+        appendStep: async (attempt) => {
+          assertTenant(tenantId, attempt.tenantId);
+          this.#database.prepare(`
+            INSERT INTO integration_step_attempts (tenant_id, operation_id, sequence, attempt_json)
+            VALUES (?, ?, ?, ?)
+          `).run(tenantId, attempt.operationId, attempt.sequence, JSON.stringify(attempt));
+        },
+        listSteps: async (operationId) => this.#database.prepare(`
+          SELECT attempt_json FROM integration_step_attempts
+          WHERE tenant_id = ? AND operation_id = ? ORDER BY sequence
+        `).all(tenantId, operationId).map((row) => parseJson<IntegrationStepAttempt>(asString(row.attempt_json))),
       },
       receipts: {
         get: async <T>(scope: CommandScope) => {
@@ -273,6 +426,99 @@ export class SqlitePersistence implements Persistence {
         FOREIGN KEY (tenant_id, parent_node_id) REFERENCES project_nodes (tenant_id, node_id)
       ) STRICT;
       CREATE INDEX IF NOT EXISTS project_nodes_by_project ON project_nodes (tenant_id, project_id, node_id);
+
+      CREATE TABLE IF NOT EXISTS product_tasks (
+        tenant_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        owner_node_id TEXT NOT NULL,
+        lifecycle_state TEXT NOT NULL,
+        version INTEGER NOT NULL CHECK (version > 0),
+        task_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, task_id),
+        FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id),
+        FOREIGN KEY (tenant_id, owner_node_id) REFERENCES project_nodes (tenant_id, node_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS product_tasks_by_node ON product_tasks (tenant_id, owner_node_id, task_id);
+
+      CREATE TABLE IF NOT EXISTS task_review_actions (
+        tenant_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        cycle INTEGER NOT NULL CHECK (cycle > 0),
+        action TEXT NOT NULL,
+        occurred_at_utc TEXT NOT NULL,
+        action_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, task_id, cycle, action),
+        FOREIGN KEY (tenant_id, task_id) REFERENCES product_tasks (tenant_id, task_id)
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS assets (
+        tenant_id TEXT NOT NULL,
+        asset_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        owner_node_id TEXT NOT NULL,
+        lifecycle_state TEXT NOT NULL,
+        version INTEGER NOT NULL CHECK (version > 0),
+        asset_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, asset_id),
+        FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id),
+        FOREIGN KEY (tenant_id, owner_node_id) REFERENCES project_nodes (tenant_id, node_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS assets_by_node ON assets (tenant_id, owner_node_id, asset_id);
+
+      CREATE TABLE IF NOT EXISTS asset_bindings (
+        tenant_id TEXT NOT NULL,
+        binding_id TEXT NOT NULL,
+        asset_id TEXT NOT NULL,
+        target_type TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        binding_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, binding_id),
+        UNIQUE (tenant_id, asset_id, target_type, target_id),
+        FOREIGN KEY (tenant_id, asset_id) REFERENCES assets (tenant_id, asset_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS asset_bindings_by_target ON asset_bindings (tenant_id, target_type, target_id);
+
+      CREATE TABLE IF NOT EXISTS external_bindings (
+        tenant_id TEXT NOT NULL,
+        binding_id TEXT NOT NULL,
+        owner_type TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        external_id TEXT NOT NULL,
+        schema_version INTEGER NOT NULL,
+        version INTEGER NOT NULL CHECK (version > 0),
+        binding_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, binding_id),
+        UNIQUE (tenant_id, owner_type, owner_id, role),
+        UNIQUE (tenant_id, provider, kind, external_id)
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS integration_operations (
+        tenant_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        operation_type TEXT NOT NULL,
+        subject_type TEXT NOT NULL,
+        subject_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        version INTEGER NOT NULL CHECK (version > 0),
+        operation_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, operation_id),
+        FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS integration_operations_by_subject
+        ON integration_operations (tenant_id, subject_type, subject_id, operation_type);
+
+      CREATE TABLE IF NOT EXISTS integration_step_attempts (
+        tenant_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL CHECK (sequence > 0),
+        attempt_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, operation_id, sequence),
+        FOREIGN KEY (tenant_id, operation_id) REFERENCES integration_operations (tenant_id, operation_id)
+      ) STRICT;
 
       CREATE TABLE IF NOT EXISTS command_receipts (
         tenant_id TEXT NOT NULL,

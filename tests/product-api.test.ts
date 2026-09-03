@@ -70,6 +70,7 @@ test("P0-05-CT-009 Huly health reports configuration readiness without claiming 
     fileEndpoint: "http://huly.test/files",
     workspaceId: "workspace-1",
     hulyProjectId: "project-1",
+    hulyServiceToken: "service-token-reference-for-test",
   });
   const ready = await call(configured, "/health");
   assert.equal(ready.status, 200);

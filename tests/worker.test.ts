@@ -1,15 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { startWorker } from "../apps/worker/src/worker.ts";
-import { InMemoryTransactionalStore } from "../packages/domain/src/outbox.ts";
+import { MemoryPersistence } from "../packages/adapters/src/memory/persistence.ts";
 
-test("P0-ND-01 native worker starts and stops without an external supervisor", () => {
+test("ARCH-GATE-WORKER-001 native worker starts, claims queues and stops without an external supervisor", async () => {
   const messages: string[] = [];
-  const runtime = startWorker(new InMemoryTransactionalStore(), 60_000, (message) => messages.push(message));
+  const persistence = new MemoryPersistence();
+  const runtime = startWorker(
+    { outbox: persistence.outboxConsumer, jobs: persistence.jobConsumer },
+    60_000,
+    (message) => messages.push(message),
+    { workerId: "worker-test" },
+  );
+  await runtime.runOnce();
   runtime.stop();
-  assert.deepEqual(JSON.parse(messages[0] ?? "{}"), { component: "worker", status: "ready", outboxDepth: 0 });
+  assert.deepEqual(JSON.parse(messages[0] ?? "{}"), { component: "worker", status: "ready", workerId: "worker-test" });
+  assert.equal(messages.some((message) => (JSON.parse(message) as { status?: string }).status === "ok"), true);
+  await persistence.close();
 });
 
 test("P0-ND-01 native worker rejects an invalid heartbeat", () => {
-  assert.throws(() => startWorker(new InMemoryTransactionalStore(), 0), /heartbeat must be positive/);
+  const persistence = new MemoryPersistence();
+  assert.throws(
+    () => startWorker({ outbox: persistence.outboxConsumer, jobs: persistence.jobConsumer }, 0),
+    /heartbeat must be positive/,
+  );
 });

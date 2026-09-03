@@ -1,17 +1,20 @@
-import { InMemoryTransactionalStore } from "../../../packages/domain/src/outbox.ts";
-import { startProductApiServer } from "../../product-api/src/server.ts";
+import { createNativeDependencies, startProductApiServer } from "../../product-api/src/server.ts";
 import { startWorker } from "../../worker/src/worker.ts";
 
-const store = new InMemoryTransactionalStore();
+const dependencies = createNativeDependencies(process.env);
 const heartbeatMilliseconds = Number.parseInt(process.env.WORKER_HEARTBEAT_MS ?? "30000", 10);
-const worker = startWorker(store, heartbeatMilliseconds);
-const runtime = await startProductApiServer(process.env, store);
+const worker = startWorker({
+  outbox: dependencies.persistence.outboxConsumer,
+  jobs: dependencies.persistence.jobConsumer,
+}, heartbeatMilliseconds);
+const runtime = await startProductApiServer(process.env, dependencies);
 
 console.log(JSON.stringify({
   component: "product-runtime",
   status: "ready",
   url: `http://${runtime.host}:${runtime.port}`,
   adapterMode: process.env.ADAPTER_MODE === "huly" ? "huly" : "memory",
+  persistence: "sqlite",
 }));
 
 let stopping = false;
@@ -20,10 +23,12 @@ const stop = (): void => {
   stopping = true;
   worker.stop();
   runtime.server.close((error) => {
-    if (error !== undefined) {
-      console.error(JSON.stringify({ component: "product-runtime", status: "stop_failed", message: error.message }));
-      process.exitCode = 1;
-    }
+    void dependencies.persistence.close().then(() => {
+      if (error !== undefined) {
+        console.error(JSON.stringify({ component: "product-runtime", status: "stop_failed", message: error.message }));
+        process.exitCode = 1;
+      }
+    });
   });
 };
 

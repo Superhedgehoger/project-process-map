@@ -1,6 +1,10 @@
+import type { Asset, AssetBinding } from "../../../domain/src/assets.ts";
 import type { BackgroundJob, DomainEvent, OutboxMessage } from "../../../domain/src/events.ts";
+import type { ExternalBinding } from "../../../domain/src/external-reference.ts";
 import type { PrincipalId, TenantId } from "../../../domain/src/identity.ts";
+import type { IntegrationOperation, IntegrationStepAttempt } from "../../../domain/src/integration-operations.ts";
 import type { ProjectNode } from "../../../domain/src/project-structure.ts";
+import type { ProductTask, TaskReviewCycle } from "../../../domain/src/tasks.ts";
 
 export type CommandScope = Readonly<{
   principalId: PrincipalId;
@@ -26,6 +30,37 @@ export interface CommandReceiptRepository {
   insert<TResult>(receipt: CommandReceipt<TResult>): Promise<void>;
 }
 
+export interface TaskRepository {
+  get(taskId: string): Promise<ProductTask | undefined>;
+  listByNode(nodeId: string): Promise<ProductTask[]>;
+  insert(task: ProductTask): Promise<void>;
+  update(task: ProductTask, expectedVersion: number): Promise<void>;
+  appendReviewCycle(cycle: TaskReviewCycle): Promise<void>;
+  listReviewCycles(taskId: string): Promise<TaskReviewCycle[]>;
+}
+
+export interface AssetRepository {
+  get(assetId: string): Promise<Asset | undefined>;
+  insert(asset: Asset): Promise<void>;
+  update(asset: Asset, expectedVersion: number): Promise<void>;
+  insertBinding(binding: AssetBinding): Promise<void>;
+  listBindings(targetType: AssetBinding["targetType"], targetId: string): Promise<AssetBinding[]>;
+}
+
+export interface ExternalBindingRepository {
+  getByOwner(ownerType: ExternalBinding["ownerType"], ownerId: string, role: ExternalBinding["role"]): Promise<ExternalBinding | undefined>;
+  insert(binding: ExternalBinding): Promise<void>;
+  update(binding: ExternalBinding, expectedVersion: number): Promise<void>;
+}
+
+export interface IntegrationOperationRepository {
+  get(operationId: string): Promise<IntegrationOperation | undefined>;
+  insert(operation: IntegrationOperation): Promise<void>;
+  update(operation: IntegrationOperation, expectedVersion: number): Promise<void>;
+  appendStep(attempt: IntegrationStepAttempt): Promise<void>;
+  listSteps(operationId: string): Promise<IntegrationStepAttempt[]>;
+}
+
 export interface ProjectSequenceRepository {
   next(projectId: string): Promise<number>;
   current(projectId: string): Promise<number>;
@@ -46,6 +81,10 @@ export interface JobWriter {
 export type TransactionContext = Readonly<{
   tenantId: TenantId;
   nodes: ProjectNodeRepository;
+  tasks: TaskRepository;
+  assets: AssetRepository;
+  externalBindings: ExternalBindingRepository;
+  integrationOperations: IntegrationOperationRepository;
   receipts: CommandReceiptRepository;
   sequences: ProjectSequenceRepository;
   events: DomainEventWriter;
@@ -91,4 +130,3 @@ export interface JobConsumer {
     error: string,
   ): Promise<"retry" | "dead_letter" | "lease_lost">;
 }
-

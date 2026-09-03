@@ -1,55 +1,40 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import {
-  ApplicationError,
-  NodeTaskFileService,
-  type AttachTaskFileCommand,
-  type CreateTaskCommand,
-} from "../../../packages/application/src/node-task-file.ts";
-import {
-  InMemoryBlobAdapter,
-  InMemoryTaskAdapter,
-  InMemoryTaskFileAdapter,
-} from "../../../packages/adapters/src/in-memory.ts";
-import {
-  HulyRestBlobAdapter,
-  HulyRestTaskAdapter,
-  HulyRestTaskFileAdapter,
-  resolveHulyActorId,
-  type HulyRestConfig,
-} from "../../../packages/adapters/src/huly-rest.ts";
-import type { BlobAdapter, TaskAdapter, TaskFileAdapter, TaskAuthorityStatus } from "../../../packages/application/src/ports/integrations.ts";
-import { executeCreateNode, InMemoryTransactionalStore, type ProjectNode } from "../../../packages/domain/src/outbox.ts";
-import { buildHealthReport, buildHulyConfigurationReport } from "./health.ts";
+import { AttachTaskAssetHandler, listTaskAssets } from "../../../packages/application/src/assets/attach-task-asset.ts";
+import { executeCreateNode } from "../../../packages/application/src/create-node.ts";
+import { ApplicationError, asApplicationError } from "../../../packages/application/src/errors.ts";
+import type { AssetContentPort } from "../../../packages/application/src/ports/integrations.ts";
+import type { Persistence } from "../../../packages/application/src/ports/persistence.ts";
+import { CreateTaskHandler, listTasksForNode } from "../../../packages/application/src/tasks/create-task.ts";
+import { MemoryAssetContent } from "../../../packages/adapters/src/memory/asset-content.ts";
+import { MemoryPersistence } from "../../../packages/adapters/src/memory/persistence.ts";
+import { resolveHulyActorId, type HulyRestConfig } from "../../../packages/adapters/src/huly-rest.ts";
+import { principalId, tenantId, type PrincipalId, type TenantId } from "../../../packages/domain/src/identity.ts";
+import type { ProjectNode } from "../../../packages/domain/src/project-structure.ts";
+import { buildHulyConfigurationReport } from "./health.ts";
 import { productWebHtml } from "./web.ts";
 
 export type ProductApiOptions = {
   adapterMode: "memory" | "huly";
-  store?: InMemoryTransactionalStore;
+  persistence?: Persistence;
+  assetContent?: AssetContentPort;
+  tenantId?: TenantId;
   transactionEndpoint?: string | undefined;
   fileEndpoint?: string | undefined;
   workspaceId?: string | undefined;
   hulyProjectId?: string | undefined;
+  hulyServiceToken?: string | undefined;
   allowedOrigin?: string | undefined;
 };
 
-type AdapterContext = {
-  actorId: string;
-  taskAdapter: TaskAdapter;
-  blobAdapter: BlobAdapter;
-  taskFileAdapter: TaskFileAdapter;
-};
-
 type JsonBody = Record<string, unknown>;
+type RequestIdentity = Readonly<{ tenantId: TenantId; principalId: PrincipalId }>;
 
 export function createProductApi(options: ProductApiOptions) {
-  const store = options.store ?? new InMemoryTransactionalStore();
-  seedPhase0Nodes(store);
-  const memoryAdapters = {
-    taskAdapter: new InMemoryTaskAdapter(),
-    blobAdapter: new InMemoryBlobAdapter(),
-    taskFileAdapter: new InMemoryTaskFileAdapter(),
-  };
+  const persistence = options.persistence ?? new MemoryPersistence();
+  const content = options.assetContent ?? new MemoryAssetContent();
+  const productTenantId = options.tenantId ?? tenantId("phase0-tenant");
+  const ready = seedPhase0Nodes(persistence, productTenantId);
 
   return async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     setCors(response, options.allowedOrigin ?? "http://localhost:8089");
@@ -58,7 +43,6 @@ export function createProductApi(options: ProductApiOptions) {
       response.end();
       return;
     }
-
     try {
       const url = new URL(request.url ?? "/", "http://product-api.local");
       if (request.method === "GET" && url.pathname === "/") {
@@ -66,46 +50,59 @@ export function createProductApi(options: ProductApiOptions) {
         return;
       }
       if (request.method === "GET" && url.pathname === "/health") {
-        const report = options.adapterMode === "memory"
-          ? await buildHealthReport(memoryAdapters.taskAdapter, memoryAdapters.taskFileAdapter)
-          : buildHulyConfigurationReport(hulyConfigured(options));
+        const report = options.adapterMode === "huly"
+          ? buildHulyConfigurationReport(hulyConfigured(options))
+          : nativeHealthReport();
         sendJson(response, report.status === "ok" ? 200 : 503, { ...report, adapterMode: options.adapterMode });
         return;
       }
 
-      const context = await adapterContext(request, options, memoryAdapters);
-      const service = new NodeTaskFileService(store, context.taskAdapter, context.blobAdapter, context.taskFileAdapter);
+      await ready;
+      const identity = await requestIdentity(request, options, productTenantId);
       if (request.method === "GET" && url.pathname === "/api/nodes") {
-        sendJson(response, 200, store.listNodes().sort((left, right) => left.id.localeCompare(right.id)));
+        const nodes = await persistence.read(identity.tenantId, async (transaction) => await transaction.nodes.listByProject("phase0-project"));
+        sendJson(response, 200, nodes.map(publicNode).sort((left, right) => left.id.localeCompare(right.id)));
         return;
       }
+
       const detailMatch = url.pathname.match(/^\/api\/nodes\/([^/]+)$/);
       if (request.method === "GET" && detailMatch?.[1] !== undefined) {
-        sendJson(response, 200, await service.getNodeDetail(decodeURIComponent(detailMatch[1])));
+        const nodeId = decodeURIComponent(detailMatch[1]);
+        const node = await persistence.read(identity.tenantId, async (transaction) => await transaction.nodes.get(nodeId));
+        if (node === undefined) throw new ApplicationError("NODE_NOT_FOUND", `Node not found: ${nodeId}`);
+        const tasks = await listTasksForNode(persistence, identity.tenantId, nodeId);
+        const withAssets = await Promise.all(tasks.map(async (task) => ({
+          ...task,
+          files: await listTaskAssets(persistence, identity.tenantId, task.id),
+        })));
+        sendJson(response, 200, { node: publicNode(node), tasks: withAssets });
         return;
       }
 
       const taskMatch = url.pathname.match(/^\/api\/nodes\/([^/]+)\/tasks$/);
       if (request.method === "POST" && taskMatch?.[1] !== undefined) {
         const nodeId = decodeURIComponent(taskMatch[1]);
-        const node = store.getNode(nodeId);
+        const node = await persistence.read(identity.tenantId, async (transaction) => await transaction.nodes.get(nodeId));
         if (node === undefined) throw new ApplicationError("NODE_NOT_FOUND", `Node not found: ${nodeId}`);
         const body = await readJson(request);
         const idempotencyKey = requiredHeader(request, "idempotency-key");
-        const actorKey = `${context.actorId}\u0000${idempotencyKey}`;
-        const command: CreateTaskCommand = {
-          commandId: deterministicPublicId("cmd-task", actorKey),
+        const principalKey = `${identity.tenantId}\u0000${identity.principalId}\u0000${idempotencyKey}`;
+        const result = await new CreateTaskHandler(persistence, {
+          scheduleCollaborationProjection: options.adapterMode === "huly",
+        }).execute({
+          tenantId: identity.tenantId,
+          commandId: deterministicPublicId("cmd-task", principalKey),
           idempotencyKey,
           correlationId: request.headers["x-correlation-id"]?.toString() ?? randomUUID(),
-          actorId: context.actorId,
+          principalId: identity.principalId,
           projectId: node.projectId,
           nodeId,
-          taskId: optionalString(body.taskId) ?? deterministicPublicId("task", actorKey),
+          taskId: optionalString(body.taskId) ?? deterministicPublicId("task", principalKey),
           title: requiredString(body, "title"),
-          status: parseTaskStatus(body.status),
+          assigneePrincipalId: null,
+          requiresAcceptance: body.requiresAcceptance === true,
           occurredAtUtc: new Date().toISOString(),
-        };
-        const result = await service.createTask(command);
+        });
         sendJson(response, result.replayed ? 200 : 201, result);
         return;
       }
@@ -113,53 +110,48 @@ export function createProductApi(options: ProductApiOptions) {
       const fileMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/files$/);
       if (request.method === "POST" && fileMatch?.[1] !== undefined) {
         const taskId = decodeURIComponent(fileMatch[1]);
+        const task = await persistence.read(identity.tenantId, async (transaction) => await transaction.tasks.get(taskId));
+        if (task === undefined) throw new ApplicationError("TASK_NOT_FOUND", `Task not found: ${taskId}`);
         const body = await readJson(request);
         const idempotencyKey = requiredHeader(request, "idempotency-key");
-        const actorKey = `${context.actorId}\u0000${idempotencyKey}`;
+        const principalKey = `${identity.tenantId}\u0000${identity.principalId}\u0000${idempotencyKey}`;
         const contentBase64 = requiredString(body, "contentBase64");
         const bytes = Uint8Array.from(Buffer.from(contentBase64, "base64"));
         if (bytes.byteLength === 0 || bytes.byteLength > 2 * 1024 * 1024) {
           throw new ApplicationError("FILE_SIZE_INVALID", "Phase 0 files must be between 1 byte and 2 MiB");
         }
-        const mapping = store.getProjection<{ projectId: string }>("node_task_mapping", taskId);
-        if (mapping === undefined) throw new ApplicationError("TASK_NOT_FOUND", `Task not found: ${taskId}`);
-        const command: AttachTaskFileCommand = {
-          commandId: deterministicPublicId("cmd-file", actorKey),
+        const occurredAtUtc = new Date().toISOString();
+        const result = await new AttachTaskAssetHandler(persistence, content, {
+          scheduleCollaborationProjection: options.adapterMode === "huly",
+        }).execute({
+          tenantId: identity.tenantId,
+          commandId: deterministicPublicId("cmd-asset", principalKey),
           idempotencyKey,
           correlationId: request.headers["x-correlation-id"]?.toString() ?? randomUUID(),
-          actorId: context.actorId,
-          projectId: mapping.projectId,
+          principalId: identity.principalId,
+          projectId: task.projectId,
           taskId,
-          fileId: optionalString(body.fileId) ?? deterministicPublicId("file", actorKey),
-          name: requiredString(body, "name"),
+          assetId: optionalString(body.fileId) ?? deterministicPublicId("asset", principalKey),
+          displayName: requiredString(body, "name"),
           contentType: requiredString(body, "contentType"),
           bytes,
           sha256: optionalString(body.sha256) ?? createHash("sha256").update(bytes).digest("hex"),
-          occurredAtUtc: new Date().toISOString(),
-        };
-        const result = await service.attachTaskFile(command);
+          occurredAtUtc,
+          deadlineAtUtc: new Date(Date.parse(occurredAtUtc) + 5 * 60_000).toISOString(),
+        });
         sendJson(response, result.replayed ? 200 : 201, result);
         return;
       }
 
       sendJson(response, 404, { code: "NOT_FOUND", message: "Route not found" });
-    } catch (error) {
-      const status = httpStatus(error);
-      sendJson(response, status, {
-        code: error instanceof ApplicationError ? error.code : status === 401 ? "UNAUTHORIZED" : "UPSTREAM_FAILURE",
-        message: error instanceof Error ? error.message : String(error),
-      });
+    } catch (cause) {
+      const error = asApplicationError(cause);
+      sendJson(response, httpStatus(error), { code: error.code, message: error.message });
     }
   };
 }
 
-function hulyConfigured(options: ProductApiOptions): boolean {
-  return options.transactionEndpoint !== undefined
-    && options.fileEndpoint !== undefined
-    && options.hulyProjectId !== undefined;
-}
-
-export function seedPhase0Nodes(store: InMemoryTransactionalStore): void {
+export async function seedPhase0Nodes(persistence: Persistence, productTenantId: TenantId): Promise<void> {
   const nodes: Array<Pick<ProjectNode, "id" | "title" | "kind">> = [
     { id: "N-01", title: "项目启动", kind: "stage" },
     { id: "N-02", title: "需求澄清", kind: "stage" },
@@ -169,14 +161,16 @@ export function seedPhase0Nodes(store: InMemoryTransactionalStore): void {
     { id: "N-06", title: "发布复盘", kind: "milestone" },
   ];
   for (const [index, node] of nodes.entries()) {
-    if (store.getNode(node.id) !== undefined) continue;
-    executeCreateNode(store, {
+    if (await persistence.read(productTenantId, async (transaction) => await transaction.nodes.get(node.id)) !== undefined) continue;
+    await executeCreateNode(persistence, {
+      tenantId: productTenantId,
       commandId: `phase0-node-${index + 1}`,
       idempotencyKey: `phase0-node-${index + 1}`,
       correlationId: "phase0-seed",
-      actorId: "phase0-system",
+      principalId: principalId("phase0-system"),
       projectId: "phase0-project",
       nodeId: node.id,
+      parentId: null,
       title: node.title,
       kind: node.kind,
       securityDomainId: null,
@@ -185,33 +179,50 @@ export function seedPhase0Nodes(store: InMemoryTransactionalStore): void {
   }
 }
 
-async function adapterContext(
-  request: IncomingMessage,
-  options: ProductApiOptions,
-  memory: Omit<AdapterContext, "actorId">,
-): Promise<AdapterContext> {
-  if (options.adapterMode === "memory") return { actorId: "phase0-user", ...memory };
+async function requestIdentity(request: IncomingMessage, options: ProductApiOptions, productTenantId: TenantId): Promise<RequestIdentity> {
+  if (options.adapterMode === "memory") return { tenantId: productTenantId, principalId: principalId("phase0-user") };
   const authorization = request.headers.authorization;
   if (authorization === undefined || !authorization.startsWith("Bearer ")) throw new ApplicationError("UNAUTHORIZED", "Bearer token is required");
   const actorToken = authorization.slice("Bearer ".length).trim();
   if (actorToken.length === 0) throw new ApplicationError("UNAUTHORIZED", "Bearer token is required");
-  const workspaceId = options.workspaceId ?? request.headers["x-huly-workspace"]?.toString();
-  if (workspaceId === undefined) throw new ApplicationError("HULY_WORKSPACE_REQUIRED", "Huly workspace is required");
-  if (options.transactionEndpoint === undefined || options.fileEndpoint === undefined || options.hulyProjectId === undefined) {
-    throw new ApplicationError("HULY_ADAPTER_NOT_CONFIGURED", "Huly adapter endpoints and project are required");
+  if (options.transactionEndpoint === undefined || options.fileEndpoint === undefined || options.workspaceId === undefined || options.hulyProjectId === undefined) {
+    throw new ApplicationError("HULY_ADAPTER_NOT_CONFIGURED", "Huly connection is not configured");
   }
   const config: HulyRestConfig = {
     transactionEndpoint: options.transactionEndpoint,
     fileEndpoint: options.fileEndpoint,
-    workspaceId,
+    workspaceId: options.workspaceId,
     projectId: options.hulyProjectId,
     actorToken,
   };
+  const externalActor = await resolveHulyActorId(config);
   return {
-    actorId: await resolveHulyActorId(config),
-    taskAdapter: new HulyRestTaskAdapter(config),
-    blobAdapter: new HulyRestBlobAdapter(config),
-    taskFileAdapter: new HulyRestTaskFileAdapter(config),
+    tenantId: productTenantId,
+    principalId: principalId(`principal-${createHash("sha256").update(`${options.workspaceId}\u0000${externalActor}`).digest("hex").slice(0, 24)}`),
+  };
+}
+
+function publicNode(node: ProjectNode): Pick<ProjectNode, "id" | "projectId" | "parentId" | "title" | "kind" | "version"> {
+  return { id: node.id, projectId: node.projectId, parentId: node.parentId, title: node.title, kind: node.kind, version: node.version };
+}
+
+function hulyConfigured(options: ProductApiOptions): boolean {
+  return options.transactionEndpoint !== undefined
+    && options.fileEndpoint !== undefined
+    && options.workspaceId !== undefined
+    && options.hulyProjectId !== undefined
+    && options.hulyServiceToken !== undefined;
+}
+
+function nativeHealthReport() {
+  return {
+    status: "ok" as const,
+    checkedAt: new Date().toISOString(),
+    components: [
+      { component: "product-api", status: "ok" as const, version: "0.0.1" },
+      { component: "persistence", status: "ok" as const, version: "application-port" },
+      { component: "asset-content", status: "ok" as const, version: "application-port" },
+    ],
   };
 }
 
@@ -249,30 +260,31 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-function parseTaskStatus(value: unknown): TaskAuthorityStatus {
-  const status = value ?? "todo";
-  if (status === "todo" || status === "in_progress" || status === "completed" || status === "canceled") return status;
-  throw new ApplicationError("VALIDATION_FAILED", "status is invalid for an authority task");
-}
-
 function deterministicPublicId(prefix: string, key: string): string {
   return `${prefix}-${createHash("sha256").update(key).digest("hex").slice(0, 16)}`;
 }
 
-function httpStatus(error: unknown): number {
-  if (!(error instanceof ApplicationError)) return 502;
-  if (error.code === "UNAUTHORIZED") return 401;
-  if (error.code.endsWith("NOT_FOUND")) return 404;
-  if (error.code.includes("ALREADY_EXISTS") || error.code === "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD" || error.code.includes("RECOVERY")) return 409;
-  if (error.code.includes("CONFIGURED") || error.code.includes("WORKSPACE_REQUIRED")) return 503;
-  return 422;
+function httpStatus(error: ApplicationError): number {
+  const statuses: Partial<Record<ApplicationError["code"], number>> = {
+    UNAUTHORIZED: 401,
+    NOT_FOUND: 404,
+    NODE_NOT_FOUND: 404,
+    TASK_NOT_FOUND: 404,
+    TASK_ALREADY_EXISTS: 409,
+    ASSET_ALREADY_EXISTS: 409,
+    IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD: 409,
+    CONFLICT: 409,
+    HULY_ADAPTER_NOT_CONFIGURED: 503,
+    UPSTREAM_FAILURE: 502,
+  };
+  return statuses[error.code] ?? 422;
 }
 
 function setCors(response: ServerResponse, origin: string): void {
   response.setHeader("access-control-allow-origin", origin);
   response.setHeader("vary", "origin");
   response.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
-  response.setHeader("access-control-allow-headers", "authorization,content-type,idempotency-key,x-correlation-id,x-huly-workspace");
+  response.setHeader("access-control-allow-headers", "authorization,content-type,idempotency-key,x-correlation-id");
 }
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {

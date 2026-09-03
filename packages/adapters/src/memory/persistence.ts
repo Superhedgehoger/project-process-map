@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
+import type { Asset, AssetBinding } from "../../../domain/src/assets.ts";
 import type { BackgroundJob, DomainEvent, OutboxMessage } from "../../../domain/src/events.ts";
+import type { ExternalBinding } from "../../../domain/src/external-reference.ts";
 import type { TenantId } from "../../../domain/src/identity.ts";
+import type { IntegrationOperation, IntegrationStepAttempt } from "../../../domain/src/integration-operations.ts";
 import type { ProjectNode } from "../../../domain/src/project-structure.ts";
+import type { ProductTask, TaskReviewCycle } from "../../../domain/src/tasks.ts";
 import type {
   ClaimOptions,
   CommandReceipt,
@@ -14,6 +18,13 @@ import type {
 
 type MemoryState = {
   nodes: Map<string, ProjectNode>;
+  tasks: Map<string, ProductTask>;
+  reviewCycles: Map<string, TaskReviewCycle>;
+  assets: Map<string, Asset>;
+  assetBindings: Map<string, AssetBinding>;
+  externalBindings: Map<string, ExternalBinding>;
+  operations: Map<string, IntegrationOperation>;
+  operationSteps: Map<string, IntegrationStepAttempt>;
   receipts: Map<string, CommandReceipt>;
   sequences: Map<string, number>;
   events: Map<string, DomainEvent>;
@@ -27,6 +38,13 @@ type MemoryState = {
 function emptyState(): MemoryState {
   return {
     nodes: new Map(),
+    tasks: new Map(),
+    reviewCycles: new Map(),
+    assets: new Map(),
+    assetBindings: new Map(),
+    externalBindings: new Map(),
+    operations: new Map(),
+    operationSteps: new Map(),
     receipts: new Map(),
     sequences: new Map(),
     events: new Map(),
@@ -41,6 +59,13 @@ function emptyState(): MemoryState {
 function cloneState(state: MemoryState): MemoryState {
   return {
     nodes: new Map(structuredClone([...state.nodes])),
+    tasks: new Map(structuredClone([...state.tasks])),
+    reviewCycles: new Map(structuredClone([...state.reviewCycles])),
+    assets: new Map(structuredClone([...state.assets])),
+    assetBindings: new Map(structuredClone([...state.assetBindings])),
+    externalBindings: new Map(structuredClone([...state.externalBindings])),
+    operations: new Map(structuredClone([...state.operations])),
+    operationSteps: new Map(structuredClone([...state.operationSteps])),
     receipts: new Map(structuredClone([...state.receipts])),
     sequences: new Map(state.sequences),
     events: new Map(structuredClone([...state.events])),
@@ -143,6 +168,110 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
         state.nodes.set(key, structuredClone(node));
       },
     },
+    tasks: {
+      get: async (taskId) => clone(state.tasks.get(`${tenantPrefix}${taskId}`)),
+      listByNode: async (nodeId) => [...state.tasks.values()]
+        .filter((task) => task.tenantId === tenantId && task.ownerNodeId === nodeId)
+        .map((task) => structuredClone(task)),
+      insert: async (task) => {
+        assertTenant(tenantId, task.tenantId);
+        const key = `${tenantPrefix}${task.id}`;
+        if (state.tasks.has(key)) throw new Error("TASK_ALREADY_EXISTS");
+        state.tasks.set(key, structuredClone(task));
+      },
+      update: async (task, expectedVersion) => {
+        assertTenant(tenantId, task.tenantId);
+        const key = `${tenantPrefix}${task.id}`;
+        const existing = state.tasks.get(key);
+        if (existing === undefined) throw new Error("TASK_NOT_FOUND");
+        if (existing.version !== expectedVersion || task.version !== expectedVersion + 1) throw new Error("TASK_VERSION_CONFLICT");
+        state.tasks.set(key, structuredClone(task));
+      },
+      appendReviewCycle: async (cycle) => {
+        assertTenant(tenantId, cycle.tenantId);
+        const key = `${tenantPrefix}${cycle.taskId}\u0000${cycle.cycle}\u0000${cycle.action}`;
+        if (state.reviewCycles.has(key)) throw new Error("TASK_REVIEW_ACTION_ALREADY_EXISTS");
+        state.reviewCycles.set(key, structuredClone(cycle));
+      },
+      listReviewCycles: async (taskId) => [...state.reviewCycles.values()]
+        .filter((cycle) => cycle.tenantId === tenantId && cycle.taskId === taskId)
+        .sort((left, right) => left.cycle - right.cycle || left.occurredAtUtc.localeCompare(right.occurredAtUtc))
+        .map((cycle) => structuredClone(cycle)),
+    },
+    assets: {
+      get: async (assetId) => clone(state.assets.get(`${tenantPrefix}${assetId}`)),
+      insert: async (asset) => {
+        assertTenant(tenantId, asset.tenantId);
+        const key = `${tenantPrefix}${asset.id}`;
+        if (state.assets.has(key)) throw new Error("ASSET_ALREADY_EXISTS");
+        state.assets.set(key, structuredClone(asset));
+      },
+      update: async (asset, expectedVersion) => {
+        assertTenant(tenantId, asset.tenantId);
+        const key = `${tenantPrefix}${asset.id}`;
+        const existing = state.assets.get(key);
+        if (existing === undefined) throw new Error("ASSET_NOT_FOUND");
+        if (existing.version !== expectedVersion || asset.version !== expectedVersion + 1) throw new Error("ASSET_VERSION_CONFLICT");
+        state.assets.set(key, structuredClone(asset));
+      },
+      insertBinding: async (binding) => {
+        assertTenant(tenantId, binding.tenantId);
+        const key = `${tenantPrefix}${binding.id}`;
+        if (state.assetBindings.has(key)) throw new Error("ASSET_BINDING_ALREADY_EXISTS");
+        state.assetBindings.set(key, structuredClone(binding));
+      },
+      listBindings: async (targetType, targetId) => [...state.assetBindings.values()]
+        .filter((binding) => binding.tenantId === tenantId && binding.targetType === targetType && binding.targetId === targetId)
+        .map((binding) => structuredClone(binding)),
+    },
+    externalBindings: {
+      getByOwner: async (ownerType, ownerId, role) => clone([...state.externalBindings.values()].find(
+        (binding) => binding.tenantId === tenantId && binding.ownerType === ownerType && binding.ownerId === ownerId && binding.role === role,
+      )),
+      insert: async (binding) => {
+        assertTenant(tenantId, binding.tenantId);
+        const ownerKey = externalOwnerKey(tenantId, binding.ownerType, binding.ownerId, binding.role);
+        if ([...state.externalBindings.values()].some((item) => externalOwnerKey(item.tenantId, item.ownerType, item.ownerId, item.role) === ownerKey)) {
+          throw new Error("EXTERNAL_BINDING_ALREADY_EXISTS");
+        }
+        state.externalBindings.set(`${tenantPrefix}${binding.id}`, structuredClone(binding));
+      },
+      update: async (binding, expectedVersion) => {
+        assertTenant(tenantId, binding.tenantId);
+        const key = `${tenantPrefix}${binding.id}`;
+        const existing = state.externalBindings.get(key);
+        if (existing === undefined) throw new Error("EXTERNAL_BINDING_NOT_FOUND");
+        if (existing.version !== expectedVersion || binding.version !== expectedVersion + 1) throw new Error("EXTERNAL_BINDING_VERSION_CONFLICT");
+        state.externalBindings.set(key, structuredClone(binding));
+      },
+    },
+    integrationOperations: {
+      get: async (operationId) => clone(state.operations.get(`${tenantPrefix}${operationId}`)),
+      insert: async (operation) => {
+        assertTenant(tenantId, operation.tenantId);
+        const key = `${tenantPrefix}${operation.id}`;
+        if (state.operations.has(key)) throw new Error("INTEGRATION_OPERATION_ALREADY_EXISTS");
+        state.operations.set(key, structuredClone(operation));
+      },
+      update: async (operation, expectedVersion) => {
+        assertTenant(tenantId, operation.tenantId);
+        const key = `${tenantPrefix}${operation.id}`;
+        const existing = state.operations.get(key);
+        if (existing === undefined) throw new Error("INTEGRATION_OPERATION_NOT_FOUND");
+        if (existing.version !== expectedVersion || operation.version !== expectedVersion + 1) throw new Error("INTEGRATION_OPERATION_VERSION_CONFLICT");
+        state.operations.set(key, structuredClone(operation));
+      },
+      appendStep: async (attempt) => {
+        assertTenant(tenantId, attempt.tenantId);
+        const key = `${tenantPrefix}${attempt.operationId}\u0000${attempt.sequence}`;
+        if (state.operationSteps.has(key)) throw new Error("INTEGRATION_STEP_ALREADY_EXISTS");
+        state.operationSteps.set(key, structuredClone(attempt));
+      },
+      listSteps: async (operationId) => [...state.operationSteps.values()]
+        .filter((attempt) => attempt.tenantId === tenantId && attempt.operationId === operationId)
+        .sort((left, right) => left.sequence - right.sequence)
+        .map((attempt) => structuredClone(attempt)),
+    },
     receipts: {
       get: async <T>(scope: CommandScope) => clone(state.receipts.get(receiptKey(tenantId, scope))) as CommandReceipt<T> | undefined,
       insert: async (receipt) => {
@@ -206,6 +335,10 @@ function clone<T>(value: T | undefined): T | undefined {
 
 function receiptKey(tenantId: TenantId, scope: CommandScope): string {
   return `${tenantId}\u0000${scope.principalId}\u0000${scope.operation}\u0000${scope.idempotencyKey}`;
+}
+
+function externalOwnerKey(tenantId: TenantId, ownerType: ExternalBinding["ownerType"], ownerId: string, role: ExternalBinding["role"]): string {
+  return `${tenantId}\u0000${ownerType}\u0000${ownerId}\u0000${role}`;
 }
 
 function assertTenant(expected: TenantId, actual: TenantId): void {
