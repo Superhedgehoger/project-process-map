@@ -4,33 +4,48 @@ export type ProjectNode = {
   id: string;
   projectId: string;
   title: string;
+  kind: "stage" | "work_package" | "milestone";
   securityDomainId: string | null;
   version: number;
 };
 
-export type DomainEvent = {
+export type EventEnvelope<
+  TAggregateType extends string,
+  TEventType extends string,
+  TBefore,
+  TAfter,
+> = {
   eventId: string;
   projectId: string;
   projectSequence: number;
-  aggregateType: "project_node";
+  aggregateType: TAggregateType;
   aggregateId: string;
   aggregateVersion: number;
-  eventType: "project-map.node.created.v1";
+  eventType: TEventType;
   actorId: string;
   occurredAtUtc: string;
   correlationId: string;
   causationId: string;
   originalSecurityDomainId: string | null;
-  before: null;
-  after: Readonly<ProjectNode>;
+  before: TBefore;
+  after: TAfter;
   schemaVersion: 1;
 };
 
-export type OutboxMessage = {
+export type DomainEvent = EventEnvelope<
+  "project_node",
+  "project-map.node.created.v1",
+  null,
+  Readonly<ProjectNode>
+>;
+
+export type AnyDomainEvent = EventEnvelope<string, string, unknown, unknown>;
+
+export type OutboxMessage<TEvent extends AnyDomainEvent = DomainEvent> = {
   id: string;
   eventId: string;
   topic: string;
-  payload: Readonly<DomainEvent>;
+  payload: Readonly<TEvent>;
   publishedAt?: string;
 };
 
@@ -42,6 +57,7 @@ export type CreateNodeCommand = {
   projectId: string;
   nodeId: string;
   title: string;
+  kind?: ProjectNode["kind"];
   securityDomainId: string | null;
   occurredAtUtc: string;
 };
@@ -55,27 +71,32 @@ export type CreateNodeResult = {
 
 export type FailurePoint = "after_aggregate" | "after_event" | "after_outbox" | "after_idempotency";
 
-type StoredCommand = {
+type StoredCommand<TResult = unknown> = {
   fingerprint: string;
-  result: Omit<CreateNodeResult, "replayed">;
+  result: TResult;
 };
 
 type StoreState = {
   aggregates: Map<string, Readonly<ProjectNode>>;
-  events: DomainEvent[];
-  outbox: OutboxMessage[];
+  events: AnyDomainEvent[];
+  outbox: OutboxMessage<AnyDomainEvent>[];
   commands: Map<string, StoredCommand>;
   projectSequences: Map<string, number>;
+  projections: Map<string, Map<string, unknown>>;
 };
 
 export type Transaction = {
   getAggregate(id: string): Readonly<ProjectNode> | undefined;
   putAggregate(id: string, value: Readonly<ProjectNode>): void;
-  appendEvent(event: DomainEvent): void;
-  enqueue(message: OutboxMessage): void;
-  getCommand(key: string): StoredCommand | undefined;
-  putCommand(key: string, command: StoredCommand): void;
+  appendEvent(event: AnyDomainEvent): void;
+  enqueue(message: OutboxMessage<AnyDomainEvent>): void;
+  getCommand<TResult>(key: string): StoredCommand<TResult> | undefined;
+  putCommand<TResult>(key: string, command: StoredCommand<TResult>): void;
   nextProjectSequence(projectId: string): number;
+  getProjection<T>(namespace: string, id: string): Readonly<T> | undefined;
+  putProjection<T>(namespace: string, id: string, value: Readonly<T>): void;
+  setProjection<T>(namespace: string, id: string, value: Readonly<T>): void;
+  deleteProjection(namespace: string, id: string): void;
 };
 
 function cloneState(state: StoreState): StoreState {
@@ -85,6 +106,7 @@ function cloneState(state: StoreState): StoreState {
     outbox: structuredClone(state.outbox),
     commands: new Map(structuredClone([...state.commands])),
     projectSequences: new Map(state.projectSequences),
+    projections: new Map(structuredClone([...state.projections])),
   };
 }
 
@@ -95,6 +117,7 @@ export class InMemoryTransactionalStore {
     outbox: [],
     commands: new Map(),
     projectSequences: new Map(),
+    projections: new Map(),
   };
 
   transaction<T>(operation: (transaction: Transaction) => T): T {
@@ -125,7 +148,7 @@ export class InMemoryTransactionalStore {
       },
       getCommand: (key) => {
         const command = draft.commands.get(key);
-        return command ? structuredClone(command) : undefined;
+        return command ? structuredClone(command) as never : undefined;
       },
       putCommand: (key, command) => {
         if (draft.commands.has(key)) throw new Error(`Idempotency record already exists: ${key}`);
@@ -136,6 +159,24 @@ export class InMemoryTransactionalStore {
         draft.projectSequences.set(projectId, next);
         return next;
       },
+      getProjection: <T>(namespace: string, id: string) => {
+        const projection = draft.projections.get(namespace)?.get(id) as T | undefined;
+        return projection === undefined ? undefined : structuredClone(projection);
+      },
+      putProjection: <T>(namespace: string, id: string, value: Readonly<T>) => {
+        const projections = draft.projections.get(namespace) ?? new Map<string, unknown>();
+        if (projections.has(id)) throw new Error(`Projection already exists: ${namespace}/${id}`);
+        projections.set(id, structuredClone(value));
+        draft.projections.set(namespace, projections);
+      },
+      setProjection: <T>(namespace: string, id: string, value: Readonly<T>) => {
+        const projections = draft.projections.get(namespace) ?? new Map<string, unknown>();
+        projections.set(id, structuredClone(value));
+        draft.projections.set(namespace, projections);
+      },
+      deleteProjection: (namespace: string, id: string) => {
+        draft.projections.get(namespace)?.delete(id);
+      },
     };
 
     const result = operation(transaction);
@@ -145,6 +186,21 @@ export class InMemoryTransactionalStore {
 
   snapshot(): Readonly<StoreState> {
     return cloneState(this.#state);
+  }
+
+  getNode(id: string): Readonly<ProjectNode> | undefined {
+    const node = this.#state.aggregates.get(id);
+    return node === undefined ? undefined : structuredClone(node);
+  }
+
+  getProjection<T>(namespace: string, id: string): Readonly<T> | undefined {
+    const projection = this.#state.projections.get(namespace)?.get(id) as T | undefined;
+    return projection === undefined ? undefined : structuredClone(projection);
+  }
+
+  listProjections<T>(namespace: string): Readonly<T>[] {
+    return [...(this.#state.projections.get(namespace)?.values() ?? [])]
+      .map((projection) => structuredClone(projection as T));
   }
 }
 
@@ -177,6 +233,7 @@ function commandFingerprint(command: CreateNodeCommand): string {
     projectId: command.projectId,
     nodeId: command.nodeId,
     title: command.title,
+    kind: command.kind ?? "work_package",
     securityDomainId: command.securityDomainId,
   })).digest("hex");
 }
@@ -195,7 +252,7 @@ export function executeCreateNode(
   const fingerprint = commandFingerprint(command);
 
   return store.transaction((transaction) => {
-    const previous = transaction.getCommand(idempotencyKey);
+    const previous = transaction.getCommand<Omit<CreateNodeResult, "replayed">>(idempotencyKey);
     if (previous) {
       if (previous.fingerprint !== fingerprint) throw new Error("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD");
       return { ...structuredClone(previous.result), replayed: true };
@@ -207,6 +264,7 @@ export function executeCreateNode(
       id: command.nodeId,
       projectId: command.projectId,
       title: command.title,
+      kind: command.kind ?? "work_package",
       securityDomainId: command.securityDomainId,
       version: 1,
     };

@@ -1,6 +1,12 @@
 <script lang="ts">
+  import { getMetadata } from '@hcengineering/platform'
+  import presentation, { getCurrentWorkspaceUuid } from '@hcengineering/presentation'
+
   type NodeState = 'done' | 'active' | 'risk' | 'planned'
   type ProcessNode = { id: string, stage: string, title: string, owner: string, state: NodeState, progress: number }
+  type ApiFile = { id: string, taskId: string, nodeId: string, name: string, contentType: string, size: number, scanState: 'scanning' | 'available' | 'quarantined' | 'failed' }
+  type ApiTask = { id: string, nodeId: string, title: string, status: 'todo' | 'in_progress' | 'completed' | 'canceled', files: ApiFile[] }
+  type NodeDetail = { tasks: ApiTask[] }
 
   const nodes: ProcessNode[] = [
     { id: 'N-01', stage: '01', title: '项目启动', owner: '产品负责人', state: 'done', progress: 100 },
@@ -12,7 +18,118 @@
   ]
 
   let selected = nodes[2]
+  let tasks: ApiTask[] = []
+  let detailLoading = false
+  let detailError = ''
+  let newTaskTitle = ''
+  let fileInput: HTMLInputElement
+  let uploadTaskId = ''
   const stateLabel: Record<NodeState, string> = { done: '已完成', active: '进行中', risk: '有风险', planned: '未开始' }
+  const taskStatusLabel: Record<ApiTask['status'], string> = { todo: '未开始', in_progress: '进行中', completed: '已完成', canceled: '已取消' }
+  const fileScanLabel: Record<ApiFile['scanState'], string> = { scanning: '处理中', available: '可用', quarantined: '已隔离', failed: '处理失败' }
+  const apiBase = ((globalThis as any).__PROJECT_PROCESS_MAP_API__ as string | undefined) ?? 'http://127.0.0.1:4100'
+
+  $: selected.id, void loadDetail(selected.id)
+
+  async function loadDetail (nodeId: string): Promise<void> {
+    detailLoading = true
+    detailError = ''
+    try {
+      const response = await apiFetch(`/api/nodes/${encodeURIComponent(nodeId)}`)
+      if (!response.ok) throw new Error(await responseMessage(response))
+      const detail = await response.json() as NodeDetail
+      if (selected.id === nodeId) tasks = detail.tasks
+    } catch (error) {
+      if (selected.id === nodeId) {
+        tasks = []
+        detailError = error instanceof Error ? error.message : String(error)
+      }
+    } finally {
+      if (selected.id === nodeId) detailLoading = false
+    }
+  }
+
+  async function createTask (): Promise<void> {
+    const title = newTaskTitle.trim()
+    if (title.length === 0) return
+    detailError = ''
+    const key = crypto.randomUUID()
+    try {
+      const response = await apiFetch(`/api/nodes/${encodeURIComponent(selected.id)}/tasks`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'idempotency-key': key },
+        body: JSON.stringify({ title, status: 'todo' })
+      })
+      if (!response.ok) throw new Error(await responseMessage(response))
+      newTaskTitle = ''
+      await loadDetail(selected.id)
+    } catch (error) {
+      detailError = error instanceof Error ? error.message : String(error)
+    }
+  }
+
+  function chooseFile (taskId: string): void {
+    uploadTaskId = taskId
+    fileInput.click()
+  }
+
+  async function attachFile (event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement
+    const file = input.files?.[0]
+    if (file === undefined || uploadTaskId.length === 0) return
+    detailError = ''
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer())
+      const response = await apiFetch(`/api/tasks/${encodeURIComponent(uploadTaskId)}/files`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'idempotency-key': crypto.randomUUID() },
+        body: JSON.stringify({
+          name: file.name,
+          contentType: file.type || 'application/octet-stream',
+          contentBase64: bytesToBase64(bytes),
+          sha256: await sha256(bytes)
+        })
+      })
+      if (!response.ok) throw new Error(await responseMessage(response))
+      await loadDetail(selected.id)
+    } catch (error) {
+      detailError = error instanceof Error ? error.message : String(error)
+    } finally {
+      input.value = ''
+      uploadTaskId = ''
+    }
+  }
+
+  async function apiFetch (path: string, init: RequestInit = {}): Promise<Response> {
+    const token = getMetadata(presentation.metadata.Token) ?? ''
+    const workspace = getCurrentWorkspaceUuid()
+    const headers = new Headers(init.headers)
+    if (token.length > 0) headers.set('authorization', `Bearer ${token}`)
+    headers.set('x-huly-workspace', workspace)
+    return await fetch(`${apiBase}${path}`, { ...init, headers })
+  }
+
+  async function responseMessage (response: Response): Promise<string> {
+    try {
+      const value = await response.json() as { message?: string }
+      return value.message ?? `请求失败 (${response.status})`
+    } catch {
+      return `请求失败 (${response.status})`
+    }
+  }
+
+  function bytesToBase64 (bytes: Uint8Array): string {
+    let binary = ''
+    for (let offset = 0; offset < bytes.length; offset += 8192) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192))
+    }
+    return btoa(binary)
+  }
+
+  async function sha256 (bytes: Uint8Array): Promise<string> {
+    const digest = await crypto.subtle.digest('SHA-256', bytes.slice().buffer as ArrayBuffer)
+    return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('')
+  }
 </script>
 
 <svelte:head><title>项目过程图谱</title></svelte:head>
@@ -25,7 +142,7 @@
       <p>让阶段、责任、任务和证据在同一条过程线上可见。</p>
     </div>
     <div class="top-actions">
-      <span class="sync"><i></i> 数据已同步</span>
+      <span class:error={detailError.length > 0} class="sync"><i></i> {detailLoading ? '同步中' : detailError.length > 0 ? '连接异常' : '数据已同步'}</span>
       <button class="secondary">筛选</button>
       <button class="primary">新建节点</button>
     </div>
@@ -35,7 +152,7 @@
     <div><span>项目</span><strong>自营软件项目 · 2026</strong></div>
     <div><span>整体进度</span><strong>52%</strong></div>
     <div><span>当前阶段</span><strong>方案设计</strong></div>
-    <div><span>待验收任务</span><strong>3</strong></div>
+    <div><span>当前节点任务</span><strong>{tasks.length}</strong></div>
   </section>
 
   <div class="workspace">
@@ -62,15 +179,30 @@
       <div class="progress-label"><span>节点进度</span><b>{selected.progress}%</b></div>
       <div class="progress"><span style={`width:${selected.progress}%`}></span></div>
 
-      <div class="section-title"><h3>任务</h3><button>查看全部</button></div>
-      <div class="task"><span class="check done">✓</span><div><b>完成交互方案</b><small>设计负责人 · 昨天</small></div></div>
-      <div class="task"><span class="check">•</span><div><b>评审技术可行性</b><small>研发负责人 · 今天</small></div></div>
-      <div class="task"><span class="check risk">!</span><div><b>补充异常流程</b><small>产品负责人 · 已逾期 1 天</small></div></div>
-
-      <div class="section-title"><h3>阶段交付物</h3><button>上传</button></div>
-      <div class="file"><span>FIG</span><div><b>交互设计稿.fig</b><small>已关联 · 4.8 MB</small></div></div>
-      <div class="file"><span>PDF</span><div><b>方案评审记录.pdf</b><small>待验收 · 1.2 MB</small></div></div>
-      <div class="notice"><b>完成守卫</b><p>仍有 1 个必需交付物待验收，当前节点不能完成。</p></div>
+      <div class="section-title"><h3>真实任务与文件</h3><span class="source">Product API → Huly</span></div>
+      <div class="task-create">
+        <input bind:value={newTaskTitle} placeholder="输入任务标题" aria-label="任务标题" on:keydown={(event) => event.key === 'Enter' && void createTask()} />
+        <button on:click={() => void createTask()} disabled={newTaskTitle.trim().length === 0}>新建</button>
+      </div>
+      {#if detailLoading}
+        <div class="empty">正在读取节点任务…</div>
+      {:else if detailError.length > 0}
+        <div class="notice"><b>连接提示</b><p>{detailError}</p><button on:click={() => void loadDetail(selected.id)}>重试</button></div>
+      {:else if tasks.length === 0}
+        <div class="empty">此节点暂无任务</div>
+      {:else}
+        {#each tasks as task}
+          <div class="task-row">
+            <div class="task"><span class="check" class:done={task.status === 'completed'}>{task.status === 'completed' ? '✓' : '•'}</span><div><b>{task.title}</b><small>{taskStatusLabel[task.status]} · {task.files.length} 个文件</small></div></div>
+            <button class="attach" on:click={() => chooseFile(task.id)}>附加证据</button>
+          </div>
+          {#each task.files as file}
+            <div class="file"><span>{file.name.split('.').pop()?.slice(0, 4).toUpperCase() ?? 'FILE'}</span><div><b>{file.name}</b><small>{fileScanLabel[file.scanState]} · {Math.max(1, Math.round(file.size / 1024))} KB</small></div></div>
+          {/each}
+        {/each}
+      {/if}
+      <input class="file-input" bind:this={fileInput} type="file" on:change={(event) => void attachFile(event)} />
+      <div class="notice neutral"><b>P0-05 边界</b><p>这里只证明 Node → Huly Task → File 引用；任务验收与交付物守卫将在后续切片实现。</p></div>
     </aside>
   </div>
 </main>
@@ -91,6 +223,7 @@
   .secondary { color: #35534b; background: white; box-shadow: inset 0 0 0 1px #dce5e1; }
   .sync { display: flex; align-items: center; gap: 7px; margin-right: 8px; color: #698078; font-size: 11px; }
   .sync i { width: 7px; height: 7px; border-radius: 50%; background: #27a47f; box-shadow: 0 0 0 4px #dff3ec; }
+  .sync.error { color: #a35f2a; } .sync.error i { background: #d9813b; box-shadow: 0 0 0 4px #fff0e3; }
   .summary { display: grid; grid-template-columns: 2fr repeat(3, 1fr); margin-bottom: 16px; border: 1px solid #dfe7e3; border-radius: 14px; background: #fff; box-shadow: 0 7px 24px rgba(23,54,45,.045); }
   .summary div { min-height: 70px; padding: 16px 18px; border-right: 1px solid #edf1ef; }
   .summary div:last-child { border: 0; }
@@ -134,6 +267,19 @@
   .section-title h3 { margin: 0; font-size: 12px; }
   .section-title button { padding: 0; color: #267762; background: transparent; font-size: 10px; }
   .task, .file { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid #eff2f1; }
+  .source { color: #789087; font-size: 9px; }
+  .task-create { display: flex; gap: 7px; margin-bottom: 7px; }
+  .task-create input { min-width: 0; flex: 1; height: 34px; padding: 0 10px; border: 1px solid #dce5e1; border-radius: 8px; background: #fbfcfb; font-size: 10px; outline: none; }
+  .task-create input:focus { border-color: #5ca693; box-shadow: 0 0 0 3px #e5f2ee; }
+  .task-create button, .attach, .notice button { border: 0; border-radius: 7px; color: #176b5a; background: #e7f3ef; cursor: pointer; font-size: 9px; font-weight: 700; }
+  .task-create button { padding: 0 11px; }
+  .task-create button:disabled { opacity: .45; cursor: default; }
+  .task-row { display: flex; align-items: center; border-bottom: 1px solid #eff2f1; }
+  .task-row .task { min-width: 0; flex: 1; border: 0; }
+  .attach { padding: 6px 8px; white-space: nowrap; }
+  .file { margin-left: 32px; }
+  .file-input { display: none; }
+  .empty { padding: 18px 4px; color: #8a9893; text-align: center; font-size: 10px; }
   .task b, .task small, .file b, .file small { display: block; }
   .task b, .file b { margin-bottom: 3px; font-size: 11px; }
   .task small, .file small { color: #8a9893; font-size: 9px; }
@@ -142,5 +288,7 @@
   .file > span { display: grid; place-items: center; flex: 0 0 30px; height: 34px; color: #52756b; border-radius: 7px; background: #eaf1ee; font-size: 8px; font-weight: 800; }
   .notice { margin-top: 20px; padding: 13px; color: #805427; border: 1px solid #f0d6ba; border-radius: 10px; background: #fff8f0; }
   .notice b { font-size: 10px; } .notice p { margin: 5px 0 0; font-size: 9px; line-height: 1.5; }
+  .notice button { margin-top: 8px; padding: 6px 9px; }
+  .notice.neutral { color: #526b64; border-color: #dce7e3; background: #f5f8f7; }
   @media (max-width: 840px) { .app-shell { padding: 16px; } .topbar { align-items: flex-start; flex-direction: column; } .summary { grid-template-columns: 1fr 1fr; } .summary div:nth-child(2) { border-right: 0; } .workspace { grid-template-columns: 1fr; } .detail { border-top: 1px solid #e4ebe8; border-left: 0; } }
 </style>

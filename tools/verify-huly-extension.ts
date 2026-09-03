@@ -81,9 +81,27 @@ await requireContent("huly-extension/models/project-process-map/src/index.ts", [
 
 await requireContent("huly-extension/plugins/project-process-map-resources/src/components/ProjectProcessMapApplication.svelte", [
   ["N-06", "six-node shell fixture is required"],
-  ["完成守卫", "completion-guard evidence is required"],
+  ["Product API → Huly", "P0-05 authority path label is required"],
+  ["apiFetch", "P0-05 shell must use Product API"],
+  ["presentation.metadata.Token", "P0-05 shell must delegate the current Huly actor token"],
+  ["P0-05 边界", "P0-05 non-goals must remain visible"],
   ["aria-label={`查看${node.title}`}", "node selection must remain accessible"],
 ]);
+
+await requireContent("huly-extension/plugins/project-process-map-resources/package.json", [
+  ["@hcengineering/presentation", "Huly identity and workspace helpers are required"],
+]);
+
+await requireContent("packages/adapters/src/huly-rest.ts", [
+  ["/api/v1/tx/", "Huly Task adapter must use the locked REST transaction surface"],
+  ["/api/v1/find-all/", "Huly Task adapter must support authoritative readback"],
+  ["HulyRestTaskFileAdapter", "Huly Attachment adapter is required"],
+]);
+
+for (const path of ["packages/domain/src/outbox.ts", "packages/application/src/node-task-file.ts"]) {
+  const source = await readFile(path, "utf8");
+  if (source.includes("@hcengineering/")) failures.push(`Huly SDK type leaked outside adapter: ${path}`);
+}
 
 await requireContent("tools/apply-huly-extension.ts", [
   ["enabled: true", "model composition must explicitly enable the plugin"],
@@ -94,7 +112,7 @@ await requireContent("tools/apply-huly-extension.ts", [
 ]);
 
 await requireContent("infra/huly/compose.shell-prototype.yml", [
-  ["project-process-map/huly-front:p0-04", "shell override must use the prototype Front image"],
+  ["project-process-map/huly-front:p0-05", "shell override must use the P0-05 Front image"],
   ["project-process-map/huly-transactor:p0-04", "shell override must use the prototype Transactor image"],
   ["project-process-map/huly-workspace:p0-04", "shell override must use the prototype Workspace image"],
 ]);
