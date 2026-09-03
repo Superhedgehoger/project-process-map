@@ -4,7 +4,7 @@
 |---|---|
 | PRD | V1.3 |
 | 功能契约 | FC-1.2 |
-| 变更记录 | CR-001 |
+| 变更记录 | CR-002（无 Docker SaaS 发行；PRD/FC 版本同步待完成） |
 | 阶段 | Phase 0 |
 | 登记日期 | 2026-09-02 |
 
@@ -21,3 +21,9 @@
 
 开发不得用脚手架默认值替代尚待 ADR 决策的事项。
 
+已批准的交付覆盖决定：
+
+- [CR-002：SaaS 与无 Docker 发行目标](./change-records/CR-002-docker-free-saas.md)
+- [ADR-002：无 Docker 的 SaaS 运行与发行边界](./adr/ADR-002-docker-free-runtime.md)
+
+CR-002 的产品负责人决定在权威顺序中高于尚未同步版本号的源功能契约。完成源 PRD、FC-016、架构、数据权限、Backlog 与测试计划同步后，登记新的 PRD/FC 版本；同步前不得把旧文档中的 Compose 描述解释为最终交付约束。

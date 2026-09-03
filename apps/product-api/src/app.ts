@@ -21,6 +21,7 @@ import {
 import type { BlobAdapter, TaskAdapter, TaskFileAdapter, TaskAuthorityStatus } from "../../../packages/adapters/src/ports.ts";
 import { executeCreateNode, InMemoryTransactionalStore, type ProjectNode } from "../../../packages/domain/src/outbox.ts";
 import { buildHealthReport, buildHulyConfigurationReport } from "./health.ts";
+import { productWebHtml } from "./web.ts";
 
 export type ProductApiOptions = {
   adapterMode: "memory" | "huly";
@@ -60,6 +61,10 @@ export function createProductApi(options: ProductApiOptions) {
 
     try {
       const url = new URL(request.url ?? "/", "http://product-api.local");
+      if (request.method === "GET" && url.pathname === "/") {
+        sendHtml(response, productWebHtml);
+        return;
+      }
       if (request.method === "GET" && url.pathname === "/health") {
         const report = options.adapterMode === "memory"
           ? await buildHealthReport(memoryAdapters.taskAdapter, memoryAdapters.taskFileAdapter)
@@ -70,6 +75,10 @@ export function createProductApi(options: ProductApiOptions) {
 
       const context = await adapterContext(request, options, memoryAdapters);
       const service = new NodeTaskFileService(store, context.taskAdapter, context.blobAdapter, context.taskFileAdapter);
+      if (request.method === "GET" && url.pathname === "/api/nodes") {
+        sendJson(response, 200, store.listNodes().sort((left, right) => left.id.localeCompare(right.id)));
+        return;
+      }
       const detailMatch = url.pathname.match(/^\/api\/nodes\/([^/]+)$/);
       if (request.method === "GET" && detailMatch?.[1] !== undefined) {
         sendJson(response, 200, await service.getNodeDetail(decodeURIComponent(detailMatch[1])));
@@ -269,4 +278,14 @@ function setCors(response: ServerResponse, origin: string): void {
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   response.end(JSON.stringify(body));
+}
+
+function sendHtml(response: ServerResponse, body: string): void {
+  response.writeHead(200, {
+    "content-type": "text/html; charset=utf-8",
+    "content-security-policy": "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+  });
+  response.end(body);
 }

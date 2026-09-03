@@ -1,11 +1,14 @@
 # 项目过程图谱
 
-本仓库是 PRD V1.3 / FC-1.2 的实现工作区。目前处于 Phase 0：验证 Huly 底座、自托管、适配器边界、权限与事件一致性，不代表生产架构已经批准。
+本仓库是 PRD V1.3 / FC-1.2 加 CR-002 的实现工作区。目前处于 Phase 0：验证 Huly 底座、无 Docker SaaS 发行、适配器边界、权限与事件一致性，不代表生产架构已经批准。
 
 GitHub：<https://github.com/Superhedgehoger/project-process-map>
 
 ## 当前可运行内容
 
+- 无 Docker 产品入口（页面 + Product API + Worker）：`pnpm start`，打开 <http://127.0.0.1:4100>
+- 无 Docker 原生发行包：`pnpm build:native`
+- 从临时目录解包、启动和纵向冒烟：`pnpm smoke:native`
 - Product API 健康检查与内存纵向演示：`pnpm dev:api`
 - Worker 健康检查：`pnpm dev:worker`
 - 本地 Node/事件/Outbox 原子性与幂等原型：`pnpm test`
@@ -18,7 +21,33 @@ GitHub：<https://github.com/Superhedgehoger/project-process-map>
 - Huly 本地验证环境：`pnpm huly:up` / `pnpm huly:ps` / `pnpm huly:down`
 - 全部静态检查与测试：`pnpm check`
 
-P0-05 原型需要由同一锁定源码构建 Front、Transactor、Workspace 三个本地镜像。Transactor 是浏览器运行模型的权威提供者，不能只替换 Front 与 Workspace。P0-05 只更新 Front；Transactor 与 Workspace 继续复用已验证的 P0-04 镜像。镜像就绪后可用独立端口启动：
+### 无 Docker 运行
+
+开发机需要 Node.js 24 和 pnpm；运行产品入口不需要 Docker：
+
+```bash
+pnpm install --frozen-lockfile
+pnpm start
+```
+
+生成可搬运的服务端发行包：
+
+```bash
+pnpm build:native
+pnpm smoke:native
+```
+
+制品生成在 `dist/release/`，包含编译后的 JavaScript、自包含浏览器页面、`bin/project-process-map` 启动器和 `SHA256SUMS`。SaaS 监听示例：
+
+```bash
+HOST=0.0.0.0 PORT=4100 ./bin/project-process-map
+```
+
+P0-ND-01 制品仍使用内存存储且依赖 Node.js 24，只证明产品运行路径不调用 Docker。生产 SaaS 还必须通过 P0-ND-02：干净 Linux 主机、正式身份/租户隔离、持久化、完整图谱 → Task → File、重启、升级和回滚。
+
+### Docker 的保留范围
+
+以下 Huly Compose 路径只用于开发验证和上游回归，不属于正式交付的安装或运行前置。P0-05 原型需要由同一锁定源码构建 Front、Transactor、Workspace 三个本地镜像。Transactor 是浏览器运行模型的权威提供者，不能只替换 Front 与 Workspace。P0-05 只更新 Front；Transactor 与 Workspace 继续复用已验证的 P0-04 镜像。镜像就绪后可用独立端口启动：
 
 ```bash
 HULY_COMPOSE_OVERRIDE="$PWD/infra/huly/compose.shell-prototype.yml" \
@@ -50,7 +79,9 @@ pnpm dev:api
 3. `P0-03`：验证 Product API、Worker 和内存 Adapter 骨架。
 4. `P0-04`：Huly Shell 页面与六节点交互原型。
 5. `P0-05`：Node → Huly Task → File 引用纵向演示。
-6. `P0-05A`：任务验收与交付物完成守卫，不属于 P0-05。
+6. `P0-ND-01`：无 Docker 产品发行包、浏览器入口和解包冒烟。
+7. `P0-ND-02`：无 Docker 干净 Linux、持久化、身份/租户和升级回滚。
+8. `P0-05A`：P0-ND-02 通过后恢复任务验收与交付物完成守卫开发。
 
 项目负责人已批准 P0-01 许可证风险闸门，可继续本地 Phase 0 集成；该批准是项目风险接受，不替代生产发布前的正式法律审查。
 

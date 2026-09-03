@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import test from "node:test";
+import { Script } from "node:vm";
 import { createProductApi } from "../apps/product-api/src/app.ts";
 
 test("P0-05-CT-009 Product API exposes the vertical path with stable HTTP semantics", async () => {
@@ -82,6 +83,24 @@ test("P0-05-CT-009 Huly health reports configuration readiness without claiming 
 });
 
 type Handler = (request: IncomingMessage, response: ServerResponse) => Promise<void>;
+
+test("P0-ND-01 Product API serves a standalone browser entry and node collection", async () => {
+  const handler = createProductApi({ adapterMode: "memory" });
+  const page = await call(handler, "/");
+  assert.equal(page.status, 200);
+  assert.equal(page.headers.get("content-type"), "text/html; charset=utf-8");
+  assert.match(page.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
+  assert.match(page.body, /项目过程图谱/);
+  assert.match(page.body, /原生 Node/);
+  const script = page.body.match(/<script>([\s\S]+)<\/script>/)?.[1];
+  assert.ok(script);
+  assert.doesNotThrow(() => new Script(script));
+
+  const nodes = await call(handler, "/api/nodes");
+  assert.equal(nodes.status, 200);
+  const body = JSON.parse(nodes.body) as Array<{ id: string }>;
+  assert.deepEqual(body.map((node) => node.id), ["N-01", "N-02", "N-03", "N-04", "N-05", "N-06"]);
+});
 
 async function call(
   handler: Handler,

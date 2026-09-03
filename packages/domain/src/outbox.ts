@@ -193,6 +193,11 @@ export class InMemoryTransactionalStore {
     return node === undefined ? undefined : structuredClone(node);
   }
 
+  listNodes(): Readonly<ProjectNode>[] {
+    return [...this.#state.aggregates.values()]
+      .map((node) => structuredClone(node));
+  }
+
   getProjection<T>(namespace: string, id: string): Readonly<T> | undefined {
     const projection = this.#state.projections.get(namespace)?.get(id) as T | undefined;
     return projection === undefined ? undefined : structuredClone(projection);
