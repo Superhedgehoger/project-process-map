@@ -1,7 +1,6 @@
 import { type Ref } from '@hcengineering/core'
 import { type Application } from '@hcengineering/model-workbench'
-import { projectProcessMapId } from '@hcengineering/project-process-map'
-import projectProcessMap from '@hcengineering/project-process-map-resources/src/plugin'
+import projectProcessMap, { projectProcessMapId } from '@hcengineering/project-process-map'
 import { mergeIds } from '@hcengineering/platform'
 
 type ProjectProcessMapModel = typeof projectProcessMap & {

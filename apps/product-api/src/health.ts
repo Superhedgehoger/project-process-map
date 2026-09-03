@@ -1,5 +1,5 @@
 import type { HealthReport } from "../../../packages/contracts/src/health.ts";
-import type { TaskAdapter, TaskFileAdapter } from "../../../packages/adapters/src/ports.ts";
+import type { TaskAdapter, TaskFileAdapter } from "../../../packages/application/src/ports/integrations.ts";
 
 export async function buildHealthReport(
   taskAdapter: TaskAdapter,

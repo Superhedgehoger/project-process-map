@@ -11,7 +11,7 @@ import type {
   TaskFileAdapter,
   TaskFileAuthorityRecord,
   UploadBlob,
-} from "./ports.ts";
+} from "../../application/src/ports/integrations.ts";
 
 const HULY_IDS = {
   issueClass: "tracker:class:Issue",

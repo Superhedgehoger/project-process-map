@@ -9,7 +9,7 @@ import type {
   TaskFileAdapter,
   TaskFileAuthorityRecord,
   UploadBlob,
-} from "./ports.ts";
+} from "../../application/src/ports/integrations.ts";
 
 function fingerprint(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");

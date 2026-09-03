@@ -23,6 +23,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@hcengineering/platform": "workspace:^0.7.426"
+    "@hcengineering/platform": "workspace:^0.7.426",
+    "@hcengineering/ui": "workspace:^0.7.426"
   }
 }

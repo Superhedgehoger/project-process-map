@@ -13,7 +13,9 @@ import {
   InMemoryTaskAdapter,
   InMemoryTaskFileAdapter,
 } from "../packages/adapters/src/in-memory.ts";
-import type { AttachFileAtAuthority, TaskFileAuthorityRecord, UploadBlob } from "../packages/adapters/src/ports.ts";
+import type { AttachFileAtAuthority, TaskFileAuthorityRecord } from "../packages/application/src/ports/integrations.ts";
+
+type UploadBlob = Parameters<InMemoryBlobAdapter["upload"]>[0];
 import { executeCreateNode, InMemoryTransactionalStore } from "../packages/domain/src/outbox.ts";
 
 function taskCommand(overrides: Partial<CreateTaskCommand> = {}): CreateTaskCommand {

@@ -18,7 +18,7 @@ import {
   resolveHulyActorId,
   type HulyRestConfig,
 } from "../../../packages/adapters/src/huly-rest.ts";
-import type { BlobAdapter, TaskAdapter, TaskFileAdapter, TaskAuthorityStatus } from "../../../packages/adapters/src/ports.ts";
+import type { BlobAdapter, TaskAdapter, TaskFileAdapter, TaskAuthorityStatus } from "../../../packages/application/src/ports/integrations.ts";
 import { executeCreateNode, InMemoryTransactionalStore, type ProjectNode } from "../../../packages/domain/src/outbox.ts";
 import { buildHealthReport, buildHulyConfigurationReport } from "./health.ts";
 import { productWebHtml } from "./web.ts";

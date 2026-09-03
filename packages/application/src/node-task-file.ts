@@ -5,7 +5,7 @@ import type {
   TaskAdapter,
   TaskAuthorityStatus,
   TaskFileAdapter,
-} from "../../adapters/src/ports.ts";
+} from "./ports/integrations.ts";
 import {
   type AnyDomainEvent,
   type EventEnvelope,

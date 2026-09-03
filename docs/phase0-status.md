@@ -11,6 +11,7 @@
 | P0-05 Node → Huly Task → File | 完成 | 当前 Huly 操作者经 Product API 创建真实 `TSK-1`；图谱与 Tracker 均回查同一任务和 107B 附件；幂等、回滚、补偿、API 与真实 wire envelope 共 9 组契约测试 | P0-05A 任务验收与交付物守卫；P0-07 敏感 ACL |
 | P0-06 事件与 Outbox 原子写 | 完成 | 完整事件信封、四个原子回滚断点、幂等重放/冲突、聚合版本与项目序列共 9 项测试 | 物理存储确定后补并发竞争测试 |
 | P0-ND-01 无 Docker 原生发行可行性 | 完成 | 自包含浏览器入口、Product API 与 Worker 原生启动；版本化 Node 24 tarball、SHA-256；临时目录冒烟确认未调用 Docker并完成页面 → 节点 → 任务 | P0-ND-02 干净 Linux、持久化、完整纵向链路与升级/回滚 |
+| ARCH-GATE-01 架构修正 | 进行中 | CR-003、ADR-003、ADR-004 已冻结租户身份、Task/树权威、持久事务和恢复语义 | 全部故障与隔离测试通过后才恢复 P0-05A |
 
 ## 启动条件
 
@@ -24,5 +25,7 @@
 - [x] 不调用 Docker 的产品发行包构建与临时目录冒烟入口
 
 P0-01 至 P0-05 已按依赖顺序通过。P0-05 与 P0-06 的内存实现证明逻辑契约，不预先决定生产物理存储、Task 权威或敏感 ACL。CR-002 后，P0-02、P0-04、P0-05 的 Docker 结果只保留为 Huly 开发验证证据；正式部署必须通过 P0-ND-02 的无 Docker clean-machine 闸门。
+
+CR-003 已暂停新的业务功能开发。现有 P0-05/P0-06 证据不撤销，但其内存 Store、Huly Task 权威和进程内 Saga 不得继续扩展；必须先完成架构修正闸门，再进入 P0-05A。
 
 P0-01 风险详见 `docs/reports/P0-01-source-audit.md`；Docker 开发环境复跑见 `docs/reports/P0-02-selfhost-replay.md`；Shell 验收见 `docs/reports/P0-04-huly-shell.md`；纵向链路见 `docs/reports/P0-05-node-task-file.md`；事件原子性见 `docs/reports/P0-06a-local-event-outbox.md`；无 Docker 交付边界见 `docs/change-records/CR-002-docker-free-saas.md` 与 `docs/adr/ADR-002-docker-free-runtime.md`。
