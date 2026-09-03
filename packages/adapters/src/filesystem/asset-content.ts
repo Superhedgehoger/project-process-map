@@ -65,6 +65,13 @@ export class FilesystemAssetContent implements AssetContentPort {
     }
   }
 
+  async read(reference: ExternalReference): Promise<Uint8Array> {
+    this.assertReference(reference);
+    const metadata = await this.get(reference);
+    if (metadata === undefined) throw new Error("ASSET_CONTENT_NOT_FOUND");
+    return Uint8Array.from(await readFile(this.blobPath(reference)));
+  }
+
   async remove(reference: ExternalReference): Promise<void> {
     this.assertReference(reference);
     await Promise.allSettled([unlink(this.blobPath(reference)), unlink(this.metadataPath(reference))]);

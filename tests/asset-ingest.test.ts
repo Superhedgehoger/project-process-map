@@ -148,8 +148,11 @@ class FailsOnceContent implements AssetContentPort {
     return await this.delegate.get(reference);
   }
 
+  async read(reference: Parameters<AssetContentPort["read"]>[0]) {
+    return await this.delegate.read(reference);
+  }
+
   async remove(reference: Parameters<AssetContentPort["remove"]>[0]) {
     await this.delegate.remove(reference);
   }
 }
-

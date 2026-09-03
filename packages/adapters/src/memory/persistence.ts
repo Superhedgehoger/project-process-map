@@ -115,6 +115,9 @@ export class MemoryPersistence implements Persistence {
     release: async (tenantId, id, leaseToken, nextAttemptAtUtc, error) => await this.exclusive(
       async () => release(this.#state.jobs, tenantId, id, leaseToken, nextAttemptAtUtc, error),
     ),
+    markDeadLetter: async (tenantId, id, leaseToken, error) => await this.exclusive(
+      async () => deadLetter(this.#state.jobs, tenantId, id, leaseToken, error),
+    ),
   };
 
   async transaction<T>(tenantId: TenantId, work: (transaction: TransactionContext) => Promise<T>): Promise<T> {
@@ -422,4 +425,25 @@ function release<T extends OutboxMessage | BackgroundJob>(
     lastError: error,
   } as T);
   return dead ? "dead_letter" : "retry";
+}
+
+function deadLetter<T extends BackgroundJob>(
+  store: Map<string, T>,
+  tenantId: TenantId,
+  id: string,
+  leaseToken: string,
+  error: string,
+): boolean {
+  const key = `${tenantId}\u0000${id}`;
+  const item = store.get(key);
+  if (item === undefined || item.state !== "leased" || item.leaseToken !== leaseToken) return false;
+  store.set(key, {
+    ...item,
+    state: "dead_letter",
+    leaseOwner: null,
+    leaseToken: null,
+    leaseExpiresAtUtc: null,
+    lastError: error,
+  });
+  return true;
 }

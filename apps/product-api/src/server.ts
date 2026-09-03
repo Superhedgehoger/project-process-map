@@ -1,10 +1,18 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { resolve } from "node:path";
+import { CollaborationProjectionProcessor } from "../../../packages/application/src/integrations/project-collaboration.ts";
 import type { AssetContentPort } from "../../../packages/application/src/ports/integrations.ts";
 import type { JobConsumer, OutboxConsumer, Persistence } from "../../../packages/application/src/ports/persistence.ts";
 import { FilesystemAssetContent } from "../../../packages/adapters/src/filesystem/asset-content.ts";
+import {
+  HulyRestBlobProjectionAdapter,
+  HulyRestTaskFileProjectionAdapter,
+  HulyRestTaskProjectionAdapter,
+  type HulyRestConfig,
+} from "../../../packages/adapters/src/huly-rest.ts";
 import { SqlitePersistence } from "../../../packages/adapters/src/sqlite/persistence.ts";
+import type { BackgroundJob } from "../../../packages/domain/src/events.ts";
 import { tenantId } from "../../../packages/domain/src/identity.ts";
 import { createProductApi, type ProductApiOptions } from "./app.ts";
 
@@ -36,6 +44,23 @@ export function createNativeDependencies(environment: NodeJS.ProcessEnv = proces
   };
 }
 
+export function createNativeJobProcessor(
+  environment: NodeJS.ProcessEnv,
+  dependencies: NativeProductApiDependencies,
+): ((job: BackgroundJob) => Promise<void>) | undefined {
+  if (configuredCollaborationMode(environment) !== "huly") return undefined;
+  const config = hulyWorkerConfig(environment);
+  if (config === undefined) return undefined;
+  const processor = new CollaborationProjectionProcessor({
+    persistence: dependencies.persistence,
+    assetContent: dependencies.assetContent,
+    tasks: new HulyRestTaskProjectionAdapter(config),
+    blobs: new HulyRestBlobProjectionAdapter(config),
+    taskFiles: new HulyRestTaskFileProjectionAdapter(config),
+  });
+  return async (job) => await processor.process(job);
+}
+
 export async function startProductApiServer(
   environment: NodeJS.ProcessEnv = process.env,
   dependencies?: ProductApiDependencies,
@@ -44,7 +69,7 @@ export async function startProductApiServer(
   const port = parsePort(environment.PORT ?? "4100");
   const host = environment.HOST?.trim() || "127.0.0.1";
   const options: ProductApiOptions = {
-    adapterMode: environment.ADAPTER_MODE === "huly" ? "huly" : "memory",
+    collaborationMode: configuredCollaborationMode(environment),
     persistence: runtimeDependencies.persistence,
     assetContent: runtimeDependencies.assetContent,
     tenantId: tenantId(environment.PRODUCT_TENANT_ID?.trim() || "phase0-tenant"),
@@ -84,4 +109,20 @@ function parsePort(value: string): number {
   const port = Number.parseInt(value, 10);
   if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new Error(`Invalid PORT: ${value}`);
   return port;
+}
+
+function hulyWorkerConfig(environment: NodeJS.ProcessEnv): HulyRestConfig | undefined {
+  const transactionEndpoint = environment.HULY_TRANSACTION_ENDPOINT?.trim();
+  const fileEndpoint = environment.HULY_FILE_ENDPOINT?.trim();
+  const workspaceId = environment.HULY_WORKSPACE_ID?.trim();
+  const projectId = environment.HULY_PROJECT_ID?.trim();
+  const actorToken = environment.HULY_SERVICE_TOKEN?.trim();
+  if (!transactionEndpoint || !fileEndpoint || !workspaceId || !projectId || !actorToken) return undefined;
+  const timeout = Number.parseInt(environment.HULY_REQUEST_TIMEOUT_MS ?? "10000", 10);
+  if (!Number.isSafeInteger(timeout) || timeout <= 0) throw new Error("HULY_REQUEST_TIMEOUT_MS must be a positive integer");
+  return { transactionEndpoint, fileEndpoint, workspaceId, projectId, actorToken, requestTimeoutMilliseconds: timeout };
+}
+
+function configuredCollaborationMode(environment: NodeJS.ProcessEnv): "disabled" | "huly" {
+  return environment.COLLABORATION_MODE === "huly" || environment.ADAPTER_MODE === "huly" ? "huly" : "disabled";
 }

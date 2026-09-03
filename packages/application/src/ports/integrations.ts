@@ -93,7 +93,29 @@ export type StoredAssetContent = Readonly<{
 export interface AssetContentPort {
   put(content: PutAssetContent): Promise<StoredAssetContent>;
   get(reference: ExternalReference): Promise<StoredAssetContent | undefined>;
+  read(reference: ExternalReference): Promise<Uint8Array>;
   remove(reference: ExternalReference): Promise<void>;
+}
+
+export interface ExternalBlobProjectionPort {
+  health(): Promise<"ok" | "degraded">;
+  put(content: Omit<PutAssetContent, "tenantId">): Promise<StoredAssetContent>;
+  exists(reference: ExternalReference): Promise<boolean>;
+  remove(reference: ExternalReference): Promise<void>;
+}
+
+export class IntegrationCallError extends Error {
+  readonly code: string;
+  readonly retryable: boolean;
+  readonly outcome: "known_failed" | "ambiguous";
+
+  constructor(code: string, message: string, options: Readonly<{ retryable: boolean; outcome: "known_failed" | "ambiguous" }>) {
+    super(message);
+    this.name = "IntegrationCallError";
+    this.code = code;
+    this.retryable = options.retryable;
+    this.outcome = options.outcome;
+  }
 }
 
 export interface TaskFileProjectionPort {
@@ -101,70 +123,4 @@ export interface TaskFileProjectionPort {
   attach(file: AttachFileProjection): Promise<TaskFileProjectionRecord>;
   get(reference: ExternalReference): Promise<TaskFileProjectionRecord | undefined>;
   remove(reference: ExternalReference, expectedSyncWatermark: string): Promise<void>;
-}
-
-/*
- * Transitional Phase 0 contract. Existing synchronous orchestration is kept
- * buildable while its persisted Task/Asset projection data is migrated. No new
- * use case may consume these aliases; they are removed by ARCH-GATE-01.
- */
-export type TaskAuthorityStatus = CollaborationTaskStatus;
-export type TaskAuthorityRecord = {
-  authorityRef: string;
-  title: string;
-  status: TaskAuthorityStatus;
-  syncWatermark: string;
-};
-export type CreateTaskAtAuthority = {
-  authorityKey: string;
-  title: string;
-  status: TaskAuthorityStatus;
-};
-export type UploadBlob = {
-  authorityKey: string;
-  contentType: string;
-  bytes: Uint8Array;
-  sha256: string;
-};
-export type BlobObject = {
-  authorityRef: string;
-  contentType: string;
-  size: number;
-  sha256: string;
-  scanState: BlobScanState;
-};
-export type AttachFileAtAuthority = {
-  authorityKey: string;
-  taskAuthorityRef: string;
-  blobAuthorityRef: string;
-  name: string;
-  contentType: string;
-  size: number;
-};
-export type TaskFileAuthorityRecord = {
-  authorityRef: string;
-  taskAuthorityRef: string;
-  blobAuthorityRef: string;
-  name: string;
-  contentType: string;
-  size: number;
-  syncWatermark: string;
-};
-export interface TaskAdapter {
-  health(): Promise<"ok" | "degraded">;
-  create(task: CreateTaskAtAuthority): Promise<TaskAuthorityRecord>;
-  get(authorityRef: string): Promise<TaskAuthorityRecord | undefined>;
-  remove(authorityRef: string): Promise<void>;
-}
-export interface BlobAdapter {
-  health(): Promise<"ok" | "degraded">;
-  upload(blob: UploadBlob): Promise<BlobObject>;
-  get(authorityRef: string): Promise<BlobObject | undefined>;
-  remove(authorityRef: string): Promise<void>;
-}
-export interface TaskFileAdapter {
-  health(): Promise<"ok" | "degraded">;
-  attach(file: AttachFileAtAuthority): Promise<TaskFileAuthorityRecord>;
-  get(authorityRef: string): Promise<TaskFileAuthorityRecord | undefined>;
-  remove(authorityRef: string): Promise<void>;
 }

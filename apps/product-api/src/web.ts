@@ -1,3 +1,5 @@
+import { MAX_BROWSER_ASSET_BYTES, projectProcessMapBrowserClientSource } from "../../../packages/api-client/src/project-process-map-client.ts";
+
 export const productWebHtml = String.raw`<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -32,21 +34,22 @@ export const productWebHtml = String.raw`<!doctype html>
   </div>
   <div id="notice" class="notice" role="status"></div>
   <script>
+    ${projectProcessMapBrowserClientSource}
+    const client=new ProjectProcessMapBrowserClient({baseUrl:''});
     const state={nodes:[],selected:null};
     const $=id=>document.getElementById(id);
     const kinds={stage:'阶段',work_package:'工作包',milestone:'里程碑'};
-    const statuses={todo:'待开始',in_progress:'进行中',completed:'已完成',canceled:'已取消'};
+    const statuses={todo:'待开始',in_progress:'进行中',pending_review:'待验收',completed:'已完成',canceled:'已取消',promoted:'已转正式任务'};
     const esc=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
     const key=prefix=>prefix+'-'+Date.now()+'-'+Math.random().toString(16).slice(2);
     function toast(message,error=false){const el=$('notice');el.textContent=message;el.className='notice show'+(error?' error':'');setTimeout(()=>el.className='notice',3000)}
-    async function api(path,options={}){const response=await fetch(path,options);const body=await response.json().catch(()=>({message:'服务返回了无效响应'}));if(!response.ok)throw new Error(body.message||body.code||'请求失败');return body}
-    async function boot(){try{const health=await api('/health');$('runtimeText').textContent=health.adapterMode==='memory'?'本机演示服务已就绪':'SaaS 适配器已配置';state.nodes=await api('/api/nodes');renderNodes();await select(state.nodes[0]?.id)}catch(error){$('loading').textContent='无法连接产品服务：'+error.message;$('runtimeText').textContent='服务不可用'}}
+    async function boot(){try{const health=await client.health();$('runtimeText').textContent=health.collaborationMode==='huly'?'SaaS 与协作投影已配置':'SaaS 服务已就绪';state.nodes=await client.listNodes();renderNodes();await select(state.nodes[0]?.id)}catch(error){$('loading').textContent='无法连接产品服务：'+error.message;$('runtimeText').textContent='服务不可用'}}
     function renderNodes(){$('nodeList').innerHTML=state.nodes.map(node=>'<button class="node'+(node.id===state.selected?' active':'')+'" data-id="'+esc(node.id)+'"><b>'+esc(node.title)+'</b><span>'+esc(node.id)+' · '+esc(kinds[node.kind]||node.kind)+'</span></button>').join('');document.querySelectorAll('.node').forEach(button=>button.onclick=()=>select(button.dataset.id))}
-    async function select(id){if(!id)return;state.selected=id;renderNodes();$('loading').hidden=false;$('detail').hidden=true;try{const value=await api('/api/nodes/'+encodeURIComponent(id));renderDetail(value)}catch(error){toast(error.message,true)}finally{$('loading').hidden=true}}
+    async function select(id){if(!id)return;state.selected=id;renderNodes();$('loading').hidden=false;$('detail').hidden=true;try{const value=await client.getNode(id);renderDetail(value)}catch(error){toast(error.message,true)}finally{$('loading').hidden=true}}
     function renderDetail(value){$('detail').hidden=false;$('nodeTitle').textContent=value.node.title;$('nodeId').textContent=value.node.id;$('nodeKind').textContent=kinds[value.node.kind]||value.node.kind;$('taskCount').textContent=value.tasks.length;$('fileCount').textContent=value.tasks.reduce((sum,task)=>sum+task.files.length,0);$('tasks').innerHTML=value.tasks.length?value.tasks.map(task=>'<article class="task"><div class="task-row"><div><div class="task-title">'+esc(task.title)+'</div><div class="muted" style="font-size:12px;margin-top:3px">'+esc(task.id)+'</div></div><span class="status">'+esc(statuses[task.status]||task.status)+'</span></div><div class="files">'+task.files.map(file=>'<span class="file">📎 '+esc(file.name)+' · '+file.size+'B</span>').join('')+'</div><div class="task-actions"><label class="secondary">上传证据<input type="file" hidden data-task="'+esc(task.id)+'"></label></div></article>').join(''):'<div class="empty">这个节点还没有任务。创建一条任务即可验证原生运行链路。</div>';document.querySelectorAll('input[type=file]').forEach(input=>input.onchange=()=>upload(input))}
     $('toggleCreate').onclick=()=>{$('createForm').classList.toggle('open');$('taskTitle').focus()};
-    $('createForm').onsubmit=async event=>{event.preventDefault();try{await api('/api/nodes/'+encodeURIComponent(state.selected)+'/tasks',{method:'POST',headers:{'content-type':'application/json','idempotency-key':key('web-task')},body:JSON.stringify({title:$('taskTitle').value})});$('taskTitle').value='';$('createForm').classList.remove('open');toast('任务已创建');await select(state.selected)}catch(error){toast(error.message,true)}};
-    async function upload(input){const file=input.files?.[0];if(!file)return;if(file.size>2*1024*1024){toast('当前验证包限制文件不超过 2 MiB',true);return}try{const bytes=new Uint8Array(await file.arrayBuffer());let binary='';bytes.forEach(byte=>binary+=String.fromCharCode(byte));await api('/api/tasks/'+encodeURIComponent(input.dataset.task)+'/files',{method:'POST',headers:{'content-type':'application/json','idempotency-key':key('web-file')},body:JSON.stringify({name:file.name,contentType:file.type||'application/octet-stream',contentBase64:btoa(binary)})});toast('证据文件已关联');await select(state.selected)}catch(error){toast(error.message,true)}}
+    $('createForm').onsubmit=async event=>{event.preventDefault();try{await client.createTask(state.selected,{title:$('taskTitle').value},key('web-task'));$('taskTitle').value='';$('createForm').classList.remove('open');toast('任务已创建');await select(state.selected)}catch(error){toast(error.message,true)}};
+    async function upload(input){const file=input.files?.[0];if(!file)return;if(file.size>${MAX_BROWSER_ASSET_BYTES}){toast('当前验证包限制文件不超过 2 MiB',true);return}try{const bytes=new Uint8Array(await file.arrayBuffer());let binary='';bytes.forEach(byte=>binary+=String.fromCharCode(byte));await client.attachAsset(input.dataset.task,{name:file.name,contentType:file.type||'application/octet-stream',contentBase64:btoa(binary)},key('web-file'));toast('证据文件已关联');await select(state.selected)}catch(error){toast(error.message,true)}}
     boot();
   </script>
 </body>

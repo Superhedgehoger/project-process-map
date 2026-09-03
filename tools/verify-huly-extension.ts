@@ -80,28 +80,26 @@ await requireContent("huly-extension/models/project-process-map/src/index.ts", [
 ]);
 
 await requireContent("huly-extension/plugins/project-process-map-resources/src/components/ProjectProcessMapApplication.svelte", [
-  ["N-06", "six-node shell fixture is required"],
-  ["Product API → Huly", "P0-05 authority path label is required"],
-  ["apiFetch", "P0-05 shell must use Product API"],
-  ["presentation.metadata.Token", "P0-05 shell must delegate the current Huly actor token"],
-  ["P0-05 边界", "P0-05 non-goals must remain visible"],
-  ["aria-label={`查看${node.title}`}", "node selection must remain accessible"],
+  ["__PROJECT_PROCESS_MAP_APP__", "Huly host must launch the configured SaaS application"],
+  ["打开 SaaS 工作台", "Huly host launch action is required"],
+  ["不保存第二份产品状态", "Huly host must state the single-authority boundary"],
+  ["rel=\"noopener noreferrer\"", "external launch must isolate the opener"],
 ]);
 
 await requireContent("huly-extension/plugins/project-process-map-resources/package.json", [
-  ["@hcengineering/presentation", "Huly identity and workspace helpers are required"],
+  ["@hcengineering/presentation", "Huly workspace launch context is required"],
 ]);
 
 await requireContent("packages/adapters/src/huly-rest.ts", [
   ["/api/v1/tx/", "Huly Task adapter must use the locked REST transaction surface"],
   ["/api/v1/find-all/", "Huly Task adapter must support authoritative readback"],
-  ["HulyRestTaskFileAdapter", "Huly Attachment adapter is required"],
+  ["HulyRestTaskFileProjectionAdapter", "Huly Attachment projection adapter is required"],
 ]);
 
-for (const path of ["packages/domain/src/outbox.ts", "packages/application/src/node-task-file.ts"]) {
-  const source = await readFile(path, "utf8");
-  if (source.includes("@hcengineering/")) failures.push(`Huly SDK type leaked outside adapter: ${path}`);
-}
+await requireContent("packages/application/src/integrations/project-collaboration.ts", [
+  ["CollaborationProjectionProcessor", "durable collaboration projection processor is required"],
+  ["externalRequestId", "projection retries must use a stable request identity"],
+]);
 
 await requireContent("tools/apply-huly-extension.ts", [
   ["enabled: true", "model composition must explicitly enable the plugin"],

@@ -11,11 +11,12 @@ import { MemoryPersistence } from "../../../packages/adapters/src/memory/persist
 import { resolveHulyActorId, type HulyRestConfig } from "../../../packages/adapters/src/huly-rest.ts";
 import { principalId, tenantId, type PrincipalId, type TenantId } from "../../../packages/domain/src/identity.ts";
 import type { ProjectNode } from "../../../packages/domain/src/project-structure.ts";
+import type { ApiNode } from "../../../packages/contracts/src/project-process-map-api.ts";
 import { buildHulyConfigurationReport } from "./health.ts";
 import { productWebHtml } from "./web.ts";
 
 export type ProductApiOptions = {
-  adapterMode: "memory" | "huly";
+  collaborationMode: "disabled" | "huly";
   persistence?: Persistence;
   assetContent?: AssetContentPort;
   tenantId?: TenantId;
@@ -50,10 +51,10 @@ export function createProductApi(options: ProductApiOptions) {
         return;
       }
       if (request.method === "GET" && url.pathname === "/health") {
-        const report = options.adapterMode === "huly"
+        const report = options.collaborationMode === "huly"
           ? buildHulyConfigurationReport(hulyConfigured(options))
           : nativeHealthReport();
-        sendJson(response, report.status === "ok" ? 200 : 503, { ...report, adapterMode: options.adapterMode });
+        sendJson(response, report.status === "ok" ? 200 : 503, { ...report, collaborationMode: options.collaborationMode });
         return;
       }
 
@@ -88,7 +89,7 @@ export function createProductApi(options: ProductApiOptions) {
         const idempotencyKey = requiredHeader(request, "idempotency-key");
         const principalKey = `${identity.tenantId}\u0000${identity.principalId}\u0000${idempotencyKey}`;
         const result = await new CreateTaskHandler(persistence, {
-          scheduleCollaborationProjection: options.adapterMode === "huly",
+          scheduleCollaborationProjection: hulyConfigured(options),
         }).execute({
           tenantId: identity.tenantId,
           commandId: deterministicPublicId("cmd-task", principalKey),
@@ -122,7 +123,7 @@ export function createProductApi(options: ProductApiOptions) {
         }
         const occurredAtUtc = new Date().toISOString();
         const result = await new AttachTaskAssetHandler(persistence, content, {
-          scheduleCollaborationProjection: options.adapterMode === "huly",
+          scheduleCollaborationProjection: hulyConfigured(options),
         }).execute({
           tenantId: identity.tenantId,
           commandId: deterministicPublicId("cmd-asset", principalKey),
@@ -180,7 +181,7 @@ export async function seedPhase0Nodes(persistence: Persistence, productTenantId:
 }
 
 async function requestIdentity(request: IncomingMessage, options: ProductApiOptions, productTenantId: TenantId): Promise<RequestIdentity> {
-  if (options.adapterMode === "memory") return { tenantId: productTenantId, principalId: principalId("phase0-user") };
+  if (options.collaborationMode === "disabled") return { tenantId: productTenantId, principalId: principalId("phase0-user") };
   const authorization = request.headers.authorization;
   if (authorization === undefined || !authorization.startsWith("Bearer ")) throw new ApplicationError("UNAUTHORIZED", "Bearer token is required");
   const actorToken = authorization.slice("Bearer ".length).trim();
@@ -202,7 +203,7 @@ async function requestIdentity(request: IncomingMessage, options: ProductApiOpti
   };
 }
 
-function publicNode(node: ProjectNode): Pick<ProjectNode, "id" | "projectId" | "parentId" | "title" | "kind" | "version"> {
+function publicNode(node: ProjectNode): ApiNode {
   return { id: node.id, projectId: node.projectId, parentId: node.parentId, title: node.title, kind: node.kind, version: node.version };
 }
 

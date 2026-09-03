@@ -6,7 +6,7 @@ import { Script } from "node:vm";
 import { createProductApi } from "../apps/product-api/src/app.ts";
 
 test("P0-05-CT-009 Product API exposes the vertical path with stable HTTP semantics", async () => {
-  const handler = createProductApi({ adapterMode: "memory", allowedOrigin: "http://ui.test" });
+  const handler = createProductApi({ collaborationMode: "disabled", allowedOrigin: "http://ui.test" });
   const missingKey = await call(handler, "/api/nodes/N-03/tasks", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -65,7 +65,7 @@ test("P0-05-CT-009 Product API exposes the vertical path with stable HTTP semant
 
 test("P0-05-CT-009 Huly health reports configuration readiness without claiming a memory adapter check", async () => {
   const configured = createProductApi({
-    adapterMode: "huly",
+    collaborationMode: "huly",
     transactionEndpoint: "http://huly.test/_transactor",
     fileEndpoint: "http://huly.test/files",
     workspaceId: "workspace-1",
@@ -79,14 +79,14 @@ test("P0-05-CT-009 Huly health reports configuration readiness without claiming 
     ["product-api", "huly-adapter-configuration"],
   );
 
-  const incomplete = await call(createProductApi({ adapterMode: "huly" }), "/health");
+  const incomplete = await call(createProductApi({ collaborationMode: "huly" }), "/health");
   assert.equal(incomplete.status, 503);
 });
 
 type Handler = (request: IncomingMessage, response: ServerResponse) => Promise<void>;
 
 test("P0-ND-01 Product API serves a standalone browser entry and node collection", async () => {
-  const handler = createProductApi({ adapterMode: "memory" });
+  const handler = createProductApi({ collaborationMode: "disabled" });
   const page = await call(handler, "/");
   assert.equal(page.status, 200);
   assert.equal(page.headers.get("content-type"), "text/html; charset=utf-8");

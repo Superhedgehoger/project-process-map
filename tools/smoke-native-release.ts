@@ -39,7 +39,7 @@ try {
 
   const health = await fetch(`${ready.url}/health`);
   assert.equal(health.status, 200);
-  assert.equal((await health.json() as { adapterMode: string }).adapterMode, "memory");
+  assert.equal((await health.json() as { collaborationMode: string }).collaborationMode, "disabled");
   const page = await fetch(ready.url);
   assert.equal(page.status, 200);
   assert.match(await page.text(), /项目过程图谱/);

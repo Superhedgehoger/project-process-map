@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
-import { HulyRestBlobAdapter, HulyRestTaskAdapter, HulyRestTaskFileAdapter } from "../packages/adapters/src/huly-rest.ts";
+import {
+  HulyRestBlobProjectionAdapter,
+  HulyRestTaskFileProjectionAdapter,
+  HulyRestTaskProjectionAdapter,
+} from "../packages/adapters/src/huly-rest.ts";
+import { IntegrationCallError } from "../packages/application/src/ports/integrations.ts";
 
 type StoredDoc = Record<string, unknown>;
 
@@ -11,6 +16,7 @@ test("P0-05-CT-008 Huly REST adapters create, reconcile and compensate Issue, At
   const blobs = new Set<string>();
   const transactions: StoredDoc[] = [];
   let sequence = 4;
+  let loseTaskCreateResponse = true;
   const originalFetch = globalThis.fetch;
   context.after(() => { globalThis.fetch = originalFetch; });
 
@@ -49,6 +55,10 @@ test("P0-05-CT-008 Huly REST adapters create, reconcile and compensate Issue, At
         };
         const target = transaction.objectClass === "tracker:class:Issue" ? issues : attachments;
         target.set(String(transaction.objectId), doc);
+        if (transaction.objectClass === "tracker:class:Issue" && loseTaskCreateResponse) {
+          loseTaskCreateResponse = false;
+          throw new TypeError("socket closed after commit");
+        }
         return json({});
       }
       if (transaction._class === "core:class:TxRemoveDoc") {
@@ -82,45 +92,86 @@ test("P0-05-CT-008 Huly REST adapters create, reconcile and compensate Issue, At
     projectId: "huly-project-1",
     actorToken: "actor-token",
   };
-  const taskAdapter = new HulyRestTaskAdapter(config);
-  const blobAdapter = new HulyRestBlobAdapter(config);
-  const taskFileAdapter = new HulyRestTaskFileAdapter(config);
-  const taskInput = { authorityKey: "task-key", title: "真实 Huly 任务", status: "todo" as const };
+  const taskAdapter = new HulyRestTaskProjectionAdapter(config);
+  const blobAdapter = new HulyRestBlobProjectionAdapter(config);
+  const taskFileAdapter = new HulyRestTaskFileProjectionAdapter(config);
+  const taskInput = { requestId: "task-key", title: "真实 Huly 任务", status: "todo" as const };
   const task = await taskAdapter.create(taskInput);
   assert.deepEqual(await taskAdapter.create(taskInput), task);
-  assert.deepEqual(await taskAdapter.get(task.authorityRef), task);
+  assert.deepEqual(await taskAdapter.get(task.reference), task);
 
   const bytes = new TextEncoder().encode("huly attachment");
-  const blob = await blobAdapter.upload({
-    authorityKey: "blob-key",
+  const blob = await blobAdapter.put({
+    requestId: "blob-key",
     contentType: "text/plain",
     bytes,
     sha256: createHash("sha256").update(bytes).digest("hex"),
   });
   assert.equal(blob.scanState, "scanning");
-  assert.deepEqual(await blobAdapter.get(blob.authorityRef), blob);
+  assert.equal(await blobAdapter.exists(blob.reference), true);
 
   const attachmentInput = {
-    authorityKey: "attachment-key",
-    taskAuthorityRef: task.authorityRef,
-    blobAuthorityRef: blob.authorityRef,
+    requestId: "attachment-key",
+    taskReference: task.reference,
+    blobReference: blob.reference,
     name: "evidence.txt",
     contentType: "text/plain",
     size: bytes.byteLength,
   };
   const attachment = await taskFileAdapter.attach(attachmentInput);
   assert.deepEqual(await taskFileAdapter.attach(attachmentInput), attachment);
-  assert.deepEqual(await taskFileAdapter.get(attachment.authorityRef), attachment);
+  assert.deepEqual(await taskFileAdapter.get(attachment.reference), attachment);
   assert.equal(transactions.filter((item) => item._class === "core:class:TxUpdateDoc").length, 1);
   assert.equal(transactions.filter((item) => item._class === "core:class:TxCreateDoc").length, 2);
   assert.equal(sequence, 5);
 
-  await taskFileAdapter.remove(attachment.authorityRef);
-  await blobAdapter.remove(blob.authorityRef);
-  await taskAdapter.remove(task.authorityRef);
+  const issueBeforeDelete = issues.get(task.reference.externalId);
+  assert.ok(issueBeforeDelete);
+  issueBeforeDelete.modifiedOn = 999;
+  await assert.rejects(taskAdapter.remove(task.reference, task.syncWatermark), /HULY_SYNC_WATERMARK_CONFLICT/);
+  assert.equal(issues.has(task.reference.externalId), true);
+  issueBeforeDelete.modifiedOn = Number(task.syncWatermark);
+
+  await taskFileAdapter.remove(attachment.reference, attachment.syncWatermark);
+  await blobAdapter.remove(blob.reference);
+  await taskAdapter.remove(task.reference, task.syncWatermark);
   assert.equal(attachments.size, 0);
   assert.equal(blobs.size, 0);
   assert.equal(issues.size, 0);
+});
+
+test("ARCH-GATE-HULY-001 Huly calls have an abortable deadline and classify ambiguous timeout", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async (_input, init = {}) => await new Promise<Response>((_resolve, reject) => {
+    init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+  });
+  const adapter = new HulyRestTaskProjectionAdapter({
+    transactionEndpoint: "http://huly.test/_transactor",
+    fileEndpoint: "http://huly.test/files",
+    workspaceId: "workspace-1",
+    projectId: "project-1",
+    actorToken: "service-token",
+    requestTimeoutMilliseconds: 5,
+  });
+  assert.equal(await adapter.health(), "degraded");
+  const direct = new HulyRestTaskProjectionAdapter({
+    transactionEndpoint: "http://huly.test/_transactor",
+    fileEndpoint: "http://huly.test/files",
+    workspaceId: "workspace-1",
+    projectId: "project-1",
+    actorToken: "service-token",
+    requestTimeoutMilliseconds: 5,
+  });
+  try {
+    await direct.create({ requestId: "request-1", title: "timeout", status: "todo" });
+    assert.fail("timeout should reject");
+  } catch (error) {
+    assert.ok(error instanceof IntegrationCallError);
+    assert.equal(error.code, "HULY_REQUEST_TIMEOUT");
+    assert.equal(error.retryable, true);
+    assert.equal(error.outcome, "ambiguous");
+  }
 });
 
 function maybe(value: StoredDoc | undefined): StoredDoc[] {

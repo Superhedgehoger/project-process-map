@@ -28,6 +28,14 @@ test("ARCH-GATE-BOUNDARY-002 Huly model and base plugin do not depend on resourc
   assert.match(basePlugin, /ProjectProcessMapApplication/);
 });
 
+test("ARCH-GATE-BOUNDARY-003 Huly host does not duplicate product DTOs, commands or state", async () => {
+  const source = await readFile("huly-extension/plugins/project-process-map-resources/src/components/ProjectProcessMapApplication.svelte", "utf8");
+  for (const forbidden of ["fetch(", "ApiTask", "ApiFile", "contentBase64", "idempotency-key", "method: 'POST'"]) {
+    assert.equal(source.includes(forbidden), false, `Huly host duplicates product behavior: ${forbidden}`);
+  }
+  assert.match(source, /__PROJECT_PROCESS_MAP_APP__/);
+});
+
 test("ARCH-GATE-TREE-001 parent-child Relation is rejected because Node.parentId is authoritative", () => {
   assert.doesNotThrow(() => assertWritableRelationKind("predecessor"));
   assert.doesNotThrow(() => assertWritableRelationKind("related"));
@@ -43,4 +51,3 @@ async function sourceFiles(root: string): Promise<string[]> {
   }
   return files;
 }
-

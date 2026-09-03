@@ -129,4 +129,10 @@ export interface JobConsumer {
     nextAttemptAtUtc: string,
     error: string,
   ): Promise<"retry" | "dead_letter" | "lease_lost">;
+  markDeadLetter(
+    tenantId: TenantId,
+    jobId: string,
+    leaseToken: string,
+    error: string,
+  ): Promise<boolean>;
 }

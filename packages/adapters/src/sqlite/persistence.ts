@@ -66,6 +66,9 @@ export class SqlitePersistence implements Persistence {
     release: async (tenantId, jobId, leaseToken, nextAttemptAtUtc, error) => await this.releaseQueue(
       "background_jobs", tenantId, jobId, leaseToken, nextAttemptAtUtc, error,
     ),
+    markDeadLetter: async (tenantId, jobId, leaseToken, error) => await this.markJobDeadLetter(
+      tenantId, jobId, leaseToken, error,
+    ),
   };
 
   async transaction<T>(tenantId: TenantId, work: (transaction: TransactionContext) => Promise<T>): Promise<T> {
@@ -717,6 +720,17 @@ export class SqlitePersistence implements Persistence {
       `).get(nextAttemptAtUtc, error, tenantId, id, leaseToken);
       if (row === undefined) return "lease_lost";
       return asString(row.state) === "dead_letter" ? "dead_letter" : "retry";
+    });
+  }
+
+  private async markJobDeadLetter(tenantId: TenantId, jobId: string, leaseToken: string, error: string): Promise<boolean> {
+    return await this.exclusive(async () => {
+      const result = this.#database.prepare(`
+        UPDATE background_jobs
+        SET state = 'dead_letter', last_error = ?, lease_owner = NULL, lease_token = NULL, lease_expires_at_utc = NULL
+        WHERE tenant_id = ? AND job_id = ? AND state = 'leased' AND lease_token = ?
+      `).run(error, tenantId, jobId, leaseToken);
+      return result.changes === 1;
     });
   }
 

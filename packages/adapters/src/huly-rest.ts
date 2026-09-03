@@ -1,17 +1,18 @@
 import { createHash, randomUUID } from "node:crypto";
 import type {
-  AttachFileAtAuthority,
-  BlobAdapter,
-  BlobObject,
   BlobScanState,
-  CreateTaskAtAuthority,
-  TaskAdapter,
-  TaskAuthorityRecord,
-  TaskAuthorityStatus,
-  TaskFileAdapter,
-  TaskFileAuthorityRecord,
-  UploadBlob,
+  AttachFileProjection,
+  CollaborationTaskStatus,
+  CreateTaskProjection,
+  ExternalBlobProjectionPort,
+  StoredAssetContent,
+  TaskFileProjectionPort,
+  TaskFileProjectionRecord,
+  TaskProjectionPort,
+  TaskProjectionRecord,
 } from "../../application/src/ports/integrations.ts";
+import { IntegrationCallError } from "../../application/src/ports/integrations.ts";
+import { externalReference, type ExternalReference } from "../../domain/src/external-reference.ts";
 
 const HULY_IDS = {
   issueClass: "tracker:class:Issue",
@@ -35,13 +36,10 @@ export type HulyRestConfig = {
   projectId: string;
   actorToken: string;
   taskTypeId?: string;
-  statusIds?: Partial<Record<TaskAuthorityStatus, string>>;
+  statusIds?: Partial<Record<CollaborationTaskStatus, string>>;
   blobScanState?: BlobScanState;
+  requestTimeoutMilliseconds?: number;
 };
-
-type TaskRef = { issueId: string };
-type BlobRef = { blobId: string; contentType: string; size: number; sha256: string; scanState: BlobScanState };
-type FileRef = { attachmentId: string; issueId: string; blobAuthorityRef: string };
 
 class HulyRestConnection {
   readonly transactionEndpoint: string;
@@ -112,14 +110,14 @@ class HulyRestConnection {
   }
 
   async blobExists(blobId: string): Promise<boolean> {
-    const response = await fetch(this.fileUrl(blobId), { method: "HEAD", headers: this.authHeaders(false) });
+    const response = await this.fetchResponse(this.fileUrl(blobId), { method: "HEAD", headers: this.authHeaders(false) }, true);
     if (response.status === 404) return false;
     if (!response.ok) throw new Error(`HULY_FILE_HEAD_FAILED:${response.status}`);
     return true;
   }
 
   async removeBlob(blobId: string): Promise<void> {
-    const response = await fetch(this.fileUrl(blobId), { method: "DELETE", headers: this.authHeaders(false) });
+    const response = await this.fetchResponse(this.fileUrl(blobId), { method: "DELETE", headers: this.authHeaders(false) }, true);
     if (response.status === 404) return;
     if (!response.ok) throw new Error(`HULY_FILE_DELETE_FAILED:${response.status}`);
   }
@@ -170,15 +168,39 @@ class HulyRestConnection {
   }
 
   private async requestJson(url: string, init: RequestInit = {}, json = true): Promise<unknown> {
-    const response = await fetch(url, { ...init, headers: { ...this.authHeaders(json), ...init.headers } });
-    if (!response.ok) throw new Error(`HULY_REQUEST_FAILED:${response.status}`);
+    const response = await this.fetchResponse(url, { ...init, headers: { ...this.authHeaders(json), ...init.headers } });
     const result: unknown = await response.json();
     if (isObject(result) && result.error !== undefined) throw new Error(`HULY_RESPONSE_ERROR:${JSON.stringify(result.error)}`);
     return result;
   }
+
+  private async fetchResponse(url: string, init: RequestInit, allowNotFound = false): Promise<Response> {
+    const timeout = AbortSignal.timeout(this.config.requestTimeoutMilliseconds ?? 10_000);
+    const signal = init.signal == null ? timeout : AbortSignal.any([init.signal, timeout]);
+    let response: Response;
+    try {
+      response = await fetch(url, { ...init, signal });
+    } catch (error) {
+      const timedOut = timeout.aborted;
+      throw new IntegrationCallError(
+        timedOut ? "HULY_REQUEST_TIMEOUT" : "HULY_NETWORK_FAILURE",
+        timedOut ? "Huly request exceeded its deadline" : errorMessage(error),
+        { retryable: true, outcome: "ambiguous" },
+      );
+    }
+    if (!response.ok && !(allowNotFound && response.status === 404)) {
+      const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+      throw new IntegrationCallError(
+        `HULY_HTTP_${response.status}`,
+        `Huly request failed with HTTP ${response.status}`,
+        { retryable, outcome: "known_failed" },
+      );
+    }
+    return response;
+  }
 }
 
-export class HulyRestTaskAdapter implements TaskAdapter {
+export class HulyRestTaskProjectionAdapter implements TaskProjectionPort {
   readonly #connection: HulyRestConnection;
 
   constructor(config: HulyRestConfig) {
@@ -189,8 +211,8 @@ export class HulyRestTaskAdapter implements TaskAdapter {
     return await this.#connection.health();
   }
 
-  async create(task: CreateTaskAtAuthority): Promise<TaskAuthorityRecord> {
-    const issueId = deterministicId(`task:${task.authorityKey}`);
+  async create(task: CreateTaskProjection): Promise<TaskProjectionRecord> {
+    const issueId = deterministicId(`task:${task.requestId}`);
     const existing = await this.#connection.findOne(HULY_IDS.issueClass, { _id: issueId });
     if (existing !== undefined) return this.toRecord(existing, issueId, task);
 
@@ -255,16 +277,17 @@ export class HulyRestTaskAdapter implements TaskAdapter {
     return this.toRecord(created, issueId, task);
   }
 
-  async get(authorityRef: string): Promise<TaskAuthorityRecord | undefined> {
-    const { issueId } = decodeRef<TaskRef>(authorityRef, "huly-task");
+  async get(reference: ExternalReference): Promise<TaskProjectionRecord | undefined> {
+    const issueId = hulyId(reference, "task");
     const issue = await this.#connection.findOne(HULY_IDS.issueClass, { _id: issueId });
     return issue === undefined ? undefined : this.toRecord(issue, issueId);
   }
 
-  async remove(authorityRef: string): Promise<void> {
-    const { issueId } = decodeRef<TaskRef>(authorityRef, "huly-task");
+  async remove(reference: ExternalReference, expectedSyncWatermark: string): Promise<void> {
+    const issueId = hulyId(reference, "task");
     const issue = await this.#connection.findOne(HULY_IDS.issueClass, { _id: issueId });
     if (issue === undefined) return;
+    if (String(issue.modifiedOn ?? "0") !== expectedSyncWatermark) throw new Error("HULY_SYNC_WATERMARK_CONFLICT");
     const actorId = await this.#connection.actorId();
     await this.#connection.tx(this.#connection.collectionTx(
       this.#connection.removeTx(actorId, HULY_IDS.issueClass, this.#connection.config.projectId, issueId),
@@ -282,11 +305,11 @@ export class HulyRestTaskAdapter implements TaskAdapter {
     return taskType._id;
   }
 
-  private statusId(status: TaskAuthorityStatus, project: JsonObject): string {
+  private statusId(status: CollaborationTaskStatus, project: JsonObject): string {
     const configured = this.#connection.config.statusIds?.[status];
     if (configured !== undefined) return configured;
     if (status === "todo" && typeof project.defaultIssueStatus === "string") return project.defaultIssueStatus;
-    const defaults: Record<TaskAuthorityStatus, string> = {
+    const defaults: Record<CollaborationTaskStatus, string> = {
       todo: "tracker:status:Todo",
       in_progress: "tracker:status:InProgress",
       completed: "tracker:status:Done",
@@ -295,26 +318,25 @@ export class HulyRestTaskAdapter implements TaskAdapter {
     return defaults[status];
   }
 
-  private toRecord(issue: JsonObject, issueId: string, expected?: CreateTaskAtAuthority): TaskAuthorityRecord {
+  private toRecord(issue: JsonObject, issueId: string, expected?: CreateTaskProjection): TaskProjectionRecord {
     if (typeof issue.title !== "string" || typeof issue.status !== "string") throw new Error("HULY_TASK_RESPONSE_INVALID");
     if (expected !== undefined && issue.title !== expected.title) throw new Error("HULY_DETERMINISTIC_ID_CONFLICT");
     return {
-      authorityRef: encodeRef("huly-task", { issueId }),
+      reference: externalReference("huly", "task", issueId),
       title: issue.title,
-      status: this.fromStatusId(issue.status, expected?.status),
+      status: this.fromStatusId(issue.status),
       syncWatermark: String(issue.modifiedOn ?? "0"),
     };
   }
 
-  private fromStatusId(statusId: string, expected?: TaskAuthorityStatus): TaskAuthorityStatus {
+  private fromStatusId(statusId: string): CollaborationTaskStatus {
     for (const [status, configured] of Object.entries(this.#connection.config.statusIds ?? {})) {
-      if (configured === statusId) return status as TaskAuthorityStatus;
+      if (configured === statusId) return status as CollaborationTaskStatus;
     }
     if (statusId.endsWith(":Todo") || statusId.endsWith(":Backlog")) return "todo";
     if (statusId.endsWith(":InProgress") || statusId.endsWith(":Coding") || statusId.endsWith(":UnderReview")) return "in_progress";
     if (statusId.endsWith(":Done")) return "completed";
     if (statusId.endsWith(":Canceled")) return "canceled";
-    if (expected !== undefined) return expected;
     throw new Error(`HULY_TASK_STATUS_UNMAPPED:${statusId}`);
   }
 }
@@ -323,7 +345,7 @@ export async function resolveHulyActorId(config: HulyRestConfig): Promise<string
   return await new HulyRestConnection(config).actorId();
 }
 
-export class HulyRestBlobAdapter implements BlobAdapter {
+export class HulyRestBlobProjectionAdapter implements ExternalBlobProjectionPort {
   readonly #connection: HulyRestConnection;
 
   constructor(config: HulyRestConfig) {
@@ -334,35 +356,32 @@ export class HulyRestBlobAdapter implements BlobAdapter {
     return await this.#connection.health();
   }
 
-  async upload(blob: UploadBlob): Promise<BlobObject> {
-    const blobId = deterministicId(`blob:${blob.authorityKey}`);
-    const reference: BlobRef = {
-      blobId,
+  async put(blob: Omit<import("../../application/src/ports/integrations.ts").PutAssetContent, "tenantId">): Promise<StoredAssetContent> {
+    const blobId = deterministicId(`blob:${blob.requestId}`);
+    const reference = externalReference("huly", "blob", blobId);
+    if (!await this.#connection.blobExists(blobId)) {
+      const uploadedId = await this.#connection.upload(blobId, blob.contentType, blob.bytes);
+      if (uploadedId !== blobId) throw new Error("HULY_BLOB_ID_MISMATCH");
+    }
+    return {
+      reference,
       contentType: blob.contentType,
       size: blob.bytes.byteLength,
       sha256: blob.sha256,
       scanState: this.#connection.config.blobScanState ?? "scanning",
     };
-    if (!await this.#connection.blobExists(blobId)) {
-      const uploadedId = await this.#connection.upload(blobId, blob.contentType, blob.bytes);
-      if (uploadedId !== blobId) throw new Error("HULY_BLOB_ID_MISMATCH");
-    }
-    return { authorityRef: encodeRef("huly-blob", reference), ...withoutBlobId(reference) };
   }
 
-  async get(authorityRef: string): Promise<BlobObject | undefined> {
-    const reference = decodeRef<BlobRef>(authorityRef, "huly-blob");
-    if (!await this.#connection.blobExists(reference.blobId)) return undefined;
-    return { authorityRef, ...withoutBlobId(reference) };
+  async exists(reference: ExternalReference): Promise<boolean> {
+    return await this.#connection.blobExists(hulyId(reference, "blob"));
   }
 
-  async remove(authorityRef: string): Promise<void> {
-    const { blobId } = decodeRef<BlobRef>(authorityRef, "huly-blob");
-    await this.#connection.removeBlob(blobId);
+  async remove(reference: ExternalReference): Promise<void> {
+    await this.#connection.removeBlob(hulyId(reference, "blob"));
   }
 }
 
-export class HulyRestTaskFileAdapter implements TaskFileAdapter {
+export class HulyRestTaskFileProjectionAdapter implements TaskFileProjectionPort {
   readonly #connection: HulyRestConnection;
 
   constructor(config: HulyRestConfig) {
@@ -373,10 +392,10 @@ export class HulyRestTaskFileAdapter implements TaskFileAdapter {
     return await this.#connection.health();
   }
 
-  async attach(file: AttachFileAtAuthority): Promise<TaskFileAuthorityRecord> {
-    const { issueId } = decodeRef<TaskRef>(file.taskAuthorityRef, "huly-task");
-    const { blobId } = decodeRef<BlobRef>(file.blobAuthorityRef, "huly-blob");
-    const attachmentId = deterministicId(`attachment:${file.authorityKey}`);
+  async attach(file: AttachFileProjection): Promise<TaskFileProjectionRecord> {
+    const issueId = hulyId(file.taskReference, "task");
+    const blobId = hulyId(file.blobReference, "blob");
+    const attachmentId = deterministicId(`attachment:${file.requestId}`);
     const existing = await this.#connection.findOne(HULY_IDS.attachmentClass, { _id: attachmentId });
     if (existing !== undefined) return this.toRecord(existing, attachmentId, issueId, file);
     const issue = await this.#connection.findOne(HULY_IDS.issueClass, { _id: issueId });
@@ -407,16 +426,21 @@ export class HulyRestTaskFileAdapter implements TaskFileAdapter {
     return this.toRecord(created, attachmentId, issueId, file);
   }
 
-  async get(authorityRef: string): Promise<TaskFileAuthorityRecord | undefined> {
-    const { attachmentId, issueId, blobAuthorityRef } = decodeRef<FileRef>(authorityRef, "huly-attachment");
+  async get(reference: ExternalReference): Promise<TaskFileProjectionRecord | undefined> {
+    const attachmentId = hulyId(reference, "attachment");
     const attachment = await this.#connection.findOne(HULY_IDS.attachmentClass, { _id: attachmentId });
-    return attachment === undefined ? undefined : this.toRecord(attachment, attachmentId, issueId, undefined, blobAuthorityRef);
+    if (attachment === undefined) return undefined;
+    if (typeof attachment.attachedTo !== "string") throw new Error("HULY_ATTACHMENT_PARENT_INVALID");
+    return this.toRecord(attachment, attachmentId, attachment.attachedTo);
   }
 
-  async remove(authorityRef: string): Promise<void> {
-    const { attachmentId, issueId } = decodeRef<FileRef>(authorityRef, "huly-attachment");
+  async remove(reference: ExternalReference, expectedSyncWatermark: string): Promise<void> {
+    const attachmentId = hulyId(reference, "attachment");
     const attachment = await this.#connection.findOne(HULY_IDS.attachmentClass, { _id: attachmentId });
     if (attachment === undefined) return;
+    if (String(attachment.modifiedOn ?? "0") !== expectedSyncWatermark) throw new Error("HULY_SYNC_WATERMARK_CONFLICT");
+    if (typeof attachment.attachedTo !== "string") throw new Error("HULY_ATTACHMENT_PARENT_INVALID");
+    const issueId = attachment.attachedTo;
     const actorId = await this.#connection.actorId();
     await this.#connection.tx(this.#connection.collectionTx(
       this.#connection.removeTx(actorId, HULY_IDS.attachmentClass, this.#connection.config.projectId, attachmentId),
@@ -430,26 +454,18 @@ export class HulyRestTaskFileAdapter implements TaskFileAdapter {
     attachment: JsonObject,
     attachmentId: string,
     issueId: string,
-    expected?: AttachFileAtAuthority,
-    knownBlobAuthorityRef?: string,
-  ): TaskFileAuthorityRecord {
+    expected?: AttachFileProjection,
+  ): TaskFileProjectionRecord {
     if (typeof attachment.file !== "string" || typeof attachment.name !== "string" || typeof attachment.type !== "string" || typeof attachment.size !== "number") {
       throw new Error("HULY_ATTACHMENT_RESPONSE_INVALID");
     }
-    if (expected !== undefined && (attachment.name !== expected.name || attachment.file !== decodeRef<BlobRef>(expected.blobAuthorityRef, "huly-blob").blobId)) {
+    if (expected !== undefined && (attachment.name !== expected.name || attachment.file !== hulyId(expected.blobReference, "blob"))) {
       throw new Error("HULY_DETERMINISTIC_ID_CONFLICT");
     }
-    const blobAuthorityRef = expected?.blobAuthorityRef ?? knownBlobAuthorityRef ?? encodeRef("huly-blob", {
-      blobId: attachment.file,
-      contentType: attachment.type,
-      size: attachment.size,
-      sha256: "unknown",
-      scanState: "scanning",
-    });
     return {
-      authorityRef: encodeRef("huly-attachment", { attachmentId, issueId, blobAuthorityRef }),
-      taskAuthorityRef: encodeRef("huly-task", { issueId }),
-      blobAuthorityRef,
+      reference: externalReference("huly", "attachment", attachmentId),
+      taskReference: externalReference("huly", "task", issueId),
+      blobReference: externalReference("huly", "blob", attachment.file),
       name: attachment.name,
       contentType: attachment.type,
       size: attachment.size,
@@ -466,24 +482,15 @@ function randomId(): string {
   return randomUUID().replaceAll("-", "").slice(0, 24);
 }
 
-function encodeRef(prefix: string, value: JsonObject): string {
-  return `${prefix}:${Buffer.from(JSON.stringify(value)).toString("base64url")}`;
-}
-
-function decodeRef<T extends JsonObject>(value: string, prefix: string): T {
-  if (!value.startsWith(`${prefix}:`)) throw new Error(`INVALID_AUTHORITY_REF:${prefix}`);
-  try {
-    const decoded: unknown = JSON.parse(Buffer.from(value.slice(prefix.length + 1), "base64url").toString("utf8"));
-    if (!isObject(decoded)) throw new Error("not an object");
-    return decoded as T;
-  } catch {
-    throw new Error(`INVALID_AUTHORITY_REF:${prefix}`);
+function hulyId(reference: ExternalReference, kind: "task" | "blob" | "attachment"): string {
+  if (reference.provider !== "huly" || reference.kind !== kind || reference.schemaVersion !== 1 || reference.externalId.trim().length === 0) {
+    throw new Error(`HULY_EXTERNAL_REFERENCE_INVALID:${kind}`);
   }
+  return reference.externalId;
 }
 
-function withoutBlobId(reference: BlobRef): Omit<BlobRef, "blobId"> {
-  const { blobId: _blobId, ...value } = reference;
-  return value;
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function isObject(value: unknown): value is JsonObject {

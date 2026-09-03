@@ -1,11 +1,13 @@
-import { createNativeDependencies, startProductApiServer } from "../../product-api/src/server.ts";
+import { createNativeDependencies, createNativeJobProcessor, startProductApiServer } from "../../product-api/src/server.ts";
 import { startWorker } from "../../worker/src/worker.ts";
 
 const dependencies = createNativeDependencies(process.env);
 const heartbeatMilliseconds = Number.parseInt(process.env.WORKER_HEARTBEAT_MS ?? "30000", 10);
+const processJob = createNativeJobProcessor(process.env, dependencies);
 const worker = startWorker({
   outbox: dependencies.persistence.outboxConsumer,
   jobs: dependencies.persistence.jobConsumer,
+  ...(processJob === undefined ? {} : { processJob }),
 }, heartbeatMilliseconds);
 const runtime = await startProductApiServer(process.env, dependencies);
 
@@ -13,7 +15,7 @@ console.log(JSON.stringify({
   component: "product-runtime",
   status: "ready",
   url: `http://${runtime.host}:${runtime.port}`,
-  adapterMode: process.env.ADAPTER_MODE === "huly" ? "huly" : "memory",
+  collaborationMode: process.env.COLLABORATION_MODE === "huly" || process.env.ADAPTER_MODE === "huly" ? "huly" : "disabled",
   persistence: "sqlite",
 }));
 

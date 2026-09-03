@@ -32,6 +32,12 @@ export class MemoryAssetContent implements AssetContentPort {
     return value === undefined ? undefined : publicRecord(value);
   }
 
+  async read(reference: StoredAssetContent["reference"]): Promise<Uint8Array> {
+    const value = this.#content.get(externalReferenceKey(reference));
+    if (value === undefined) throw new Error("ASSET_CONTENT_NOT_FOUND");
+    return Uint8Array.from(value.bytes);
+  }
+
   async remove(reference: StoredAssetContent["reference"]): Promise<void> {
     this.#content.delete(externalReferenceKey(reference));
   }
@@ -51,4 +57,3 @@ function publicRecord(value: StoredAssetContent & { bytes: Uint8Array }): Stored
     scanState: value.scanState,
   };
 }
-

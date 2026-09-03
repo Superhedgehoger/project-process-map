@@ -77,9 +77,15 @@ export async function runWorkerCycle(
       await dependencies.processJob(job);
       if (job.leaseToken !== null && await dependencies.jobs.markCompleted(job.tenantId, job.id, job.leaseToken, nowUtc)) jobsProcessed += 1;
     } catch (error) {
-      if (job.leaseToken !== null) await dependencies.jobs.release(
-        job.tenantId, job.id, job.leaseToken, nextAttempt(now, job.attempts), errorMessage(error),
-      );
+      if (job.leaseToken !== null) {
+        if (isExplicitlyNonRetryable(error)) {
+          await dependencies.jobs.markDeadLetter(job.tenantId, job.id, job.leaseToken, errorMessage(error));
+        } else {
+          await dependencies.jobs.release(
+            job.tenantId, job.id, job.leaseToken, nextAttempt(now, job.attempts), errorMessage(error),
+          );
+        }
+      }
     }
   }
   return { checkedAt: nowUtc, outboxProcessed, jobsProcessed };
@@ -94,4 +100,8 @@ function nextAttempt(now: Date, attempts: number): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isExplicitlyNonRetryable(error: unknown): boolean {
+  return error instanceof Error && "retryable" in error && (error as { retryable?: unknown }).retryable === false;
 }
