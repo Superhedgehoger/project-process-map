@@ -17,6 +17,7 @@ import { MemoryAssetContent } from "../packages/adapters/src/memory/asset-conten
 import { MemoryPersistence } from "../packages/adapters/src/memory/persistence.ts";
 import { externalReference, externalReferenceKey } from "../packages/domain/src/external-reference.ts";
 import { principalId, tenantId } from "../packages/domain/src/identity.ts";
+import { grantProjectMembership } from "./support/project-membership.ts";
 
 const tenant = tenantId("tenant-collaboration-projection");
 const principal = principalId("principal-collaboration-projection");
@@ -29,6 +30,7 @@ test("ARCH-GATE-HULY-002 task and partial asset projection resume from durable s
   const blobs = new FakeBlobProjection();
   const files = new FailsOnceTaskFileProjection();
   try {
+    await grantProjectMembership(persistence, tenant, "project-1", principal);
     await executeCreateNode(persistence, {
       tenantId: tenant,
       commandId: "node-command",
@@ -53,7 +55,8 @@ test("ARCH-GATE-HULY-002 task and partial asset projection resume from durable s
       taskId: "task-1",
       title: "提交证据",
       assigneePrincipalId: principal,
-      requiresAcceptance: true,
+      requiresAcceptance: false,
+      reviewerPrincipalId: null,
       occurredAtUtc: now.toISOString(),
     });
     const bytes = new TextEncoder().encode("durable projection evidence");

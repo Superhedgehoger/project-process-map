@@ -14,6 +14,7 @@ import { MemoryAssetContent } from "../packages/adapters/src/memory/asset-conten
 import { MemoryPersistence } from "../packages/adapters/src/memory/persistence.ts";
 import { SqlitePersistence } from "../packages/adapters/src/sqlite/persistence.ts";
 import { principalId, tenantId } from "../packages/domain/src/identity.ts";
+import { grantProjectMembership } from "./support/project-membership.ts";
 
 const tenant = tenantId("tenant-asset-test");
 const principal = principalId("principal-asset-test");
@@ -21,6 +22,7 @@ const bytes = new TextEncoder().encode("architecture evidence");
 const sha256 = createHash("sha256").update(bytes).digest("hex");
 
 async function prepare(persistence: Persistence): Promise<void> {
+  await grantProjectMembership(persistence, tenant, "project-1", principal, { securityDomainIds: ["security-1"] });
   await executeCreateNode(persistence, {
     tenantId: tenant,
     commandId: "node-command",
@@ -45,7 +47,8 @@ async function prepare(persistence: Persistence): Promise<void> {
     taskId: "task-1",
     title: "提交方案",
     assigneePrincipalId: principal,
-    requiresAcceptance: true,
+    requiresAcceptance: false,
+    reviewerPrincipalId: null,
     occurredAtUtc: "2026-09-04T02:01:00.000Z",
   });
 }

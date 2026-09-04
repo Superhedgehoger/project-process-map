@@ -10,6 +10,7 @@ GitHub：<https://github.com/Superhedgehoger/project-process-map>
 - 无 Docker 原生发行包：`pnpm build:native`
 - 从临时目录解包、启动和纵向冒烟：`pnpm smoke:native`
 - Product API 健康检查与 SQLite/文件持久化纵向链路：`pnpm dev:api`
+- 必验任务 API：显式验收人快照、开始、提交、退回、再次提交和通过；所有动作要求期望版本与幂等键
 - Worker 健康检查：`pnpm dev:worker`
 - 本地 Node/事件/Outbox 原子性与幂等原型：`pnpm test`
 - Phase 0 大样例与最小签字模板：`pnpm fixtures:generate`
@@ -37,13 +38,23 @@ pnpm build:native
 pnpm smoke:native
 ```
 
-制品生成在 `dist/release/`，包含编译后的 JavaScript、自包含浏览器页面、`bin/project-process-map` 启动器和 `SHA256SUMS`。SaaS 监听示例：
+制品生成在 `dist/release/`，包含编译后的 JavaScript、自包含浏览器页面、`bin/project-process-map` 启动器和 `SHA256SUMS`。当前安全启动方式：
 
 ```bash
-HOST=0.0.0.0 PORT=4100 ./bin/project-process-map
+HOST=127.0.0.1 PORT=4100 ./bin/project-process-map
 ```
 
-发行制品依赖 Node.js 24，默认使用 `data/project-process-map.sqlite` 与 `data/assets/`，API 和 Worker 共享持久队列。冒烟已覆盖页面 → 节点 → 任务 → 文件 → 停止 → 重启 → 回读且确认没有调用 Docker。生产发布仍需补干净 Linux、TLS/反向代理、正式 SaaS 登录、备份、签名和升级/回滚演练。
+发行制品依赖 Node.js 24，默认使用 `data/project-process-map.sqlite` 与 `data/assets/`，API 和 Worker 共享持久队列。冒烟已覆盖页面 → 节点 → 任务 → 文件与两轮任务验收 → 停止 → 重启 → 回读，且确认没有调用 Docker。P0-07 正式身份与授权完成前，程序主动拒绝 `0.0.0.0` 等非本机监听，避免把尚未完成成员配置的服务暴露到公网。生产发布仍需补干净 Linux、TLS/反向代理、正式 SaaS 登录、备份、签名和升级/回滚演练。
+
+任务状态命令使用统一入口：
+
+```text
+POST /api/tasks/{taskId}/actions/{start|submit|accept|reject|withdraw|complete|assign-assignee|assign-reviewer}
+Idempotency-Key: <稳定请求键>
+{"expectedVersion": 2, "note": "提交说明或退回理由"}
+```
+
+当前 `P0-05A-T1a` 只开放显式验收人分支。SQLite/Memory 均持久保存最小 `ProjectMembership`：负责人才能开始、提交、撤回或免验完成，项目经理可以改派负责人/验收人并参与通过或退回；每次请求先按当前成员状态和安全域授权，再处理幂等回放。模板角色槽位、节点负责人回退、授权变更审计和完整 P0-07 管理入口仍未实现。Huly 登录主体没有成员配置时会得到空列表/404，不会自动获得项目权限。
 
 ### Docker 的保留范围
 
@@ -78,13 +89,13 @@ Huly 扩展现在仅作为 SaaS 启动入口，不复制任务 DTO、状态机�
 
 1. `P0-01`：锁定 Huly commit、许可证、SBOM 初稿与可重复构建命令。
 2. `P0-02`：在干净环境完成自托管部署并保存证据。
-3. `P0-03`：验证 Product API、Worker 和内存 Adapter 骨架。
+3. `P0-03`：验证 Product API、Worker 和 Adapter 骨架。
 4. `P0-04`：Huly Shell 页面与六节点交互原型。
 5. `P0-05`：Node → Huly Task → File 引用纵向演示。
 6. `P0-ND-01`：无 Docker 产品发行包、浏览器入口和解包冒烟。
 7. `ARCH-GATE-01`：修正租户/身份、Task/树权威、Asset、持久事务、集成恢复和 UI 契约边界。
 8. `P0-ND-02`：无 Docker 干净 Linux、正式登录、备份和升级回滚。
-9. `P0-05A`：架构闸门完成后恢复任务验收与交付物完成守卫开发。
+9. `P0-05A`：进行中；`T1a` 已完成显式验收人的任务验收周期、最小持久成员授权和旧任务恢复，后续继续角色解析、权限管理入口和交付物完成守卫。
 
 项目负责人已批准 P0-01 许可证风险闸门，可继续本地 Phase 0 集成；该批准是项目风险接受，不替代生产发布前的正式法律审查。
 

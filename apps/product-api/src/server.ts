@@ -67,10 +67,11 @@ export async function startProductApiServer(
   environment: NodeJS.ProcessEnv = process.env,
   dependencies?: ProductApiDependencies,
 ): Promise<ProductApiRuntime> {
-  const runtimeDependencies = dependencies ?? createNativeDependencies(environment);
-  const identityVerifier = hulyIdentityVerifier(environment);
   const port = parsePort(environment.PORT ?? "4100");
   const host = environment.HOST?.trim() || "127.0.0.1";
+  if (!isLoopbackHost(host)) throw new Error("PUBLIC_BIND_REQUIRES_P0_07");
+  const runtimeDependencies = dependencies ?? createNativeDependencies(environment);
+  const identityVerifier = hulyIdentityVerifier(environment);
   const options: ProductApiOptions = {
     collaborationMode: configuredCollaborationMode(environment),
     persistence: runtimeDependencies.persistence,
@@ -114,6 +115,10 @@ function parsePort(value: string): number {
   const port = Number.parseInt(value, 10);
   if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new Error(`Invalid PORT: ${value}`);
   return port;
+}
+
+function isLoopbackHost(host: string): boolean {
+  return host === "127.0.0.1" || host === "::1" || host === "localhost";
 }
 
 function hulyWorkerConfig(environment: NodeJS.ProcessEnv): HulyRestConfig | undefined {

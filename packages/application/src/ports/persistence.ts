@@ -5,7 +5,8 @@ import type { PrincipalId, TenantId } from "../../../domain/src/identity.ts";
 import type { ExternalIdentityMapping, Principal } from "../../../domain/src/identity.ts";
 import type { IntegrationOperation, IntegrationStepAttempt } from "../../../domain/src/integration-operations.ts";
 import type { ProjectNode } from "../../../domain/src/project-structure.ts";
-import type { ProductTask, TaskReviewCycle } from "../../../domain/src/tasks.ts";
+import type { ProjectMembership } from "../../../domain/src/project-access.ts";
+import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import type { SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
 
 export type CommandScope = Readonly<{
@@ -37,8 +38,8 @@ export interface TaskRepository {
   listByNode(nodeId: string): Promise<ProductTask[]>;
   insert(task: ProductTask): Promise<void>;
   update(task: ProductTask, expectedVersion: number): Promise<void>;
-  appendReviewCycle(cycle: TaskReviewCycle): Promise<void>;
-  listReviewCycles(taskId: string): Promise<TaskReviewCycle[]>;
+  appendReviewAction(action: TaskReviewActionRecord): Promise<void>;
+  listReviewActions(taskId: string): Promise<TaskReviewActionRecord[]>;
 }
 
 export interface AssetRepository {
@@ -81,6 +82,12 @@ export interface PrincipalRepository {
   update(principal: Principal, expectedVersion: number): Promise<void>;
 }
 
+export interface ProjectMembershipRepository {
+  get(projectId: string, principalId: PrincipalId): Promise<ProjectMembership | undefined>;
+  insert(membership: ProjectMembership): Promise<void>;
+  update(membership: ProjectMembership, expectedVersion: number): Promise<void>;
+}
+
 export interface SecurityDomainMigrationRepository {
   get(migrationId: string): Promise<SecurityDomainMigration | undefined>;
   insert(migration: SecurityDomainMigration): Promise<void>;
@@ -115,6 +122,7 @@ export type TransactionContext = Readonly<{
   integrationOperations: IntegrationOperationRepository;
   identities: IdentityMappingRepository;
   principals: PrincipalRepository;
+  memberships: ProjectMembershipRepository;
   securityMigrations: SecurityDomainMigrationRepository;
   receipts: CommandReceiptRepository;
   sequences: ProjectSequenceRepository;

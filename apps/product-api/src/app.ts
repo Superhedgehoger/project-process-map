@@ -72,6 +72,31 @@ export function createProductApi(options: ProductApiOptions) {
 }
 
 export async function seedPhase0Nodes(persistence: Persistence, productTenantId: TenantId): Promise<void> {
+  const seededAtUtc = "2026-09-03T00:00:00.000Z";
+  await persistence.transaction(productTenantId, async (transaction) => {
+    for (const id of [principalId("phase0-system"), principalId("phase0-user")]) {
+      if (await transaction.principals.get(id) === undefined) await transaction.principals.insert({
+        tenantId: productTenantId,
+        id,
+        kind: id === "phase0-system" ? "service" : "user",
+        status: "active",
+        version: 1,
+        createdAtUtc: seededAtUtc,
+        updatedAtUtc: seededAtUtc,
+      });
+      if (await transaction.memberships.get("phase0-project", id) === undefined) await transaction.memberships.insert({
+        tenantId: productTenantId,
+        projectId: "phase0-project",
+        principalId: id,
+        role: "project_manager",
+        status: "active",
+        securityDomainIds: [],
+        version: 1,
+        createdAtUtc: seededAtUtc,
+        updatedAtUtc: seededAtUtc,
+      });
+    }
+  });
   const nodes: Array<Pick<ProjectNode, "id" | "title" | "kind">> = [
     { id: "N-01", title: "项目启动", kind: "stage" },
     { id: "N-02", title: "需求澄清", kind: "stage" },
@@ -94,7 +119,7 @@ export async function seedPhase0Nodes(persistence: Persistence, productTenantId:
       title: node.title,
       kind: node.kind,
       securityDomainId: null,
-      occurredAtUtc: "2026-09-03T00:00:00.000Z",
+      occurredAtUtc: seededAtUtc,
     });
   }
 }
@@ -143,6 +168,7 @@ function httpStatus(error: ApplicationError): number {
     TASK_NOT_FOUND: 404,
     INTEGRATION_OPERATION_NOT_FOUND: 404,
     TASK_ALREADY_EXISTS: 409,
+    TASK_VERSION_CONFLICT: 409,
     ASSET_ALREADY_EXISTS: 409,
     IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD: 409,
     CONFLICT: 409,
@@ -150,6 +176,10 @@ function httpStatus(error: ApplicationError): number {
     INTEGRATION_OPERATION_NOT_RECOVERABLE: 409,
     INTEGRATION_OPERATION_REQUIRES_SPECIALIZED_RECOVERY: 409,
     INTEGRATION_RECOVERY_JOB_NOT_DEAD_LETTER: 409,
+    TASK_ACTION_FORBIDDEN: 403,
+    REVIEWER_NOT_ELIGIBLE: 403,
+    ASSIGNEE_NOT_ELIGIBLE: 403,
+    SECURITY_MIGRATION_IN_PROGRESS: 409,
     HULY_ADAPTER_NOT_CONFIGURED: 503,
     UPSTREAM_FAILURE: 502,
   };

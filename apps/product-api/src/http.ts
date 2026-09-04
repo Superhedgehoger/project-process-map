@@ -38,6 +38,21 @@ export function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+export function optionalBodyString(body: JsonBody, name: string): string | undefined {
+  const value = body[name];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new ApplicationError("VALIDATION_FAILED", `${name} must be a string`);
+  const normalized = value.trim();
+  return normalized.length === 0 ? undefined : normalized;
+}
+
+export function optionalBodyBoolean(body: JsonBody, name: string): boolean | undefined {
+  const value = body[name];
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") throw new ApplicationError("VALIDATION_FAILED", `${name} must be boolean`);
+  return value;
+}
+
 export function requiredPositiveInteger(body: JsonBody, name: string): number {
   const value = body[name];
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {

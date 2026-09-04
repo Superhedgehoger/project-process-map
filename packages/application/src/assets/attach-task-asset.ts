@@ -4,6 +4,8 @@ import { eventTopic, type BackgroundJob, type DomainEvent, type OutboxMessage } 
 import type { ExternalBinding } from "../../../domain/src/external-reference.ts";
 import type { PrincipalId, TenantId } from "../../../domain/src/identity.ts";
 import { advanceIntegrationOperation, type IntegrationOperation } from "../../../domain/src/integration-operations.ts";
+import { canAccessSecurityDomain } from "../../../domain/src/project-access.ts";
+import { assertProjectSecurityStable } from "../access/project-security.ts";
 import type { AssetContentPort, StoredAssetContent } from "../ports/integrations.ts";
 import type { CommandScope, Persistence, TransactionContext } from "../ports/persistence.ts";
 
@@ -75,6 +77,7 @@ export class AttachTaskAssetHandler {
     const operationId = `op:asset-ingest:${hash(`${command.tenantId}\u0000${command.principalId}\u0000${command.idempotencyKey}`).slice(0, 32)}`;
 
     const initialized = await this.#persistence.transaction(command.tenantId, async (transaction) => {
+      const task = await authorizedTask(transaction, command);
       const replay = await readReplay(transaction, scope, fingerprint);
       if (replay !== undefined) return { replay };
       const previousOperation = await transaction.integrationOperations.get(operationId);
@@ -82,8 +85,6 @@ export class AttachTaskAssetHandler {
         if (previousOperation.fingerprint !== fingerprint) throw new Error("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD");
         return { replay: undefined };
       }
-      const task = await transaction.tasks.get(command.taskId);
-      if (task === undefined) throw new Error("TASK_NOT_FOUND");
       if (task.projectId !== command.projectId) throw new Error("PROJECT_MISMATCH");
       if (task.deletedAtUtc !== null) throw new Error("TASK_DELETED");
       if (await transaction.assets.get(command.assetId) !== undefined) throw new Error("ASSET_ALREADY_EXISTS");
@@ -177,6 +178,7 @@ export class AttachTaskAssetHandler {
     }
 
     return await this.#persistence.transaction(command.tenantId, async (transaction) => {
+      await authorizedTask(transaction, command);
       const replay = await readReplay(transaction, scope, fingerprint);
       if (replay !== undefined) return { value: replay, replayed: true };
       let asset = await requiredAsset(transaction, command.assetId);
@@ -310,11 +312,17 @@ export async function listTaskAssets(
   tenantId: TenantId,
   taskId: string,
 ): Promise<AssetView[]> {
-  return await persistence.read(tenantId, async (transaction) => {
-    const bindings = await transaction.assets.listBindings("task", taskId);
-    const assets = await Promise.all(bindings.map(async (binding) => await transaction.assets.get(binding.assetId)));
-    return assets.filter((asset): asset is Asset => asset !== undefined).map((asset) => toAssetView(asset, taskId));
-  });
+  return await persistence.read(tenantId, async (transaction) => await listTaskAssetsInTransaction(transaction, taskId));
+}
+
+export async function listTaskAssetsInTransaction(
+  transaction: TransactionContext,
+  taskId: string,
+  include: (asset: Asset) => boolean = () => true,
+): Promise<AssetView[]> {
+  const bindings = await transaction.assets.listBindings("task", taskId);
+  const assets = await Promise.all(bindings.map(async (binding) => await transaction.assets.get(binding.assetId)));
+  return assets.filter((asset): asset is Asset => asset !== undefined).filter(include).map((asset) => toAssetView(asset, taskId));
 }
 
 function toAssetView(asset: Asset, taskId: string): AssetView {
@@ -349,6 +357,15 @@ async function requiredAsset(transaction: TransactionContext, assetId: string): 
   const asset = await transaction.assets.get(assetId);
   if (asset === undefined) throw new Error("ASSET_NOT_FOUND");
   return asset;
+}
+
+async function authorizedTask(transaction: TransactionContext, command: AttachTaskAssetCommand) {
+  const task = await transaction.tasks.get(command.taskId);
+  if (task === undefined || task.deletedAtUtc !== null) throw new Error("TASK_NOT_FOUND");
+  const membership = await transaction.memberships.get(task.projectId, command.principalId);
+  if (!canAccessSecurityDomain(membership, task.securityDomainId)) throw new Error("TASK_NOT_FOUND");
+  await assertProjectSecurityStable(transaction, task.projectId);
+  return task;
 }
 
 async function requiredOperation(transaction: TransactionContext, operationId: string): Promise<IntegrationOperation> {

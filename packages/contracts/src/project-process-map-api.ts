@@ -22,18 +22,42 @@ export type ApiAsset = Readonly<{
   version: number;
 }>;
 
-export type ApiTask = Readonly<{
+export type ApiTaskSummary = Readonly<{
   id: string;
   nodeId: string;
   title: string;
   status: "todo" | "in_progress" | "pending_review" | "completed" | "canceled" | "promoted";
+  assigneePrincipalId: string | null;
   requiresAcceptance: boolean;
+  reviewerPrincipalId: string | null;
   version: number;
-  files: ApiAsset[];
+  reviewHistory: ApiTaskReviewAction[];
+}>;
+
+export type ApiTask = ApiTaskSummary & Readonly<{ files: ApiAsset[] }>;
+
+export type ApiTaskReviewAction = Readonly<{
+  cycleNumber: number;
+  action: "submitted" | "accepted" | "rejected" | "withdrawn";
+  actorPrincipalId: string;
+  reviewerPrincipalId: string | null;
+  occurredAtUtc: string;
+  note: string | null;
 }>;
 
 export type ApiNodeDetail = Readonly<{ node: ApiNode; tasks: ApiTask[] }>;
-export type CreateTaskRequest = Readonly<{ title: string; taskId?: string; requiresAcceptance?: boolean }>;
+export type CreateTaskRequest = Readonly<{
+  title: string;
+  taskId?: string;
+  requiresAcceptance?: boolean;
+  reviewerPrincipalId?: string;
+}>;
+export type TaskActionRequest = Readonly<{
+  expectedVersion: number;
+  note?: string;
+  assigneePrincipalId?: string;
+  reviewerPrincipalId?: string;
+}>;
 export type AttachAssetRequest = Readonly<{
   name: string;
   contentType: string;
@@ -86,14 +110,34 @@ export function decodeCommandResult<T>(value: unknown, decode: (input: unknown) 
 export function decodeTask(value: unknown): ApiTask {
   const record = object(value, "task");
   if (!Array.isArray(record.files)) throw new ContractDecodeError("task files must be an array");
+  return { ...decodeTaskSummary(record), files: record.files.map(decodeAsset) };
+}
+
+export function decodeTaskSummary(value: unknown): ApiTaskSummary {
+  const record = object(value, "task");
+  if (!Array.isArray(record.reviewHistory)) throw new ContractDecodeError("task reviewHistory must be an array");
   return {
     id: string(record.id, "task.id"),
     nodeId: string(record.nodeId, "task.nodeId"),
     title: string(record.title, "task.title"),
     status: oneOf(record.status, ["todo", "in_progress", "pending_review", "completed", "canceled", "promoted"] as const, "task.status"),
+    assigneePrincipalId: nullableNonEmptyString(record.assigneePrincipalId, "task.assigneePrincipalId"),
     requiresAcceptance: boolean(record.requiresAcceptance, "task.requiresAcceptance"),
+    reviewerPrincipalId: nullableNonEmptyString(record.reviewerPrincipalId, "task.reviewerPrincipalId"),
     version: positiveInteger(record.version, "task.version"),
-    files: record.files.map(decodeAsset),
+    reviewHistory: record.reviewHistory.map(decodeTaskReviewAction),
+  };
+}
+
+export function decodeTaskReviewAction(value: unknown): ApiTaskReviewAction {
+  const record = object(value, "task review action");
+  return {
+    cycleNumber: positiveInteger(record.cycleNumber, "task review action.cycleNumber"),
+    action: oneOf(record.action, ["submitted", "accepted", "rejected", "withdrawn"] as const, "task review action.action"),
+    actorPrincipalId: string(record.actorPrincipalId, "task review action.actorPrincipalId"),
+    reviewerPrincipalId: nullableNonEmptyString(record.reviewerPrincipalId, "task review action.reviewerPrincipalId"),
+    occurredAtUtc: string(record.occurredAtUtc, "task review action.occurredAtUtc"),
+    note: nullableNonEmptyString(record.note, "task review action.note"),
   };
 }
 
@@ -145,6 +189,10 @@ function string(value: unknown, name: string): string {
 function boolean(value: unknown, name: string): boolean {
   if (typeof value !== "boolean") throw new ContractDecodeError(`${name} must be boolean`);
   return value;
+}
+
+function nullableNonEmptyString(value: unknown, name: string): string | null {
+  return value === null ? null : string(value, name);
 }
 
 function positiveInteger(value: unknown, name: string): number {

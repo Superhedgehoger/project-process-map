@@ -14,6 +14,7 @@ export type ProductTask = Readonly<{
   title: string;
   assigneePrincipalId: PrincipalId | null;
   requiresAcceptance: boolean;
+  reviewerPrincipalId: PrincipalId | null;
   executionState: TaskExecutionState;
   reviewState: TaskReviewState;
   version: number;
@@ -22,14 +23,15 @@ export type ProductTask = Readonly<{
 
 export type TaskReviewAction = "submitted" | "accepted" | "rejected" | "withdrawn";
 
-export type TaskReviewCycle = Readonly<{
+export type TaskReviewActionRecord = Readonly<{
   tenantId: TenantId;
   taskId: string;
-  cycle: number;
+  cycleNumber: number;
   action: TaskReviewAction;
   actorPrincipalId: PrincipalId;
+  reviewerPrincipalId: PrincipalId | null;
   occurredAtUtc: string;
-  comment: string | null;
+  note: string | null;
 }>;
 
 export function taskLifecycle(task: Pick<ProductTask, "executionState" | "reviewState">): TaskLifecycleState {
@@ -76,6 +78,21 @@ export function completeTaskWithoutReview(task: ProductTask): ProductTask {
     throw new Error("TASK_DIRECT_COMPLETE_FORBIDDEN");
   }
   return { ...task, executionState: "completed", version: task.version + 1 };
+}
+
+export function assignTaskReviewer(task: ProductTask, reviewerPrincipalId: PrincipalId): ProductTask {
+  assertMutable(task);
+  if (!task.requiresAcceptance) throw new Error("TASK_REVIEW_NOT_REQUIRED");
+  if (task.reviewState === "pending") throw new Error("TASK_REVIEWER_LOCKED_DURING_REVIEW");
+  if (task.reviewerPrincipalId === reviewerPrincipalId) throw new Error("TASK_REVIEWER_UNCHANGED");
+  return { ...task, reviewerPrincipalId, version: task.version + 1 };
+}
+
+export function assignTaskAssignee(task: ProductTask, assigneePrincipalId: PrincipalId): ProductTask {
+  assertMutable(task);
+  if (task.reviewState === "pending") throw new Error("TASK_ASSIGNEE_LOCKED_DURING_REVIEW");
+  if (task.assigneePrincipalId === assigneePrincipalId) throw new Error("TASK_ASSIGNEE_UNCHANGED");
+  return { ...task, assigneePrincipalId, version: task.version + 1 };
 }
 
 export function cancelTask(task: ProductTask): ProductTask {

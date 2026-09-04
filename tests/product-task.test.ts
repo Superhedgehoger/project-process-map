@@ -9,11 +9,13 @@ import { CreateTaskHandler } from "../packages/application/src/tasks/create-task
 import { MemoryPersistence } from "../packages/adapters/src/memory/persistence.ts";
 import { SqlitePersistence } from "../packages/adapters/src/sqlite/persistence.ts";
 import { principalId, tenantId } from "../packages/domain/src/identity.ts";
+import { grantProjectMembership } from "./support/project-membership.ts";
 
 const tenant = tenantId("tenant-task-test");
 const principal = principalId("principal-task-test");
 
 async function prepare(persistence: Persistence): Promise<void> {
+  await grantProjectMembership(persistence, tenant, "project-1", principal, { securityDomainIds: ["security-1"] });
   await executeCreateNode(persistence, {
     tenantId: tenant,
     commandId: "node-command",
@@ -42,6 +44,7 @@ function createCommand() {
     title: "提交技术方案",
     assigneePrincipalId: principal,
     requiresAcceptance: true,
+    reviewerPrincipalId: principal,
     occurredAtUtc: "2026-09-04T01:01:00.000Z",
   } as const;
 }

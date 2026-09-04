@@ -11,6 +11,8 @@ import {
 } from "../packages/domain/src/security-migration.ts";
 import {
   acceptTask,
+  assignTaskAssignee,
+  assignTaskReviewer,
   cancelTask,
   completeTaskWithoutReview,
   promoteTask,
@@ -36,6 +38,7 @@ function task(requiresAcceptance = true): ProductTask {
     title: "提交方案",
     assigneePrincipalId: principal,
     requiresAcceptance,
+    reviewerPrincipalId: requiresAcceptance ? principal : null,
     executionState: "todo",
     reviewState: requiresAcceptance ? "not_submitted" : "not_required",
     version: 1,
@@ -68,6 +71,17 @@ test("ARCH-GATE-TASK-003 non-reviewed Task can complete directly but cannot ente
   const started = startTask(task(false));
   assert.throws(() => submitTask(started), /TASK_REVIEW_NOT_REQUIRED/);
   assert.equal(taskLifecycle(completeTaskWithoutReview(started)), "completed");
+});
+
+test("P0-05A-T1a assignee and reviewer changes are versioned and freeze while review is pending", () => {
+  const other = principalId("principal-2");
+  const reassigned = assignTaskAssignee(task(), other);
+  assert.equal(reassigned.assigneePrincipalId, other);
+  const rereviewed = assignTaskReviewer(reassigned, other);
+  assert.equal(rereviewed.reviewerPrincipalId, other);
+  const pending = submitTask(startTask(rereviewed));
+  assert.throws(() => assignTaskAssignee(pending, principal), /TASK_ASSIGNEE_LOCKED_DURING_REVIEW/);
+  assert.throws(() => assignTaskReviewer(pending, principal), /TASK_REVIEWER_LOCKED_DURING_REVIEW/);
 });
 
 test("ARCH-GATE-TASK-006 cancellation and promotion have explicit terminal transitions", () => {

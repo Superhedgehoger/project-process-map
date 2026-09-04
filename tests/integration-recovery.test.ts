@@ -15,6 +15,7 @@ import { MemoryAssetContent } from "../packages/adapters/src/memory/asset-conten
 import { MemoryPersistence } from "../packages/adapters/src/memory/persistence.ts";
 import { externalReference } from "../packages/domain/src/external-reference.ts";
 import { principalId, tenantId } from "../packages/domain/src/identity.ts";
+import { grantProjectMembership } from "./support/project-membership.ts";
 
 const tenant = tenantId("tenant-recovery-test");
 const operator = principalId("principal-recovery-operator");
@@ -24,6 +25,7 @@ test("ARCH-GATE-RECOVERY-001 authorized retry requeues the same saga and audits 
   const persistence = new MemoryPersistence();
   const taskPort = new ToggleTaskProjection();
   try {
+    await grantProjectMembership(persistence, tenant, "project-1", operator);
     await executeCreateNode(persistence, {
       tenantId: tenant,
       commandId: "node-command",
@@ -49,6 +51,7 @@ test("ARCH-GATE-RECOVERY-001 authorized retry requeues the same saga and audits 
       title: "需恢复任务",
       assigneePrincipalId: null,
       requiresAcceptance: false,
+      reviewerPrincipalId: null,
       occurredAtUtc: time.toISOString(),
     });
     const processor = new CollaborationProjectionProcessor({

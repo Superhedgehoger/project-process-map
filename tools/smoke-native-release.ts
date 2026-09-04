@@ -64,6 +64,24 @@ try {
     }),
   });
   assert.equal(attached.status, 201);
+
+  const reviewCreated = await fetch(`${ready.url}/api/nodes/N-05/tasks`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "native-review-task" },
+    body: JSON.stringify({
+      taskId: "native-review-task",
+      title: "无 Docker 验收周期验证",
+      requiresAcceptance: true,
+      reviewerPrincipalId: "phase0-user",
+    }),
+  });
+  assert.equal(reviewCreated.status, 201);
+  await taskAction(ready.url, "start", 1, "native-review-start");
+  await taskAction(ready.url, "submit", 2, "native-review-submit-1", "首轮提交");
+  await taskAction(ready.url, "reject", 3, "native-review-reject", "补充恢复步骤");
+  await taskAction(ready.url, "submit", 4, "native-review-submit-2", "已补充恢复步骤");
+  const reviewAccepted = await taskAction(ready.url, "accept", 5, "native-review-accept", "通过");
+  assert.equal((await reviewAccepted.json() as { value: { status: string } }).value.status, "completed");
   child.kill("SIGTERM");
   assert.equal(await exitCode(child), 0, firstRuntime.stderr());
 
@@ -72,6 +90,16 @@ try {
   assert.equal(detailResponse.status, 200);
   const detail = await detailResponse.json() as { tasks: Array<{ id: string; files: Array<{ id: string }> }> };
   assert.equal(detail.tasks.find((task) => task.id === "native-smoke-task")?.files[0]?.id, "native-smoke-asset");
+  const reviewResponse = await fetch(`${secondRuntime.ready.url}/api/nodes/N-05`);
+  assert.equal(reviewResponse.status, 200);
+  const reviewDetail = await reviewResponse.json() as {
+    tasks: Array<{ id: string; status: string; reviewHistory: Array<{ cycleNumber: number; action: string }> }>;
+  };
+  const reviewTask = reviewDetail.tasks.find((task) => task.id === "native-review-task");
+  assert.equal(reviewTask?.status, "completed");
+  assert.deepEqual(reviewTask?.reviewHistory.map((entry) => [entry.cycleNumber, entry.action]), [
+    [1, "submitted"], [1, "rejected"], [2, "submitted"], [2, "accepted"],
+  ]);
   secondRuntime.child.kill("SIGTERM");
   assert.equal(await exitCode(secondRuntime.child), 0, secondRuntime.stderr());
   await assert.rejects(readFile(dockerMarker), { code: "ENOENT" });
@@ -79,11 +107,27 @@ try {
     status: "ok",
     release: basename(archive),
     dockerInvoked: false,
-    verticalPath: "page -> nodes -> task -> asset -> restart -> readback",
+    verticalPath: "page -> nodes -> task -> asset + two-cycle review -> restart -> readback",
     persistence: "sqlite+filesystem",
   }));
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });
+}
+
+async function taskAction(
+  baseUrl: string,
+  action: "start" | "submit" | "reject" | "accept",
+  expectedVersion: number,
+  idempotencyKey: string,
+  note?: string,
+): Promise<Response> {
+  const response = await fetch(`${baseUrl}/api/tasks/native-review-task/actions/${action}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
+    body: JSON.stringify({ expectedVersion, ...(note === undefined ? {} : { note }) }),
+  });
+  if (response.status !== 200) throw new Error(`${action} failed: ${await response.text()}`);
+  return response;
 }
 
 async function startRelease(

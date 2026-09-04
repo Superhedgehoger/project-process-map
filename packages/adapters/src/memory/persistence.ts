@@ -6,7 +6,8 @@ import type { TenantId } from "../../../domain/src/identity.ts";
 import type { ExternalIdentityMapping, Principal } from "../../../domain/src/identity.ts";
 import type { IntegrationOperation, IntegrationStepAttempt } from "../../../domain/src/integration-operations.ts";
 import type { ProjectNode } from "../../../domain/src/project-structure.ts";
-import type { ProductTask, TaskReviewCycle } from "../../../domain/src/tasks.ts";
+import type { ProjectMembership } from "../../../domain/src/project-access.ts";
+import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import type { SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
 import type {
   ClaimOptions,
@@ -21,7 +22,7 @@ import type {
 type MemoryState = {
   nodes: Map<string, ProjectNode>;
   tasks: Map<string, ProductTask>;
-  reviewCycles: Map<string, TaskReviewCycle>;
+  reviewActions: Map<string, TaskReviewActionRecord>;
   assets: Map<string, Asset>;
   assetBindings: Map<string, AssetBinding>;
   externalBindings: Map<string, ExternalBinding>;
@@ -29,6 +30,7 @@ type MemoryState = {
   operationSteps: Map<string, IntegrationStepAttempt>;
   identityMappings: Map<string, ExternalIdentityMapping>;
   principals: Map<string, Principal>;
+  memberships: Map<string, ProjectMembership>;
   securityMigrations: Map<string, SecurityDomainMigration>;
   receipts: Map<string, CommandReceipt>;
   sequences: Map<string, number>;
@@ -44,7 +46,7 @@ function emptyState(): MemoryState {
   return {
     nodes: new Map(),
     tasks: new Map(),
-    reviewCycles: new Map(),
+    reviewActions: new Map(),
     assets: new Map(),
     assetBindings: new Map(),
     externalBindings: new Map(),
@@ -52,6 +54,7 @@ function emptyState(): MemoryState {
     operationSteps: new Map(),
     identityMappings: new Map(),
     principals: new Map(),
+    memberships: new Map(),
     securityMigrations: new Map(),
     receipts: new Map(),
     sequences: new Map(),
@@ -68,7 +71,7 @@ function cloneState(state: MemoryState): MemoryState {
   return {
     nodes: new Map(structuredClone([...state.nodes])),
     tasks: new Map(structuredClone([...state.tasks])),
-    reviewCycles: new Map(structuredClone([...state.reviewCycles])),
+    reviewActions: new Map(structuredClone([...state.reviewActions])),
     assets: new Map(structuredClone([...state.assets])),
     assetBindings: new Map(structuredClone([...state.assetBindings])),
     externalBindings: new Map(structuredClone([...state.externalBindings])),
@@ -76,6 +79,7 @@ function cloneState(state: MemoryState): MemoryState {
     operationSteps: new Map(structuredClone([...state.operationSteps])),
     identityMappings: new Map(structuredClone([...state.identityMappings])),
     principals: new Map(structuredClone([...state.principals])),
+    memberships: new Map(structuredClone([...state.memberships])),
     securityMigrations: new Map(structuredClone([...state.securityMigrations])),
     receipts: new Map(structuredClone([...state.receipts])),
     sequences: new Map(state.sequences),
@@ -201,16 +205,16 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
         if (existing.version !== expectedVersion || task.version !== expectedVersion + 1) throw new Error("TASK_VERSION_CONFLICT");
         state.tasks.set(key, structuredClone(task));
       },
-      appendReviewCycle: async (cycle) => {
-        assertTenant(tenantId, cycle.tenantId);
-        const key = `${tenantPrefix}${cycle.taskId}\u0000${cycle.cycle}\u0000${cycle.action}`;
-        if (state.reviewCycles.has(key)) throw new Error("TASK_REVIEW_ACTION_ALREADY_EXISTS");
-        state.reviewCycles.set(key, structuredClone(cycle));
+      appendReviewAction: async (action) => {
+        assertTenant(tenantId, action.tenantId);
+        const key = `${tenantPrefix}${action.taskId}\u0000${action.cycleNumber}\u0000${action.action}`;
+        if (state.reviewActions.has(key)) throw new Error("TASK_REVIEW_ACTION_ALREADY_EXISTS");
+        state.reviewActions.set(key, structuredClone(action));
       },
-      listReviewCycles: async (taskId) => [...state.reviewCycles.values()]
-        .filter((cycle) => cycle.tenantId === tenantId && cycle.taskId === taskId)
-        .sort((left, right) => left.cycle - right.cycle || left.occurredAtUtc.localeCompare(right.occurredAtUtc))
-        .map((cycle) => structuredClone(cycle)),
+      listReviewActions: async (taskId) => [...state.reviewActions.values()]
+        .filter((action) => action.tenantId === tenantId && action.taskId === taskId)
+        .sort((left, right) => left.cycleNumber - right.cycleNumber || reviewActionOrder(left.action) - reviewActionOrder(right.action))
+        .map((action) => structuredClone(action)),
     },
     assets: {
       get: async (assetId) => clone(state.assets.get(`${tenantPrefix}${assetId}`)),
@@ -325,6 +329,24 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
         state.principals.set(key, structuredClone(principal));
       },
     },
+    memberships: {
+      get: async (projectId, principalId) => clone(state.memberships.get(membershipKey(tenantId, projectId, principalId))),
+      insert: async (membership) => {
+        assertTenant(tenantId, membership.tenantId);
+        const key = membershipKey(tenantId, membership.projectId, membership.principalId);
+        if (state.memberships.has(key)) throw new Error("PROJECT_MEMBERSHIP_ALREADY_EXISTS");
+        state.memberships.set(key, structuredClone(membership));
+      },
+      update: async (membership, expectedVersion) => {
+        assertTenant(tenantId, membership.tenantId);
+        const key = membershipKey(tenantId, membership.projectId, membership.principalId);
+        const current = state.memberships.get(key);
+        if (current === undefined || current.version !== expectedVersion || membership.version !== expectedVersion + 1) {
+          throw new Error("PROJECT_MEMBERSHIP_VERSION_CONFLICT");
+        }
+        state.memberships.set(key, structuredClone(membership));
+      },
+    },
     securityMigrations: {
       get: async (migrationId) => clone(state.securityMigrations.get(`${tenantPrefix}${migrationId}`)),
       insert: async (migration) => {
@@ -437,6 +459,14 @@ function externalOwnerKey(tenantId: TenantId, ownerType: ExternalBinding["ownerT
 
 function identityKey(tenantId: TenantId, provider: string, connectionId: string, externalTenantRef: string, externalSubjectRef: string): string {
   return `${tenantId}\u0000${provider}\u0000${connectionId}\u0000${externalTenantRef}\u0000${externalSubjectRef}`;
+}
+
+function membershipKey(tenantId: TenantId, projectId: string, principalId: string): string {
+  return `${tenantId}\u0000${projectId}\u0000${principalId}`;
+}
+
+function reviewActionOrder(action: TaskReviewActionRecord["action"]): number {
+  return action === "submitted" ? 0 : 1;
 }
 
 function assertTenant(expected: TenantId, actual: TenantId): void {

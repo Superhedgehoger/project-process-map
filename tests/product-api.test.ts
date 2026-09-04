@@ -4,9 +4,13 @@ import { Readable } from "node:stream";
 import test from "node:test";
 import { Script } from "node:vm";
 import { createProductApi, type ProductApiOptions } from "../apps/product-api/src/app.ts";
+import { startProductApiServer } from "../apps/product-api/src/server.ts";
+import { decodeCommandResult, decodeTaskSummary } from "../packages/contracts/src/project-process-map-api.ts";
 import { MemoryAssetContent } from "../packages/adapters/src/memory/asset-content.ts";
 import { MemoryPersistence } from "../packages/adapters/src/memory/persistence.ts";
-import { principalId } from "../packages/domain/src/identity.ts";
+import { principalId, tenantId } from "../packages/domain/src/identity.ts";
+
+const phase0Tenant = tenantId("phase0-tenant");
 
 test("P0-05-CT-009 Product API exposes the vertical path with stable HTTP semantics", async () => {
   const handler = createTestProductApi({ collaborationMode: "disabled", allowedOrigin: "http://ui.test" });
@@ -28,6 +32,7 @@ test("P0-05-CT-009 Product API exposes the vertical path with stable HTTP semant
   const taskBody = JSON.parse(firstTask.body) as { value: { id: string }; replayed: boolean };
   assert.equal(taskBody.value.id, "api-task-1");
   assert.equal(taskBody.replayed, false);
+  assert.equal(decodeCommandResult(JSON.parse(firstTask.body), decodeTaskSummary).value.id, "api-task-1");
   const replayTask = await createTask();
   assert.equal(replayTask.status, 200);
   assert.equal((JSON.parse(replayTask.body) as { replayed: boolean }).replayed, true);
@@ -81,6 +86,145 @@ test("P0-05-CT-009 Huly health reports configuration readiness without claiming 
 
   const incomplete = await call(createTestProductApi({ collaborationMode: "huly" }), "/health");
   assert.equal(incomplete.status, 503);
+});
+
+test("P0-05A-T1a Product API exposes an idempotent two-cycle task review path", async () => {
+  const handler = createTestProductApi({ collaborationMode: "disabled" });
+  const created = await call(handler, "/api/nodes/N-03/tasks", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "review-task" },
+    body: JSON.stringify({
+      taskId: "review-task",
+      title: "验收发布方案",
+      requiresAcceptance: true,
+      reviewerPrincipalId: "phase0-user",
+    }),
+  });
+  assert.equal(created.status, 201);
+
+  const action = async (name: string, expectedVersion: number, key: string, note?: string) => await call(
+    handler,
+    `/api/tasks/review-task/actions/${name}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": key },
+      body: JSON.stringify({ expectedVersion, ...(note === undefined ? {} : { note }) }),
+    },
+  );
+  assert.equal((JSON.parse((await action("start", 1, "review-start")).body) as { value: { status: string } }).value.status, "in_progress");
+  const firstSubmit = await action("submit", 2, "review-submit-1", "首轮提交");
+  assert.equal((JSON.parse(firstSubmit.body) as { value: { status: string } }).value.status, "pending_review");
+  const replay = await action("submit", 2, "review-submit-1", "首轮提交");
+  assert.equal((JSON.parse(replay.body) as { replayed: boolean }).replayed, true);
+  assert.equal((await action("reject", 3, "review-reject-without-reason")).status, 422);
+  assert.equal((JSON.parse((await action("reject", 3, "review-reject", "补充上线回滚步骤")).body) as { value: { status: string } }).value.status, "in_progress");
+  await action("submit", 4, "review-submit-2", "已补充回滚步骤");
+  const accepted = await action("accept", 5, "review-accept", "通过");
+  const body = JSON.parse(accepted.body) as { value: { status: string; reviewHistory: Array<{ cycleNumber: number; action: string }> } };
+  assert.equal(body.value.status, "completed");
+  assert.deepEqual(body.value.reviewHistory.map((entry) => [entry.cycleNumber, entry.action]), [
+    [1, "submitted"], [1, "rejected"], [2, "submitted"], [2, "accepted"],
+  ]);
+});
+
+test("P0-05A-T1a Product API rejects drifted command fields and supports explicit assignment", async () => {
+  const handler = createTestProductApi({ collaborationMode: "disabled" });
+  const invalidBoolean = await call(handler, "/api/nodes/N-03/tasks", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "invalid-boolean" },
+    body: JSON.stringify({ title: "错误类型", requiresAcceptance: "true" }),
+  });
+  assert.equal(invalidBoolean.status, 422);
+  assert.equal((JSON.parse(invalidBoolean.body) as { code: string }).code, "VALIDATION_FAILED");
+
+  await call(handler, "/api/nodes/N-03/tasks", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "assignment-task" },
+    body: JSON.stringify({ taskId: "assignment-task", title: "改派任务" }),
+  });
+  const missing = await call(handler, "/api/tasks/assignment-task/actions/assign-assignee", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "missing-assignee" },
+    body: JSON.stringify({ expectedVersion: 1 }),
+  });
+  assert.equal(missing.status, 422);
+  assert.equal((JSON.parse(missing.body) as { code: string }).code, "ASSIGNEE_REQUIRED");
+  const assigned = await call(handler, "/api/tasks/assignment-task/actions/assign-assignee", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "assign-system" },
+    body: JSON.stringify({ expectedVersion: 1, assigneePrincipalId: "phase0-system" }),
+  });
+  assert.equal(assigned.status, 200);
+  assert.equal((JSON.parse(assigned.body) as { value: { assigneePrincipalId: string } }).value.assigneePrincipalId, "phase0-system");
+  const unrelatedReviewer = await call(handler, "/api/tasks/assignment-task/actions/start", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "bad-start-field" },
+    body: JSON.stringify({ expectedVersion: 2, reviewerPrincipalId: "phase0-user" }),
+  });
+  assert.equal(unrelatedReviewer.status, 422);
+  assert.equal((JSON.parse(unrelatedReviewer.body) as { code: string }).code, "VALIDATION_FAILED");
+  const numericNote = await call(handler, "/api/tasks/assignment-task/actions/complete", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "numeric-note" },
+    body: JSON.stringify({ expectedVersion: 2, note: 12 }),
+  });
+  assert.equal(numericNote.status, 422);
+  assert.equal((JSON.parse(numericNote.body) as { code: string }).code, "VALIDATION_FAILED");
+});
+
+test("ARCH-GATE-ACL-001 an authenticated Huly principal without membership is fail-closed", async () => {
+  const handler = createTestProductApi({
+    collaborationMode: "huly",
+    externalIdentityVerifier: { authenticate: async () => ({ provider: "huly", connectionId: "test", externalTenantRef: "workspace-1", externalSubjectRef: "actor-no-membership" }) },
+    collaborationProjectionConfigured: true,
+  });
+  const headers = { authorization: "Bearer valid-test-token" };
+  const nodes = await call(handler, "/api/nodes", { headers });
+  assert.equal(nodes.status, 200);
+  assert.deepEqual(JSON.parse(nodes.body), []);
+  const detail = await call(handler, "/api/nodes/N-03", { headers });
+  assert.equal(detail.status, 404);
+});
+
+test("ARCH-GATE-ACL-002 an open security migration freezes project API access", async () => {
+  const persistence = new MemoryPersistence();
+  const handler = createProductApi({ collaborationMode: "disabled", persistence, assetContent: new MemoryAssetContent() });
+  await call(handler, "/api/nodes");
+  await persistence.transaction(phase0Tenant, async (transaction) => {
+    await transaction.securityMigrations.insert({
+      tenantId: phase0Tenant,
+      id: "migration-api",
+      projectId: "phase0-project",
+      rootNodeId: "N-03",
+      sourceSecurityDomainId: null,
+      targetSecurityDomainId: "sensitive",
+      hierarchyRevision: 1,
+      sourceSecurityEpoch: 1,
+      targetSecurityEpoch: 2,
+      state: "active",
+      cursor: null,
+      totalItems: 1,
+      migratedItems: 0,
+      failure: null,
+      nextAttemptAtUtc: null,
+      deadlineAtUtc: "2026-09-04T12:00:00.000Z",
+      version: 1,
+      createdAtUtc: "2026-09-04T10:00:00.000Z",
+      updatedAtUtc: "2026-09-04T10:00:00.000Z",
+    });
+  });
+  const response = await call(handler, "/api/nodes/N-03");
+  assert.equal(response.status, 409);
+  assert.equal((JSON.parse(response.body) as { code: string }).code, "SECURITY_MIGRATION_IN_PROGRESS");
+});
+
+test("P0-ND-01 public network binding is rejected before runtime dependencies are opened", async () => {
+  const persistence = new MemoryPersistence();
+  await assert.rejects(startProductApiServer(
+    { HOST: "0.0.0.0", PORT: "0" },
+    { persistence, assetContent: new MemoryAssetContent() },
+  ), /PUBLIC_BIND_REQUIRES_P0_07/);
+  await persistence.close();
 });
 
 type Handler = (request: IncomingMessage, response: ServerResponse) => Promise<void>;

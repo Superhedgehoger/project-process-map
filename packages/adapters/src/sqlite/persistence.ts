@@ -9,7 +9,8 @@ import { tenantId as parseTenantId, type TenantId } from "../../../domain/src/id
 import type { ExternalIdentityMapping, Principal } from "../../../domain/src/identity.ts";
 import type { IntegrationOperation, IntegrationStepAttempt } from "../../../domain/src/integration-operations.ts";
 import type { ProjectNode } from "../../../domain/src/project-structure.ts";
-import type { ProductTask, TaskReviewCycle } from "../../../domain/src/tasks.ts";
+import type { ProjectMembership } from "../../../domain/src/project-access.ts";
+import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import type { SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
 import type {
   ClaimOptions,
@@ -27,6 +28,7 @@ export type SqlitePersistenceOptions = Readonly<{
 }>;
 
 const pathLocks = new Map<string, Promise<void>>();
+const currentSchemaVersion = 3;
 
 export class SqlitePersistence implements Persistence {
   readonly #database: DatabaseSync;
@@ -45,6 +47,7 @@ export class SqlitePersistence implements Persistence {
     this.#database.exec("PRAGMA journal_mode=WAL");
     this.#database.exec("PRAGMA synchronous=FULL");
     this.#database.exec("PRAGMA foreign_keys=ON");
+    this.assertSupportedSchema();
     this.migrate();
   }
 
@@ -150,13 +153,13 @@ export class SqlitePersistence implements Persistence {
       tasks: {
         get: async (taskId) => {
           const row = this.#database.prepare("SELECT task_json FROM product_tasks WHERE tenant_id = ? AND task_id = ?").get(tenantId, taskId);
-          return row === undefined ? undefined : parseJson<ProductTask>(asString(row.task_json));
+          return row === undefined ? undefined : productTaskFromJson(asString(row.task_json));
         },
         listByNode: async (nodeId) => this.#database.prepare(`
           SELECT task_json FROM product_tasks
           WHERE tenant_id = ? AND owner_node_id = ?
           ORDER BY task_id
-        `).all(tenantId, nodeId).map((row) => parseJson<ProductTask>(asString(row.task_json))),
+        `).all(tenantId, nodeId).map((row) => productTaskFromJson(asString(row.task_json))),
         insert: async (task) => {
           assertTenant(tenantId, task.tenantId);
           this.#database.prepare(`
@@ -174,18 +177,18 @@ export class SqlitePersistence implements Persistence {
           `).run(task.projectId, task.ownerNodeId, task.executionState, task.version, JSON.stringify(task), tenantId, task.id, expectedVersion);
           if (result.changes !== 1) throw new Error("TASK_VERSION_CONFLICT");
         },
-        appendReviewCycle: async (cycle) => {
-          assertTenant(tenantId, cycle.tenantId);
+        appendReviewAction: async (action) => {
+          assertTenant(tenantId, action.tenantId);
           this.#database.prepare(`
             INSERT INTO task_review_actions (tenant_id, task_id, cycle, action, occurred_at_utc, action_json)
             VALUES (?, ?, ?, ?, ?, ?)
-          `).run(tenantId, cycle.taskId, cycle.cycle, cycle.action, cycle.occurredAtUtc, JSON.stringify(cycle));
+          `).run(tenantId, action.taskId, action.cycleNumber, action.action, action.occurredAtUtc, JSON.stringify(action));
         },
-        listReviewCycles: async (taskId) => this.#database.prepare(`
+        listReviewActions: async (taskId) => this.#database.prepare(`
           SELECT action_json FROM task_review_actions
           WHERE tenant_id = ? AND task_id = ?
-          ORDER BY cycle, occurred_at_utc, action
-        `).all(tenantId, taskId).map((row) => parseJson<TaskReviewCycle>(asString(row.action_json))),
+          ORDER BY cycle, CASE action WHEN 'submitted' THEN 0 ELSE 1 END
+        `).all(tenantId, taskId).map((row) => reviewActionFromJson(asString(row.action_json))),
       },
       assets: {
         get: async (assetId) => {
@@ -366,6 +369,39 @@ export class SqlitePersistence implements Persistence {
             tenantId, principal.id, expectedVersion,
           );
           if (result.changes !== 1) throw new Error("PRINCIPAL_VERSION_CONFLICT");
+        },
+      },
+      memberships: {
+        get: async (projectId, principalId) => {
+          const row = this.#database.prepare(`
+            SELECT membership_json FROM project_memberships
+            WHERE tenant_id = ? AND project_id = ? AND principal_id = ?
+          `).get(tenantId, projectId, principalId);
+          return row === undefined ? undefined : parseJson<ProjectMembership>(asString(row.membership_json));
+        },
+        insert: async (membership) => {
+          assertTenant(tenantId, membership.tenantId);
+          this.#database.prepare(`
+            INSERT INTO project_memberships (
+              tenant_id, project_id, principal_id, role, status, version, membership_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            tenantId, membership.projectId, membership.principalId, membership.role,
+            membership.status, membership.version, JSON.stringify(membership),
+          );
+        },
+        update: async (membership, expectedVersion) => {
+          assertTenant(tenantId, membership.tenantId);
+          if (membership.version !== expectedVersion + 1) throw new Error("PROJECT_MEMBERSHIP_VERSION_CONFLICT");
+          const result = this.#database.prepare(`
+            UPDATE project_memberships
+            SET role = ?, status = ?, version = ?, membership_json = ?
+            WHERE tenant_id = ? AND project_id = ? AND principal_id = ? AND version = ?
+          `).run(
+            membership.role, membership.status, membership.version, JSON.stringify(membership),
+            tenantId, membership.projectId, membership.principalId, expectedVersion,
+          );
+          if (result.changes !== 1) throw new Error("PROJECT_MEMBERSHIP_VERSION_CONFLICT");
         },
       },
       securityMigrations: {
@@ -555,6 +591,20 @@ export class SqlitePersistence implements Persistence {
       ) STRICT;
       CREATE INDEX IF NOT EXISTS external_identity_by_principal
         ON external_identity_mappings (tenant_id, principal_id, status);
+
+      CREATE TABLE IF NOT EXISTS project_memberships (
+        tenant_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('project_manager', 'member')),
+        status TEXT NOT NULL CHECK (status IN ('active', 'revoked')),
+        version INTEGER NOT NULL CHECK (version > 0),
+        membership_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, project_id, principal_id),
+        FOREIGN KEY (tenant_id, principal_id) REFERENCES principals (tenant_id, principal_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS project_memberships_by_principal
+        ON project_memberships (tenant_id, principal_id, status, project_id);
 
       CREATE TABLE IF NOT EXISTS project_nodes (
         tenant_id TEXT NOT NULL,
@@ -781,6 +831,25 @@ export class SqlitePersistence implements Persistence {
     this.#database.prepare(`
       INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc) VALUES (2, ?)
     `).run(new Date().toISOString());
+    this.#database.prepare(`
+      INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc) VALUES (3, ?)
+    `).run(new Date().toISOString());
+  }
+
+  private assertSupportedSchema(): void {
+    this.#database.exec(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at_utc TEXT NOT NULL
+      ) STRICT;
+    `);
+    const row = this.#database.prepare("SELECT MAX(version) AS version FROM schema_migrations").get();
+    const version = row?.version;
+    if (typeof version === "number" && version > currentSchemaVersion) {
+      this.#database.close();
+      this.#closed = true;
+      throw new Error(`SQLITE_SCHEMA_VERSION_UNSUPPORTED:${version}`);
+    }
   }
 
   private ensureColumn(table: "principals", column: string, definition: string): void {
@@ -1036,6 +1105,32 @@ function asJobState(value: unknown): BackgroundJob["state"] {
 
 function parseJson<T>(value: string): T {
   return JSON.parse(value) as T;
+}
+
+function productTaskFromJson(value: string): ProductTask {
+  const task = parseJson<ProductTask & { reviewerPrincipalId?: ProductTask["reviewerPrincipalId"] }>(value);
+  return { ...task, reviewerPrincipalId: task.reviewerPrincipalId ?? null };
+}
+
+function reviewActionFromJson(value: string): TaskReviewActionRecord {
+  const action = parseJson<TaskReviewActionRecord & {
+    cycle?: number;
+    comment?: string | null;
+  }>(value);
+  const cycleNumber = action.cycleNumber ?? action.cycle;
+  if (!Number.isSafeInteger(cycleNumber) || cycleNumber === undefined || cycleNumber <= 0) {
+    throw new Error("SQLITE_TASK_REVIEW_CYCLE_INVALID");
+  }
+  return {
+    tenantId: action.tenantId,
+    taskId: action.taskId,
+    cycleNumber,
+    action: action.action,
+    actorPrincipalId: action.actorPrincipalId,
+    reviewerPrincipalId: action.reviewerPrincipalId ?? null,
+    occurredAtUtc: action.occurredAtUtc,
+    note: action.note ?? action.comment ?? null,
+  };
 }
 
 function validateClaim(options: ClaimOptions): void {

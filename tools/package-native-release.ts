@@ -38,12 +38,14 @@ await writeFile(join(staging, "README.txt"), `Project Process Map ${manifest.ver
 Runtime requirement: Node.js 24 or later. Docker is not used.
 Start: ./bin/project-process-map
 Default URL: http://127.0.0.1:4100
-SaaS bind example: HOST=0.0.0.0 PORT=4100 ./bin/project-process-map
+Safe bind: HOST=127.0.0.1 PORT=4100 ./bin/project-process-map
 Persistent data: PROJECT_DATA_DIR=./data (SQLite database and Asset content)
 
 This architecture-gate package runs without Docker and uses persistent SQLite plus
-filesystem Asset content by default. Production SaaS still requires the PostgreSQL,
-managed object storage, identity, TLS, backup and multi-replica release gates.
+filesystem Asset content by default. Non-loopback binding is intentionally blocked
+until the P0-07 identity/authorization gate is complete. Production SaaS still
+requires PostgreSQL, managed object storage, identity, TLS, backup and multi-replica
+release gates.
 `);
 
 execFileSync("tar", ["-czf", archive, "-C", releaseRoot, releaseName], { stdio: "inherit" });

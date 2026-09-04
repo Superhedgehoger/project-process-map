@@ -12,6 +12,7 @@
 | P0-06 事件与 Outbox 原子写 | 完成 | SQLite 在同一事务写领域状态、事件、Outbox、Job 与幂等回执；覆盖租户隔离、重启、并发领取、租约、重放、冲突及故障断点 | PostgreSQL 多副本实施前复用同一行为契约 |
 | P0-ND-01 无 Docker 原生发行可行性 | 完成 | 自包含浏览器入口、Product API 与 Worker 原生启动；版本化 Node 24 tarball、SHA-256；临时目录冒烟确认未调用 Docker，并完成页面 → 节点 → 任务 → Asset → 重启回读 | P0-ND-02 干净 Linux、备份恢复与升级/回滚 |
 | ARCH-GATE-01 架构修正 | 完成 | CR-003、ADR-003～ADR-008；42 项行为/故障测试；无 Docker 原生发行与重启恢复冒烟通过 | 恢复按单条纵向切片开发，从 P0-05A 开始 |
+| P0-05A 任务验收与交付物守卫 | 进行中 | `T1a` 已完成显式验收人快照、两轮验收、最小持久成员/安全域授权、负责人/验收人改派、旧库回放兼容、事件/Outbox 和 SQLite 重启恢复；57 项测试通过 | 补 P0-07 成员配置与角色槽位解析，再进入 Deliverable 与节点完成守卫 |
 
 ## 启动条件
 
@@ -28,4 +29,6 @@ P0-01 至 P0-06 已按依赖顺序通过。产品运行骨架当前使用 SQLite
 
 CR-003 架构修正闸门已于 2026-09-04 通过。被否决的内存生产 Store、Huly Task 权威、同步跨系统事务和进程内 Saga 已从当前骨架移除；现在可以恢复 P0-05A，但仍须一次只实现一条小型纵向切片。
 
-P0-01 风险详见 `docs/reports/P0-01-source-audit.md`；Docker 开发环境复跑见 `docs/reports/P0-02-selfhost-replay.md`；Shell 验收见 `docs/reports/P0-04-huly-shell.md`；纵向链路见 `docs/reports/P0-05-node-task-file.md`；事件原子性见 `docs/reports/P0-06a-local-event-outbox.md`；架构修正验收见 `docs/reports/ARCH-GATE-01-architecture-correction.md`；无 Docker 交付边界见 `docs/change-records/CR-002-docker-free-saas.md` 与 `docs/adr/ADR-002-docker-free-runtime.md`。
+P0-05A 是依赖 P0-07 的复合项，不能因 `T1a` 通过而整体关闭。`T1a` 覆盖显式验收人的核心周期、最小持久成员/安全域授权和项目经理改派；模板角色槽位、节点负责人回退、正式成员管理与授权审计、全通道敏感 ACL、验收 UI、Deliverable/Evidence 与节点完成守卫仍待后续切片。安全域迁移期间当前 API 整体冻结，待 P0-07 实现旧域与新域权限交集。详见 `docs/reports/P0-05A-T1a-task-review.md`。
+
+P0-01 风险详见 `docs/reports/P0-01-source-audit.md`；Docker 开发环境复跑见 `docs/reports/P0-02-selfhost-replay.md`；Shell 验收见 `docs/reports/P0-04-huly-shell.md`；纵向链路见 `docs/reports/P0-05-node-task-file.md`；任务验收见 `docs/reports/P0-05A-T1a-task-review.md`；事件原子性见 `docs/reports/P0-06a-local-event-outbox.md`；架构修正验收见 `docs/reports/ARCH-GATE-01-architecture-correction.md`；无 Docker 交付边界见 `docs/change-records/CR-002-docker-free-saas.md` 与 `docs/adr/ADR-002-docker-free-runtime.md`。
