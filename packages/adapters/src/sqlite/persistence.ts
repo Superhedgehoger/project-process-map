@@ -6,9 +6,11 @@ import type { Asset, AssetBinding } from "../../../domain/src/assets.ts";
 import type { BackgroundJob, DomainEvent, OutboxMessage } from "../../../domain/src/events.ts";
 import type { ExternalBinding } from "../../../domain/src/external-reference.ts";
 import { tenantId as parseTenantId, type TenantId } from "../../../domain/src/identity.ts";
+import type { ExternalIdentityMapping, Principal } from "../../../domain/src/identity.ts";
 import type { IntegrationOperation, IntegrationStepAttempt } from "../../../domain/src/integration-operations.ts";
 import type { ProjectNode } from "../../../domain/src/project-structure.ts";
 import type { ProductTask, TaskReviewCycle } from "../../../domain/src/tasks.ts";
+import type { SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
 import type {
   ClaimOptions,
   CommandReceipt,
@@ -293,6 +295,119 @@ export class SqlitePersistence implements Persistence {
           SELECT attempt_json FROM integration_step_attempts
           WHERE tenant_id = ? AND operation_id = ? ORDER BY sequence
         `).all(tenantId, operationId).map((row) => parseJson<IntegrationStepAttempt>(asString(row.attempt_json))),
+        listRecoverable: async () => this.#database.prepare(`
+          SELECT operation_json FROM integration_operations
+          WHERE tenant_id = ? AND state IN ('retryable', 'recovery_required')
+          ORDER BY operation_id
+        `).all(tenantId).map((row) => parseJson<IntegrationOperation>(asString(row.operation_json))),
+      },
+      identities: {
+        findExternal: async (provider, connectionId, externalTenantRef, externalSubjectRef) => {
+          const row = this.#database.prepare(`
+            SELECT mapping_json FROM external_identity_mappings
+            WHERE tenant_id = ? AND provider = ? AND connection_id = ?
+              AND external_tenant_ref = ? AND external_subject_ref = ?
+          `).get(tenantId, provider, connectionId, externalTenantRef, externalSubjectRef);
+          return row === undefined ? undefined : parseJson<ExternalIdentityMapping>(asString(row.mapping_json));
+        },
+        insertExternal: async (mapping) => {
+          assertTenant(tenantId, mapping.tenantId);
+          this.#database.prepare(`
+            INSERT INTO external_identity_mappings (
+              tenant_id, provider, connection_id, external_tenant_ref, external_subject_ref,
+              principal_id, status, version, mapping_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            tenantId, mapping.provider, mapping.connectionId, mapping.externalTenantRef, mapping.externalSubjectRef,
+            mapping.principalId, mapping.status, mapping.version, JSON.stringify(mapping),
+          );
+        },
+        updateExternal: async (mapping, expectedVersion) => {
+          assertTenant(tenantId, mapping.tenantId);
+          if (mapping.version !== expectedVersion + 1) throw new Error("EXTERNAL_IDENTITY_VERSION_CONFLICT");
+          const result = this.#database.prepare(`
+            UPDATE external_identity_mappings
+            SET principal_id = ?, status = ?, version = ?, mapping_json = ?
+            WHERE tenant_id = ? AND provider = ? AND connection_id = ?
+              AND external_tenant_ref = ? AND external_subject_ref = ? AND version = ?
+          `).run(
+            mapping.principalId, mapping.status, mapping.version, JSON.stringify(mapping), tenantId,
+            mapping.provider, mapping.connectionId, mapping.externalTenantRef, mapping.externalSubjectRef, expectedVersion,
+          );
+          if (result.changes !== 1) throw new Error("EXTERNAL_IDENTITY_VERSION_CONFLICT");
+        },
+      },
+      principals: {
+        get: async (id) => {
+          const row = this.#database.prepare(`
+            SELECT * FROM principals WHERE tenant_id = ? AND principal_id = ?
+          `).get(tenantId, id);
+          return row === undefined ? undefined : principalFromRow(row);
+        },
+        insert: async (principal) => {
+          assertTenant(tenantId, principal.tenantId);
+          this.#database.prepare(`
+            INSERT INTO principals (
+              tenant_id, principal_id, kind, state, version, created_at_utc, updated_at_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            tenantId, principal.id, principal.kind, principal.status, principal.version,
+            principal.createdAtUtc, principal.updatedAtUtc,
+          );
+        },
+        update: async (principal, expectedVersion) => {
+          assertTenant(tenantId, principal.tenantId);
+          if (principal.version !== expectedVersion + 1) throw new Error("PRINCIPAL_VERSION_CONFLICT");
+          const result = this.#database.prepare(`
+            UPDATE principals SET kind = ?, state = ?, version = ?, updated_at_utc = ?
+            WHERE tenant_id = ? AND principal_id = ? AND version = ?
+          `).run(
+            principal.kind, principal.status, principal.version, principal.updatedAtUtc,
+            tenantId, principal.id, expectedVersion,
+          );
+          if (result.changes !== 1) throw new Error("PRINCIPAL_VERSION_CONFLICT");
+        },
+      },
+      securityMigrations: {
+        get: async (migrationId) => {
+          const row = this.#database.prepare(`
+            SELECT migration_json FROM security_domain_migrations WHERE tenant_id = ? AND migration_id = ?
+          `).get(tenantId, migrationId);
+          return row === undefined ? undefined : parseJson<SecurityDomainMigration>(asString(row.migration_json));
+        },
+        insert: async (migration) => {
+          assertTenant(tenantId, migration.tenantId);
+          this.#database.prepare(`
+            INSERT INTO security_domain_migrations (
+              tenant_id, migration_id, project_id, root_node_id, state, hierarchy_revision,
+              cursor, total_items, migrated_items, next_attempt_at_utc, updated_at_utc, version, migration_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            tenantId, migration.id, migration.projectId, migration.rootNodeId, migration.state, migration.hierarchyRevision,
+            migration.cursor, migration.totalItems, migration.migratedItems, migration.nextAttemptAtUtc,
+            migration.updatedAtUtc, migration.version, JSON.stringify(migration),
+          );
+        },
+        update: async (migration, expectedVersion) => {
+          assertTenant(tenantId, migration.tenantId);
+          if (migration.version !== expectedVersion + 1) throw new Error("SECURITY_MIGRATION_VERSION_CONFLICT");
+          const result = this.#database.prepare(`
+            UPDATE security_domain_migrations
+            SET state = ?, hierarchy_revision = ?, cursor = ?, total_items = ?, migrated_items = ?,
+                next_attempt_at_utc = ?, updated_at_utc = ?, version = ?, migration_json = ?
+            WHERE tenant_id = ? AND migration_id = ? AND version = ?
+          `).run(
+            migration.state, migration.hierarchyRevision, migration.cursor, migration.totalItems, migration.migratedItems,
+            migration.nextAttemptAtUtc, migration.updatedAtUtc, migration.version, JSON.stringify(migration),
+            tenantId, migration.id, expectedVersion,
+          );
+          if (result.changes !== 1) throw new Error("SECURITY_MIGRATION_VERSION_CONFLICT");
+        },
+        listRecoverable: async () => this.#database.prepare(`
+          SELECT migration_json FROM security_domain_migrations
+          WHERE tenant_id = ? AND state NOT IN ('committed', 'rolled_back')
+          ORDER BY migration_id
+        `).all(tenantId).map((row) => parseJson<SecurityDomainMigration>(asString(row.migration_json))),
       },
       receipts: {
         get: async <T>(scope: CommandScope) => {
@@ -386,6 +501,16 @@ export class SqlitePersistence implements Persistence {
             job.leaseExpiresAtUtc, job.lastError, job.completedAtUtc, job.createdAtUtc,
           );
         },
+        rescheduleDeadLetter: async (jobId, availableAtUtc) => {
+          const result = this.#database.prepare(`
+            UPDATE background_jobs
+            SET state = 'pending', available_at_utc = ?, attempts = 0,
+                lease_owner = NULL, lease_token = NULL, lease_expires_at_utc = NULL,
+                last_error = NULL, completed_at_utc = NULL
+            WHERE tenant_id = ? AND job_id = ? AND state = 'dead_letter'
+          `).run(availableAtUtc, tenantId, jobId);
+          return result.changes === 1;
+        },
       },
     };
   }
@@ -408,10 +533,28 @@ export class SqlitePersistence implements Persistence {
         principal_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK (kind IN ('user', 'service')),
         state TEXT NOT NULL CHECK (state IN ('active', 'revoked')),
+        version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
         created_at_utc TEXT NOT NULL,
+        updated_at_utc TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z',
         PRIMARY KEY (tenant_id, principal_id),
         FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
       ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS external_identity_mappings (
+        tenant_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        connection_id TEXT NOT NULL,
+        external_tenant_ref TEXT NOT NULL,
+        external_subject_ref TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('active', 'revoked')),
+        version INTEGER NOT NULL CHECK (version > 0),
+        mapping_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, provider, connection_id, external_tenant_ref, external_subject_ref),
+        FOREIGN KEY (tenant_id, principal_id) REFERENCES principals (tenant_id, principal_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS external_identity_by_principal
+        ON external_identity_mappings (tenant_id, principal_id, status);
 
       CREATE TABLE IF NOT EXISTS project_nodes (
         tenant_id TEXT NOT NULL,
@@ -523,6 +666,30 @@ export class SqlitePersistence implements Persistence {
         FOREIGN KEY (tenant_id, operation_id) REFERENCES integration_operations (tenant_id, operation_id)
       ) STRICT;
 
+      CREATE TABLE IF NOT EXISTS security_domain_migrations (
+        tenant_id TEXT NOT NULL,
+        migration_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        root_node_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('planned', 'active', 'verifying', 'committed', 'retryable', 'recovery_required', 'rolled_back')),
+        hierarchy_revision INTEGER NOT NULL,
+        cursor TEXT,
+        total_items INTEGER NOT NULL CHECK (total_items >= 0),
+        migrated_items INTEGER NOT NULL CHECK (migrated_items >= 0),
+        next_attempt_at_utc TEXT,
+        updated_at_utc TEXT NOT NULL,
+        version INTEGER NOT NULL CHECK (version > 0),
+        migration_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, migration_id),
+        FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id),
+        FOREIGN KEY (tenant_id, root_node_id) REFERENCES project_nodes (tenant_id, node_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS security_migrations_recovery
+        ON security_domain_migrations (tenant_id, state, migration_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS one_open_security_migration_per_root
+        ON security_domain_migrations (tenant_id, root_node_id)
+        WHERE state NOT IN ('committed', 'rolled_back');
+
       CREATE TABLE IF NOT EXISTS command_receipts (
         tenant_id TEXT NOT NULL,
         principal_id TEXT NOT NULL,
@@ -609,6 +776,16 @@ export class SqlitePersistence implements Persistence {
       INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc)
       VALUES (1, '2026-09-03T00:00:00.000Z');
     `);
+    this.ensureColumn("principals", "version", "INTEGER NOT NULL DEFAULT 1");
+    this.ensureColumn("principals", "updated_at_utc", "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z'");
+    this.#database.prepare(`
+      INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc) VALUES (2, ?)
+    `).run(new Date().toISOString());
+  }
+
+  private ensureColumn(table: "principals", column: string, definition: string): void {
+    const columns = this.#database.prepare(`PRAGMA table_info(${table})`).all();
+    if (!columns.some((value) => value.name === column)) this.#database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
   private ensureTenant(tenantId: TenantId): void {
@@ -767,6 +944,22 @@ function nodeFromRow(row: Record<string, unknown>): ProjectNode {
     securityEpoch: asNumber(row.security_epoch),
     version: asNumber(row.version),
     deletedAtUtc: nullableString(row.deleted_at_utc),
+  };
+}
+
+function principalFromRow(row: Record<string, unknown>): Principal {
+  const state = asString(row.state);
+  const kind = asString(row.kind);
+  if (state !== "active" && state !== "revoked") throw new Error("SQLITE_PRINCIPAL_STATE_INVALID");
+  if (kind !== "user" && kind !== "service") throw new Error("SQLITE_PRINCIPAL_KIND_INVALID");
+  return {
+    tenantId: parseTenantId(asString(row.tenant_id)),
+    id: row.principal_id as Principal["id"],
+    kind,
+    status: state,
+    version: asNumber(row.version),
+    createdAtUtc: asString(row.created_at_utc),
+    updatedAtUtc: asString(row.updated_at_utc),
   };
 }
 

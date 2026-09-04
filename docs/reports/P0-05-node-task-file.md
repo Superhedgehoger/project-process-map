@@ -1,5 +1,7 @@
 # P0-05 Node → Huly Task → File 验收
 
+> 历史证据说明：本报告记录 2026-09-03 原型验收。当时的“Huly Task 权威、同步补偿、进程内 Store”已被 CR-003 和 ARCH-GATE-01 取代；当前实现以产品 Task/Asset 为权威，Huly 仅为持久后台投影。不得再按本报告中的旧实现扩展代码。
+
 日期：2026-09-03
 结论：通过
 
@@ -11,8 +13,8 @@
 
 ## 实现结果
 
-- 产品域只保存 Node、TaskMapping、FileMetadata、业务事件、Outbox 与 Saga 状态，不导入 Huly SDK 类型。
-- Task 标题和状态以 Huly Issue 为权威，节点归属与安全域继承以产品域为权威，不建立同一业务事实的双写。
+- 当前产品域保存 Node、ProductTask、Asset/AssetBinding、业务事件、Outbox、Job 与 Integration Operation，不导入 Huly SDK 类型。
+- Task 标题、执行与验收状态以产品域为权威；Huly Issue 是可重建的协作投影。
 - Blob、Attachment 与 Issue 分属三个 Adapter 端口；公开 Node/Task/File DTO、领域事件和 Outbox 均不暴露 Huly ID、Blob ID 或不透明 authority reference。
 - 本地 TaskMapping/FileMetadata、事件、Outbox 和幂等完成记录在同一事务边界写入。
 - 跨 Huly 操作使用确定性 ID 与 Saga：响应丢失时回查；Attachment 失败时保留可重试 Blob；本地提交失败时先删除 Attachment、再删除 Blob；补偿失败明确进入 `recovery_required`。
@@ -53,8 +55,8 @@ P0-05 使用本地子测试 ID，不把整组 `FC-006` 或 `FC-008` 的 MVP 验�
 
 ## 仍未决与后续闸门
 
-- Product API 的投影与 Saga 仍是进程内存实现；重启不会从 Huly 反推 Node 归属。生产物理存储仍等待 ADR。
-- Huly Task 是否成为正式权威源仍等待 Phase 0 ADR；本报告只证明 Adapter 可行性。
+- SQLite/文件持久化和重启恢复已由 ARCH-GATE-01 取代本报告的进程内实现。
+- Task 权威已由 ADR-005 确定为产品域；Huly 仅证明 Adapter 可行性。
 - `submitted` 不映射成 Huly `Done`，任务验收模型留给 P0-05A。
 - Blob 下载的父对象 ACL 与敏感节点传播尚未证明，留给 P0-07；当前 UI 不把扫描中的文件宣称为可用。
 - 测试工作区只含虚构测试身份与验收数据，不含 Google 登录数据、Huly 密钥或生产个人数据。

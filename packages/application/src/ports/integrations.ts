@@ -124,3 +124,14 @@ export interface TaskFileProjectionPort {
   get(reference: ExternalReference): Promise<TaskFileProjectionRecord | undefined>;
   remove(reference: ExternalReference, expectedSyncWatermark: string): Promise<void>;
 }
+
+export type VerifiedExternalIdentity = Readonly<{
+  provider: string;
+  connectionId: string;
+  externalTenantRef: string;
+  externalSubjectRef: string;
+}>;
+
+export interface ExternalIdentityVerifier {
+  authenticate(credential: string): Promise<VerifiedExternalIdentity>;
+}

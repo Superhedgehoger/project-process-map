@@ -25,6 +25,16 @@ export type RequestContext = Readonly<{
   correlationId: string;
 }>;
 
+export type Principal = Readonly<{
+  tenantId: TenantId;
+  id: PrincipalId;
+  kind: "user" | "service";
+  status: "active" | "revoked";
+  version: number;
+  createdAtUtc: string;
+  updatedAtUtc: string;
+}>;
+
 export type ExternalIdentityMapping = Readonly<{
   tenantId: TenantId;
   principalId: PrincipalId;
@@ -34,5 +44,6 @@ export type ExternalIdentityMapping = Readonly<{
   externalSubjectRef: string;
   status: "active" | "revoked";
   version: number;
+  createdAtUtc: string;
+  updatedAtUtc: string;
 }>;
-

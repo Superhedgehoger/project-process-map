@@ -7,6 +7,7 @@ import type { JobConsumer, OutboxConsumer, Persistence } from "../../../packages
 import { FilesystemAssetContent } from "../../../packages/adapters/src/filesystem/asset-content.ts";
 import {
   HulyRestBlobProjectionAdapter,
+  HulyRestIdentityVerifier,
   HulyRestTaskFileProjectionAdapter,
   HulyRestTaskProjectionAdapter,
   type HulyRestConfig,
@@ -14,6 +15,7 @@ import {
 import { SqlitePersistence } from "../../../packages/adapters/src/sqlite/persistence.ts";
 import type { BackgroundJob } from "../../../packages/domain/src/events.ts";
 import { tenantId } from "../../../packages/domain/src/identity.ts";
+import { principalId } from "../../../packages/domain/src/identity.ts";
 import { createProductApi, type ProductApiOptions } from "./app.ts";
 
 export type ProductApiRuntime = {
@@ -66,6 +68,7 @@ export async function startProductApiServer(
   dependencies?: ProductApiDependencies,
 ): Promise<ProductApiRuntime> {
   const runtimeDependencies = dependencies ?? createNativeDependencies(environment);
+  const identityVerifier = hulyIdentityVerifier(environment);
   const port = parsePort(environment.PORT ?? "4100");
   const host = environment.HOST?.trim() || "127.0.0.1";
   const options: ProductApiOptions = {
@@ -73,12 +76,14 @@ export async function startProductApiServer(
     persistence: runtimeDependencies.persistence,
     assetContent: runtimeDependencies.assetContent,
     tenantId: tenantId(environment.PRODUCT_TENANT_ID?.trim() || "phase0-tenant"),
-    ...(environment.HULY_TRANSACTION_ENDPOINT === undefined ? {} : { transactionEndpoint: environment.HULY_TRANSACTION_ENDPOINT }),
-    ...(environment.HULY_FILE_ENDPOINT === undefined ? {} : { fileEndpoint: environment.HULY_FILE_ENDPOINT }),
-    ...(environment.HULY_WORKSPACE_ID === undefined ? {} : { workspaceId: environment.HULY_WORKSPACE_ID }),
-    ...(environment.HULY_PROJECT_ID === undefined ? {} : { hulyProjectId: environment.HULY_PROJECT_ID }),
-    ...(environment.HULY_SERVICE_TOKEN === undefined ? {} : { hulyServiceToken: environment.HULY_SERVICE_TOKEN }),
+    ...(identityVerifier === undefined ? {} : { externalIdentityVerifier: identityVerifier }),
+    collaborationProjectionConfigured: hulyWorkerConfig(environment) !== undefined,
     ...(environment.PRODUCT_UI_ORIGIN === undefined ? {} : { allowedOrigin: environment.PRODUCT_UI_ORIGIN }),
+    recoveryOperatorPrincipalIds: (environment.RECOVERY_OPERATOR_PRINCIPAL_IDS ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0)
+      .map(principalId),
   };
   const server = createServer(createProductApi(options));
   await new Promise<void>((resolveListen, reject) => {
@@ -125,4 +130,19 @@ function hulyWorkerConfig(environment: NodeJS.ProcessEnv): HulyRestConfig | unde
 
 function configuredCollaborationMode(environment: NodeJS.ProcessEnv): "disabled" | "huly" {
   return environment.COLLABORATION_MODE === "huly" || environment.ADAPTER_MODE === "huly" ? "huly" : "disabled";
+}
+
+function hulyIdentityVerifier(environment: NodeJS.ProcessEnv): HulyRestIdentityVerifier | undefined {
+  const transactionEndpoint = environment.HULY_TRANSACTION_ENDPOINT?.trim();
+  const fileEndpoint = environment.HULY_FILE_ENDPOINT?.trim();
+  const workspaceId = environment.HULY_WORKSPACE_ID?.trim();
+  const projectId = environment.HULY_PROJECT_ID?.trim();
+  if (!transactionEndpoint || !fileEndpoint || !workspaceId || !projectId) return undefined;
+  return new HulyRestIdentityVerifier({
+    transactionEndpoint,
+    fileEndpoint,
+    workspaceId,
+    projectId,
+    connectionId: environment.HULY_CONNECTION_ID?.trim() || "huly-primary",
+  });
 }

@@ -5,6 +5,7 @@ import type {
   CollaborationTaskStatus,
   CreateTaskProjection,
   ExternalBlobProjectionPort,
+  ExternalIdentityVerifier,
   StoredAssetContent,
   TaskFileProjectionPort,
   TaskFileProjectionRecord,
@@ -40,6 +41,8 @@ export type HulyRestConfig = {
   blobScanState?: BlobScanState;
   requestTimeoutMilliseconds?: number;
 };
+
+export type HulyIdentityVerifierConfig = Omit<HulyRestConfig, "actorToken"> & Readonly<{ connectionId: string }>;
 
 class HulyRestConnection {
   readonly transactionEndpoint: string;
@@ -341,8 +344,27 @@ export class HulyRestTaskProjectionAdapter implements TaskProjectionPort {
   }
 }
 
-export async function resolveHulyActorId(config: HulyRestConfig): Promise<string> {
-  return await new HulyRestConnection(config).actorId();
+export class HulyRestIdentityVerifier implements ExternalIdentityVerifier {
+  readonly #config: HulyIdentityVerifierConfig;
+
+  constructor(config: HulyIdentityVerifierConfig) {
+    this.#config = config;
+  }
+
+  async authenticate(credential: string) {
+    if (credential.trim().length === 0) throw new IntegrationCallError(
+      "HULY_CREDENTIAL_REQUIRED",
+      "Huly credential is required",
+      { retryable: false, outcome: "known_failed" },
+    );
+    const connection = new HulyRestConnection({ ...this.#config, actorToken: credential });
+    return {
+      provider: "huly",
+      connectionId: this.#config.connectionId,
+      externalTenantRef: this.#config.workspaceId,
+      externalSubjectRef: await connection.actorId(),
+    };
+  }
 }
 
 export class HulyRestBlobProjectionAdapter implements ExternalBlobProjectionPort {

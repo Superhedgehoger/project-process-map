@@ -1,6 +1,6 @@
 # P0-ND-01 无 Docker 原生发行验证
 
-日期：2026-09-03
+日期：2026-09-04（架构修正后复验）
 
 结论：通过可行性闸门，不等同于生产 SaaS 验收。
 
@@ -16,7 +16,7 @@
 本机验证结果：
 
 ```json
-{"status":"ok","release":"project-process-map-0.0.1-node24.tar.gz","dockerInvoked":false,"verticalPath":"page -> nodes -> task"}
+{"status":"ok","release":"project-process-map-0.0.1-node24.tar.gz","dockerInvoked":false,"verticalPath":"page -> nodes -> task -> asset -> restart -> readback","persistence":"sqlite+filesystem"}
 ```
 
 冒烟测试把一个必定失败并留下标记的伪 `docker` 命令放到 `PATH` 首位；启动、请求和停止结束后标记不存在。由此证明 P0-ND-01 产品发行路径没有调用 Docker。该证据不证明完整 Huly 已能脱离容器运行。
@@ -30,9 +30,9 @@
 ## 已知边界
 
 - 发行物需要 Node.js 24 或更高版本。
-- 默认使用进程内存存储；重启后数据消失。
-- 独立页面尚未实现正式登录和租户上下文。
+- 默认使用 SQLite 与文件目录；已验证重启回读，尚未完成备份/恢复演练。
+- 已有可信 TenantContext 和持久外部身份映射，独立页面尚未实现正式 SaaS 登录界面。
 - Huly 仍只在 Docker 开发验证轨运行，尚未形成原生生产拓扑。
-- 未完成制品签名、SBOM、systemd 单元、持久存储迁移、备份恢复、升级或回滚。
+- 未完成制品签名、发行 SBOM、systemd 单元、备份恢复、升级或回滚。
 
 这些边界由 CR-002 明确留给 P0-ND-02，不能把本报告描述成最终 SaaS 已交付。

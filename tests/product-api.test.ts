@@ -3,10 +3,13 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import test from "node:test";
 import { Script } from "node:vm";
-import { createProductApi } from "../apps/product-api/src/app.ts";
+import { createProductApi, type ProductApiOptions } from "../apps/product-api/src/app.ts";
+import { MemoryAssetContent } from "../packages/adapters/src/memory/asset-content.ts";
+import { MemoryPersistence } from "../packages/adapters/src/memory/persistence.ts";
+import { principalId } from "../packages/domain/src/identity.ts";
 
 test("P0-05-CT-009 Product API exposes the vertical path with stable HTTP semantics", async () => {
-  const handler = createProductApi({ collaborationMode: "disabled", allowedOrigin: "http://ui.test" });
+  const handler = createTestProductApi({ collaborationMode: "disabled", allowedOrigin: "http://ui.test" });
   const missingKey = await call(handler, "/api/nodes/N-03/tasks", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -64,13 +67,10 @@ test("P0-05-CT-009 Product API exposes the vertical path with stable HTTP semant
 });
 
 test("P0-05-CT-009 Huly health reports configuration readiness without claiming a memory adapter check", async () => {
-  const configured = createProductApi({
+  const configured = createTestProductApi({
     collaborationMode: "huly",
-    transactionEndpoint: "http://huly.test/_transactor",
-    fileEndpoint: "http://huly.test/files",
-    workspaceId: "workspace-1",
-    hulyProjectId: "project-1",
-    hulyServiceToken: "service-token-reference-for-test",
+    externalIdentityVerifier: { authenticate: async () => ({ provider: "huly", connectionId: "test", externalTenantRef: "workspace-1", externalSubjectRef: "actor-1" }) },
+    collaborationProjectionConfigured: true,
   });
   const ready = await call(configured, "/health");
   assert.equal(ready.status, 200);
@@ -79,14 +79,14 @@ test("P0-05-CT-009 Huly health reports configuration readiness without claiming 
     ["product-api", "huly-adapter-configuration"],
   );
 
-  const incomplete = await call(createProductApi({ collaborationMode: "huly" }), "/health");
+  const incomplete = await call(createTestProductApi({ collaborationMode: "huly" }), "/health");
   assert.equal(incomplete.status, 503);
 });
 
 type Handler = (request: IncomingMessage, response: ServerResponse) => Promise<void>;
 
 test("P0-ND-01 Product API serves a standalone browser entry and node collection", async () => {
-  const handler = createProductApi({ collaborationMode: "disabled" });
+  const handler = createTestProductApi({ collaborationMode: "disabled" });
   const page = await call(handler, "/");
   assert.equal(page.status, 200);
   assert.equal(page.headers.get("content-type"), "text/html; charset=utf-8");
@@ -102,6 +102,21 @@ test("P0-ND-01 Product API serves a standalone browser entry and node collection
   const body = JSON.parse(nodes.body) as Array<{ id: string }>;
   assert.deepEqual(body.map((node) => node.id), ["N-01", "N-02", "N-03", "N-04", "N-05", "N-06"]);
 });
+
+test("ARCH-GATE-RECOVERY-002 operator recovery routes are deny-by-default", async () => {
+  const denied = await call(createTestProductApi({ collaborationMode: "disabled" }), "/api/operator/integration-operations");
+  assert.equal(denied.status, 403);
+  const allowed = await call(createTestProductApi({
+    collaborationMode: "disabled",
+    recoveryOperatorPrincipalIds: [principalId("phase0-user")],
+  }), "/api/operator/integration-operations");
+  assert.equal(allowed.status, 200);
+  assert.deepEqual(JSON.parse(allowed.body), []);
+});
+
+function createTestProductApi(options: Omit<ProductApiOptions, "persistence" | "assetContent">) {
+  return createProductApi({ ...options, persistence: new MemoryPersistence(), assetContent: new MemoryAssetContent() });
+}
 
 async function call(
   handler: Handler,

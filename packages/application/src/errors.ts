@@ -1,5 +1,6 @@
 export type ApplicationErrorCode =
   | "UNAUTHORIZED"
+  | "FORBIDDEN"
   | "NOT_FOUND"
   | "NODE_NOT_FOUND"
   | "TASK_NOT_FOUND"
@@ -17,7 +18,12 @@ export type ApplicationErrorCode =
   | "VALIDATION_FAILED"
   | "HULY_ADAPTER_NOT_CONFIGURED"
   | "UPSTREAM_FAILURE"
-  | "CONFLICT";
+  | "CONFLICT"
+  | "INTEGRATION_OPERATION_NOT_FOUND"
+  | "INTEGRATION_OPERATION_VERSION_CONFLICT"
+  | "INTEGRATION_OPERATION_NOT_RECOVERABLE"
+  | "INTEGRATION_OPERATION_REQUIRES_SPECIALIZED_RECOVERY"
+  | "INTEGRATION_RECOVERY_JOB_NOT_DEAD_LETTER";
 
 export class ApplicationError extends Error {
   readonly code: ApplicationErrorCode;
@@ -42,6 +48,7 @@ export function asApplicationError(error: unknown): ApplicationError {
 
 const knownCodes = new Set<ApplicationErrorCode>([
   "UNAUTHORIZED",
+  "FORBIDDEN",
   "NOT_FOUND",
   "NODE_NOT_FOUND",
   "TASK_NOT_FOUND",
@@ -60,4 +67,9 @@ const knownCodes = new Set<ApplicationErrorCode>([
   "HULY_ADAPTER_NOT_CONFIGURED",
   "UPSTREAM_FAILURE",
   "CONFLICT",
+  "INTEGRATION_OPERATION_NOT_FOUND",
+  "INTEGRATION_OPERATION_VERSION_CONFLICT",
+  "INTEGRATION_OPERATION_NOT_RECOVERABLE",
+  "INTEGRATION_OPERATION_REQUIRES_SPECIALIZED_RECOVERY",
+  "INTEGRATION_RECOVERY_JOB_NOT_DEAD_LETTER",
 ]);

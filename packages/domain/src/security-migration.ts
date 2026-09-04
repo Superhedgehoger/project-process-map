@@ -17,7 +17,11 @@ export type SecurityDomainMigration = Readonly<{
   totalItems: number;
   migratedItems: number;
   failure: string | null;
+  nextAttemptAtUtc: string | null;
+  deadlineAtUtc: string;
   version: number;
+  createdAtUtc: string;
+  updatedAtUtc: string;
 }>;
 
 export function effectiveSecurityDomains(migration: SecurityDomainMigration): ReadonlyArray<string | null> {
@@ -32,6 +36,7 @@ export function effectiveSecurityDomains(migration: SecurityDomainMigration): Re
 export function transitionSecurityMigration(
   migration: SecurityDomainMigration,
   target: SecurityDomainMigrationState,
+  occurredAtUtc: string,
   failure: string | null = null,
 ): SecurityDomainMigration {
   const allowed: Record<SecurityDomainMigrationState, readonly SecurityDomainMigrationState[]> = {
@@ -47,6 +52,36 @@ export function transitionSecurityMigration(
   if ((target === "retryable" || target === "recovery_required") && (failure === null || failure.trim().length === 0)) {
     throw new Error("SECURITY_MIGRATION_FAILURE_REQUIRED");
   }
-  return { ...migration, state: target, failure, version: migration.version + 1 };
+  assertUtc(occurredAtUtc);
+  return {
+    ...migration,
+    state: target,
+    failure,
+    nextAttemptAtUtc: target === "retryable" ? occurredAtUtc : null,
+    version: migration.version + 1,
+    updatedAtUtc: occurredAtUtc,
+  };
 }
 
+export function checkpointSecurityMigration(
+  migration: SecurityDomainMigration,
+  checkpoint: Readonly<{ cursor: string; migratedItems: number; occurredAtUtc: string }>,
+): SecurityDomainMigration {
+  if (migration.state !== "active") throw new Error("SECURITY_MIGRATION_CHECKPOINT_FORBIDDEN");
+  if (checkpoint.cursor.trim().length === 0) throw new Error("SECURITY_MIGRATION_CURSOR_REQUIRED");
+  if (!Number.isSafeInteger(checkpoint.migratedItems)
+    || checkpoint.migratedItems < migration.migratedItems
+    || checkpoint.migratedItems > migration.totalItems) throw new Error("SECURITY_MIGRATION_PROGRESS_INVALID");
+  assertUtc(checkpoint.occurredAtUtc);
+  return {
+    ...migration,
+    cursor: checkpoint.cursor,
+    migratedItems: checkpoint.migratedItems,
+    version: migration.version + 1,
+    updatedAtUtc: checkpoint.occurredAtUtc,
+  };
+}
+
+function assertUtc(value: string): void {
+  if (!value.endsWith("Z") || Number.isNaN(Date.parse(value))) throw new Error("INVALID_UTC_TIMESTAMP");
+}

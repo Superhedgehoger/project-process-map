@@ -137,6 +137,31 @@ export class AttachTaskAssetHandler {
     });
     if (initialized.replay !== undefined) return { value: initialized.replay, replayed: true };
 
+    await this.#persistence.transaction(command.tenantId, async (transaction) => {
+      const operation = await requiredOperation(transaction, operationId);
+      if (operation.state === "completed") return;
+      if (operation.state !== "planned" && operation.state !== "retryable") throw new Error("ASSET_INGEST_OPERATION_NOT_READY");
+      const running = advanceIntegrationOperation(operation, {
+        state: "running",
+        currentStep: "store_content",
+        occurredAtUtc: command.occurredAtUtc,
+        incrementAttempt: true,
+      });
+      await transaction.integrationOperations.update(running, operation.version);
+      const steps = await transaction.integrationOperations.listSteps(operationId);
+      await transaction.integrationOperations.appendStep({
+        tenantId: command.tenantId,
+        operationId,
+        sequence: steps.length + 1,
+        step: "store_content",
+        attempt: running.attempts,
+        outcome: "started",
+        externalRequestId: running.externalRequestId,
+        errorCode: null,
+        occurredAtUtc: command.occurredAtUtc,
+      });
+    });
+
     let stored: StoredAssetContent;
     try {
       stored = await this.#content.put({
@@ -213,7 +238,6 @@ export class AttachTaskAssetHandler {
         currentStep: "content_stored",
         occurredAtUtc: command.occurredAtUtc,
         externalReference: stored.reference,
-        incrementAttempt: true,
       });
       await transaction.integrationOperations.update(operation, operation.version - 1);
       const steps = await transaction.integrationOperations.listSteps(operationId);
@@ -263,7 +287,6 @@ export class AttachTaskAssetHandler {
         occurredAtUtc: command.occurredAtUtc,
         nextAttemptAtUtc: command.occurredAtUtc,
         lastError: errorMessage(cause),
-        incrementAttempt: true,
       });
       await transaction.integrationOperations.update(updated, operation.version);
       const steps = await transaction.integrationOperations.listSteps(operationId);

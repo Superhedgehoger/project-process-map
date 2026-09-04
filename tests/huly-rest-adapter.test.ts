@@ -3,6 +3,7 @@ import test from "node:test";
 import { createHash } from "node:crypto";
 import {
   HulyRestBlobProjectionAdapter,
+  HulyRestIdentityVerifier,
   HulyRestTaskFileProjectionAdapter,
   HulyRestTaskProjectionAdapter,
 } from "../packages/adapters/src/huly-rest.ts";
@@ -17,6 +18,8 @@ test("P0-05-CT-008 Huly REST adapters create, reconcile and compensate Issue, At
   const transactions: StoredDoc[] = [];
   let sequence = 4;
   let loseTaskCreateResponse = true;
+  let loseBlobUploadResponse = true;
+  let blobUploadAttempts = 0;
   const originalFetch = globalThis.fetch;
   context.after(() => { globalThis.fetch = originalFetch; });
 
@@ -78,7 +81,12 @@ test("P0-05-CT-008 Huly REST adapters create, reconcile and compensate Issue, At
         assert.ok(init.body instanceof FormData);
         const file = init.body.get("file");
         assert.ok(file instanceof File);
+        blobUploadAttempts += 1;
         blobs.add(file.name);
+        if (loseBlobUploadResponse) {
+          loseBlobUploadResponse = false;
+          throw new TypeError("socket closed after blob commit");
+        }
         return json([{ id: file.name }]);
       }
     }
@@ -95,18 +103,33 @@ test("P0-05-CT-008 Huly REST adapters create, reconcile and compensate Issue, At
   const taskAdapter = new HulyRestTaskProjectionAdapter(config);
   const blobAdapter = new HulyRestBlobProjectionAdapter(config);
   const taskFileAdapter = new HulyRestTaskFileProjectionAdapter(config);
+  assert.deepEqual(await new HulyRestIdentityVerifier({
+    transactionEndpoint: config.transactionEndpoint,
+    fileEndpoint: config.fileEndpoint,
+    workspaceId: config.workspaceId,
+    projectId: config.projectId,
+    connectionId: "huly-primary",
+  }).authenticate("actor-token"), {
+    provider: "huly",
+    connectionId: "huly-primary",
+    externalTenantRef: "workspace-1",
+    externalSubjectRef: "email:user@example.test",
+  });
   const taskInput = { requestId: "task-key", title: "真实 Huly 任务", status: "todo" as const };
   const task = await taskAdapter.create(taskInput);
   assert.deepEqual(await taskAdapter.create(taskInput), task);
   assert.deepEqual(await taskAdapter.get(task.reference), task);
 
   const bytes = new TextEncoder().encode("huly attachment");
-  const blob = await blobAdapter.put({
+  const blobInput = {
     requestId: "blob-key",
     contentType: "text/plain",
     bytes,
     sha256: createHash("sha256").update(bytes).digest("hex"),
-  });
+  };
+  await assert.rejects(blobAdapter.put(blobInput), (error: unknown) => error instanceof IntegrationCallError && error.outcome === "ambiguous");
+  const blob = await blobAdapter.put(blobInput);
+  assert.equal(blobUploadAttempts, 1);
   assert.equal(blob.scanState, "scanning");
   assert.equal(await blobAdapter.exists(blob.reference), true);
 

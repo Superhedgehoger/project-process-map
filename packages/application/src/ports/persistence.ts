@@ -2,9 +2,11 @@ import type { Asset, AssetBinding } from "../../../domain/src/assets.ts";
 import type { BackgroundJob, DomainEvent, OutboxMessage } from "../../../domain/src/events.ts";
 import type { ExternalBinding } from "../../../domain/src/external-reference.ts";
 import type { PrincipalId, TenantId } from "../../../domain/src/identity.ts";
+import type { ExternalIdentityMapping, Principal } from "../../../domain/src/identity.ts";
 import type { IntegrationOperation, IntegrationStepAttempt } from "../../../domain/src/integration-operations.ts";
 import type { ProjectNode } from "../../../domain/src/project-structure.ts";
 import type { ProductTask, TaskReviewCycle } from "../../../domain/src/tasks.ts";
+import type { SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
 
 export type CommandScope = Readonly<{
   principalId: PrincipalId;
@@ -59,6 +61,31 @@ export interface IntegrationOperationRepository {
   update(operation: IntegrationOperation, expectedVersion: number): Promise<void>;
   appendStep(attempt: IntegrationStepAttempt): Promise<void>;
   listSteps(operationId: string): Promise<IntegrationStepAttempt[]>;
+  listRecoverable(): Promise<IntegrationOperation[]>;
+}
+
+export interface IdentityMappingRepository {
+  findExternal(
+    provider: string,
+    connectionId: string,
+    externalTenantRef: string,
+    externalSubjectRef: string,
+  ): Promise<ExternalIdentityMapping | undefined>;
+  insertExternal(mapping: ExternalIdentityMapping): Promise<void>;
+  updateExternal(mapping: ExternalIdentityMapping, expectedVersion: number): Promise<void>;
+}
+
+export interface PrincipalRepository {
+  get(principalId: PrincipalId): Promise<Principal | undefined>;
+  insert(principal: Principal): Promise<void>;
+  update(principal: Principal, expectedVersion: number): Promise<void>;
+}
+
+export interface SecurityDomainMigrationRepository {
+  get(migrationId: string): Promise<SecurityDomainMigration | undefined>;
+  insert(migration: SecurityDomainMigration): Promise<void>;
+  update(migration: SecurityDomainMigration, expectedVersion: number): Promise<void>;
+  listRecoverable(): Promise<SecurityDomainMigration[]>;
 }
 
 export interface ProjectSequenceRepository {
@@ -76,6 +103,7 @@ export interface OutboxWriter {
 
 export interface JobWriter {
   schedule(job: BackgroundJob): Promise<void>;
+  rescheduleDeadLetter(jobId: string, availableAtUtc: string): Promise<boolean>;
 }
 
 export type TransactionContext = Readonly<{
@@ -85,6 +113,9 @@ export type TransactionContext = Readonly<{
   assets: AssetRepository;
   externalBindings: ExternalBindingRepository;
   integrationOperations: IntegrationOperationRepository;
+  identities: IdentityMappingRepository;
+  principals: PrincipalRepository;
+  securityMigrations: SecurityDomainMigrationRepository;
   receipts: CommandReceiptRepository;
   sequences: ProjectSequenceRepository;
   events: DomainEventWriter;

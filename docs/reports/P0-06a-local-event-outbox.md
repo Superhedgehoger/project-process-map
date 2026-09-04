@@ -1,5 +1,7 @@
 # P0-06a 本地事件与 Outbox 探索证据
 
+> 历史证据说明：本报告中的 `InMemoryTransactionalStore` 已被删除。当前权威实现为 application-owned `Persistence` 端口及 Memory/SQLite 适配器；正式原生运行使用 SQLite，并以租约处理 Outbox/Job。以下内容仅保留原始探索背景。
+
 - 验证日期：2026-09-02
 - 范围：仅内存实现，不连接、修改或分发 Huly
 - 目的：在许可证闸门等待人工审查期间，提前验证本地事务契约

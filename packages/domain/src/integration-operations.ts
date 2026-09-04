@@ -51,6 +51,17 @@ export function advanceIntegrationOperation(
   }>,
 ): IntegrationOperation {
   if (operation.state === "completed" || operation.state === "compensated") throw new Error("INTEGRATION_OPERATION_IS_TERMINAL");
+  const allowed: Record<IntegrationOperationState, readonly IntegrationOperationState[]> = {
+    planned: ["running", "recovery_required"],
+    running: ["running", "retryable", "completed", "compensated", "recovery_required"],
+    retryable: ["running", "retryable", "recovery_required"],
+    recovery_required: ["retryable", "compensated"],
+    completed: [],
+    compensated: [],
+  };
+  if (!allowed[operation.state].includes(change.state)) {
+    throw new Error(`INTEGRATION_OPERATION_TRANSITION_INVALID:${operation.state}:${change.state}`);
+  }
   if ((change.state === "retryable" || change.state === "recovery_required") && !change.lastError?.trim()) {
     throw new Error("INTEGRATION_OPERATION_ERROR_REQUIRED");
   }
@@ -67,4 +78,3 @@ export function advanceIntegrationOperation(
     updatedAtUtc: change.occurredAtUtc,
   };
 }
-

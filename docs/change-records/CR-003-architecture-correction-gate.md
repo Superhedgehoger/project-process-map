@@ -34,3 +34,15 @@
 - 不实现产品内 AI Agent。未来如立项，应建立 `AgentRun/Step/ToolInvocation/Approval/Artifact/SecretReference` 边界，并只通过正式应用命令修改领域状态。
 - 不因此复刻 Huly UI，也不把 Huly 身份或 Task 再次提升为产品权威源。
 
+## 实施收口
+
+收口日期：2026-09-04
+
+- [x] Product Task/Asset 与 Huly 协作投影解除双权威。
+- [x] API 与 Worker 通过 SQLite Outbox/Job 跨进程、跨重启恢复。
+- [x] 租户、内部身份、外部身份映射与安全域迁移持久化并带版本控制。
+- [x] 外部成功后响应丢失、部分成功、超时、重复调用、死信与人工恢复均有明确路径。
+- [x] HTTP 路由、应用端口、领域状态机和基础设施依赖方向完成拆分。
+- [x] `pnpm check` 的 42 项行为/故障测试、原生构建及无 Docker 重启恢复冒烟通过。
+
+验收证据见 [ARCH-GATE-01 架构修正验收](../reports/ARCH-GATE-01-architecture-correction.md)。本变更记录解除“暂停新增业务功能”的临时闸门，但后续仍须遵守一次一条小型纵向切片和 P0-ND-02/P0-07 等发布前闸门。

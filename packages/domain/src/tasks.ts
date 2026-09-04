@@ -78,6 +78,18 @@ export function completeTaskWithoutReview(task: ProductTask): ProductTask {
   return { ...task, executionState: "completed", version: task.version + 1 };
 }
 
+export function cancelTask(task: ProductTask): ProductTask {
+  assertMutable(task);
+  if (task.reviewState === "pending") throw new Error("TASK_PENDING_REVIEW_CANNOT_CANCEL");
+  return { ...task, executionState: "canceled", version: task.version + 1 };
+}
+
+export function promoteTask(task: ProductTask): ProductTask {
+  if (task.executionState !== "completed") throw new Error("TASK_PROMOTE_TRANSITION_INVALID");
+  if (task.requiresAcceptance && task.reviewState !== "accepted") throw new Error("TASK_PROMOTE_REQUIRES_ACCEPTANCE");
+  return { ...task, executionState: "promoted", version: task.version + 1 };
+}
+
 function assertMutable(task: ProductTask): void {
   if (task.executionState === "completed" || task.executionState === "canceled" || task.executionState === "promoted") {
     throw new Error("TASK_IS_TERMINAL");

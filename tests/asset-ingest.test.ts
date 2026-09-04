@@ -114,7 +114,7 @@ test("ARCH-GATE-ASSET-004 failed storage attempt is durable and exact retry conv
     assert.equal(persistence.snapshot().assets.size, 1);
     const operation = [...persistence.snapshot().operations.values()][0];
     assert.equal(operation?.state, "completed");
-    assert.equal(persistence.snapshot().operationSteps.size, 2);
+    assert.equal(persistence.snapshot().operationSteps.size, 4);
   } finally {
     await persistence.close();
   }

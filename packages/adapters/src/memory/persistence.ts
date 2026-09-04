@@ -3,9 +3,11 @@ import type { Asset, AssetBinding } from "../../../domain/src/assets.ts";
 import type { BackgroundJob, DomainEvent, OutboxMessage } from "../../../domain/src/events.ts";
 import type { ExternalBinding } from "../../../domain/src/external-reference.ts";
 import type { TenantId } from "../../../domain/src/identity.ts";
+import type { ExternalIdentityMapping, Principal } from "../../../domain/src/identity.ts";
 import type { IntegrationOperation, IntegrationStepAttempt } from "../../../domain/src/integration-operations.ts";
 import type { ProjectNode } from "../../../domain/src/project-structure.ts";
 import type { ProductTask, TaskReviewCycle } from "../../../domain/src/tasks.ts";
+import type { SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
 import type {
   ClaimOptions,
   CommandReceipt,
@@ -25,6 +27,9 @@ type MemoryState = {
   externalBindings: Map<string, ExternalBinding>;
   operations: Map<string, IntegrationOperation>;
   operationSteps: Map<string, IntegrationStepAttempt>;
+  identityMappings: Map<string, ExternalIdentityMapping>;
+  principals: Map<string, Principal>;
+  securityMigrations: Map<string, SecurityDomainMigration>;
   receipts: Map<string, CommandReceipt>;
   sequences: Map<string, number>;
   events: Map<string, DomainEvent>;
@@ -45,6 +50,9 @@ function emptyState(): MemoryState {
     externalBindings: new Map(),
     operations: new Map(),
     operationSteps: new Map(),
+    identityMappings: new Map(),
+    principals: new Map(),
+    securityMigrations: new Map(),
     receipts: new Map(),
     sequences: new Map(),
     events: new Map(),
@@ -66,6 +74,9 @@ function cloneState(state: MemoryState): MemoryState {
     externalBindings: new Map(structuredClone([...state.externalBindings])),
     operations: new Map(structuredClone([...state.operations])),
     operationSteps: new Map(structuredClone([...state.operationSteps])),
+    identityMappings: new Map(structuredClone([...state.identityMappings])),
+    principals: new Map(structuredClone([...state.principals])),
+    securityMigrations: new Map(structuredClone([...state.securityMigrations])),
     receipts: new Map(structuredClone([...state.receipts])),
     sequences: new Map(state.sequences),
     events: new Map(structuredClone([...state.events])),
@@ -274,6 +285,69 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
         .filter((attempt) => attempt.tenantId === tenantId && attempt.operationId === operationId)
         .sort((left, right) => left.sequence - right.sequence)
         .map((attempt) => structuredClone(attempt)),
+      listRecoverable: async () => [...state.operations.values()]
+        .filter((operation) => operation.tenantId === tenantId && (operation.state === "retryable" || operation.state === "recovery_required"))
+        .map((operation) => structuredClone(operation)),
+    },
+    identities: {
+      findExternal: async (provider, connectionId, externalTenantRef, externalSubjectRef) => clone(state.identityMappings.get(
+        identityKey(tenantId, provider, connectionId, externalTenantRef, externalSubjectRef),
+      )),
+      insertExternal: async (mapping) => {
+        assertTenant(tenantId, mapping.tenantId);
+        const key = identityKey(tenantId, mapping.provider, mapping.connectionId, mapping.externalTenantRef, mapping.externalSubjectRef);
+        if (state.identityMappings.has(key)) throw new Error("EXTERNAL_IDENTITY_ALREADY_MAPPED");
+        state.identityMappings.set(key, structuredClone(mapping));
+      },
+      updateExternal: async (mapping, expectedVersion) => {
+        assertTenant(tenantId, mapping.tenantId);
+        const key = identityKey(tenantId, mapping.provider, mapping.connectionId, mapping.externalTenantRef, mapping.externalSubjectRef);
+        const current = state.identityMappings.get(key);
+        if (current === undefined || current.version !== expectedVersion || mapping.version !== expectedVersion + 1) {
+          throw new Error("EXTERNAL_IDENTITY_VERSION_CONFLICT");
+        }
+        state.identityMappings.set(key, structuredClone(mapping));
+      },
+    },
+    principals: {
+      get: async (id) => clone(state.principals.get(`${tenantPrefix}${id}`)),
+      insert: async (principal) => {
+        assertTenant(tenantId, principal.tenantId);
+        const key = `${tenantPrefix}${principal.id}`;
+        if (state.principals.has(key)) throw new Error("PRINCIPAL_ALREADY_EXISTS");
+        state.principals.set(key, structuredClone(principal));
+      },
+      update: async (principal, expectedVersion) => {
+        assertTenant(tenantId, principal.tenantId);
+        const key = `${tenantPrefix}${principal.id}`;
+        const current = state.principals.get(key);
+        if (current === undefined || current.version !== expectedVersion || principal.version !== expectedVersion + 1) throw new Error("PRINCIPAL_VERSION_CONFLICT");
+        state.principals.set(key, structuredClone(principal));
+      },
+    },
+    securityMigrations: {
+      get: async (migrationId) => clone(state.securityMigrations.get(`${tenantPrefix}${migrationId}`)),
+      insert: async (migration) => {
+        assertTenant(tenantId, migration.tenantId);
+        const key = `${tenantPrefix}${migration.id}`;
+        if (state.securityMigrations.has(key)) throw new Error("SECURITY_MIGRATION_ALREADY_EXISTS");
+        if ([...state.securityMigrations.values()].some((item) => item.tenantId === tenantId
+          && item.rootNodeId === migration.rootNodeId && !["committed", "rolled_back"].includes(item.state))) {
+          throw new Error("SECURITY_MIGRATION_ROOT_ALREADY_OPEN");
+        }
+        state.securityMigrations.set(key, structuredClone(migration));
+      },
+      update: async (migration, expectedVersion) => {
+        assertTenant(tenantId, migration.tenantId);
+        const key = `${tenantPrefix}${migration.id}`;
+        const current = state.securityMigrations.get(key);
+        if (current === undefined) throw new Error("SECURITY_MIGRATION_NOT_FOUND");
+        if (current.version !== expectedVersion || migration.version !== expectedVersion + 1) throw new Error("SECURITY_MIGRATION_VERSION_CONFLICT");
+        state.securityMigrations.set(key, structuredClone(migration));
+      },
+      listRecoverable: async () => [...state.securityMigrations.values()]
+        .filter((migration) => migration.tenantId === tenantId && !["committed", "rolled_back"].includes(migration.state))
+        .map((migration) => structuredClone(migration)),
     },
     receipts: {
       get: async <T>(scope: CommandScope) => clone(state.receipts.get(receiptKey(tenantId, scope))) as CommandReceipt<T> | undefined,
@@ -328,6 +402,23 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
         }
         state.jobs.set(key, structuredClone(job));
       },
+      rescheduleDeadLetter: async (jobId, availableAtUtc) => {
+        const key = `${tenantPrefix}${jobId}`;
+        const job = state.jobs.get(key);
+        if (job === undefined || job.state !== "dead_letter") return false;
+        state.jobs.set(key, {
+          ...job,
+          state: "pending",
+          availableAtUtc,
+          attempts: 0,
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAtUtc: null,
+          lastError: null,
+          completedAtUtc: null,
+        });
+        return true;
+      },
     },
   };
 }
@@ -342,6 +433,10 @@ function receiptKey(tenantId: TenantId, scope: CommandScope): string {
 
 function externalOwnerKey(tenantId: TenantId, ownerType: ExternalBinding["ownerType"], ownerId: string, role: ExternalBinding["role"]): string {
   return `${tenantId}\u0000${ownerType}\u0000${ownerId}\u0000${role}`;
+}
+
+function identityKey(tenantId: TenantId, provider: string, connectionId: string, externalTenantRef: string, externalSubjectRef: string): string {
+  return `${tenantId}\u0000${provider}\u0000${connectionId}\u0000${externalTenantRef}\u0000${externalSubjectRef}`;
 }
 
 function assertTenant(expected: TenantId, actual: TenantId): void {

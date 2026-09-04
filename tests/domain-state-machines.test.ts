@@ -2,14 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { assertAssetDownloadable, transitionAsset, type Asset } from "../packages/domain/src/assets.ts";
 import { principalId, tenantId } from "../packages/domain/src/identity.ts";
+import { advanceIntegrationOperation, type IntegrationOperation } from "../packages/domain/src/integration-operations.ts";
 import {
+  checkpointSecurityMigration,
   effectiveSecurityDomains,
   transitionSecurityMigration,
   type SecurityDomainMigration,
 } from "../packages/domain/src/security-migration.ts";
 import {
   acceptTask,
+  cancelTask,
   completeTaskWithoutReview,
+  promoteTask,
   rejectTask,
   startTask,
   submitTask,
@@ -66,6 +70,58 @@ test("ARCH-GATE-TASK-003 non-reviewed Task can complete directly but cannot ente
   assert.equal(taskLifecycle(completeTaskWithoutReview(started)), "completed");
 });
 
+test("ARCH-GATE-TASK-006 cancellation and promotion have explicit terminal transitions", () => {
+  assert.equal(taskLifecycle(cancelTask(task())), "canceled");
+  assert.throws(() => cancelTask(submitTask(startTask(task()))), /TASK_PENDING_REVIEW_CANNOT_CANCEL/);
+  assert.throws(() => promoteTask(startTask(task(false))), /TASK_PROMOTE_TRANSITION_INVALID/);
+  const accepted = acceptTask(submitTask(startTask(task())));
+  assert.equal(taskLifecycle(promoteTask(accepted)), "promoted");
+});
+
+test("ARCH-GATE-INTEGRATION-001 operation state cannot bypass running or leave a terminal state", () => {
+  const planned: IntegrationOperation = {
+    tenantId: tenant,
+    id: "operation-1",
+    operationType: "collaboration.task.project",
+    subjectType: "task",
+    subjectId: "task-1",
+    fingerprint: "fingerprint",
+    state: "planned",
+    currentStep: "create_task",
+    attempts: 0,
+    externalRequestId: "request-1",
+    externalReference: null,
+    expectedSyncWatermark: null,
+    nextAttemptAtUtc: null,
+    deadlineAtUtc: "2026-09-04T01:00:00.000Z",
+    lastError: null,
+    version: 1,
+    createdAtUtc: "2026-09-04T00:00:00.000Z",
+    updatedAtUtc: "2026-09-04T00:00:00.000Z",
+  };
+  assert.throws(() => advanceIntegrationOperation(planned, {
+    state: "completed",
+    currentStep: "task_created",
+    occurredAtUtc: "2026-09-04T00:01:00.000Z",
+  }), /TRANSITION_INVALID/);
+  const running = advanceIntegrationOperation(planned, {
+    state: "running",
+    currentStep: "create_task",
+    occurredAtUtc: "2026-09-04T00:01:00.000Z",
+  });
+  const completed = advanceIntegrationOperation(running, {
+    state: "completed",
+    currentStep: "task_created",
+    occurredAtUtc: "2026-09-04T00:02:00.000Z",
+  });
+  assert.throws(() => advanceIntegrationOperation(completed, {
+    state: "retryable",
+    currentStep: "create_task",
+    occurredAtUtc: "2026-09-04T00:03:00.000Z",
+    lastError: "late error",
+  }), /IS_TERMINAL/);
+});
+
 function asset(): Asset {
   return {
     tenantId: tenant,
@@ -120,18 +176,22 @@ function migration(): SecurityDomainMigration {
     totalItems: 10,
     migratedItems: 0,
     failure: null,
+    nextAttemptAtUtc: null,
+    deadlineAtUtc: "2026-09-04T01:00:00.000Z",
     version: 1,
+    createdAtUtc: "2026-09-04T00:00:00.000Z",
+    updatedAtUtc: "2026-09-04T00:00:00.000Z",
   };
 }
 
 test("ARCH-GATE-SECURITY-001 active and failed migration keeps old/new permission intersection until commit", () => {
-  const active = transitionSecurityMigration(migration(), "active");
+  const active = transitionSecurityMigration(migration(), "active", "2026-09-04T00:01:00.000Z");
   assert.deepEqual(effectiveSecurityDomains(active), ["domain-old", "domain-new"]);
-  const retryable = transitionSecurityMigration(active, "retryable", "projection lag");
+  const checkpoint = checkpointSecurityMigration(active, { cursor: "node-5", migratedItems: 5, occurredAtUtc: "2026-09-04T00:02:00.000Z" });
+  const retryable = transitionSecurityMigration(checkpoint, "retryable", "2026-09-04T00:03:00.000Z", "projection lag");
   assert.deepEqual(effectiveSecurityDomains(retryable), ["domain-old", "domain-new"]);
-  const resumed = transitionSecurityMigration(retryable, "verifying");
-  const committed = transitionSecurityMigration(resumed, "committed");
+  const resumed = transitionSecurityMigration(retryable, "verifying", "2026-09-04T00:04:00.000Z");
+  const committed = transitionSecurityMigration(resumed, "committed", "2026-09-04T00:05:00.000Z");
   assert.deepEqual(effectiveSecurityDomains(committed), ["domain-new"]);
-  assert.throws(() => transitionSecurityMigration(committed, "active"), /TRANSITION_INVALID/);
+  assert.throws(() => transitionSecurityMigration(committed, "active", "2026-09-04T00:06:00.000Z"), /TRANSITION_INVALID/);
 });
-

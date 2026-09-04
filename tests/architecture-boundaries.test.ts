@@ -5,7 +5,7 @@ import test from "node:test";
 import { assertWritableRelationKind } from "../packages/domain/src/project-structure.ts";
 
 test("ARCH-GATE-BOUNDARY-001 domain and application do not depend on adapter implementations", async () => {
-  for (const root of ["packages/domain/src", "packages/application/src"]) {
+  for (const root of ["packages/domain/src", "packages/application/src", "apps/product-api/src/app.ts", "apps/product-api/src/routes"]) {
     for (const path of await sourceFiles(root)) {
       const source = await readFile(path, "utf8");
       assert.equal(source.includes("adapters/src"), false, `${path} imports an adapter implementation`);
@@ -43,6 +43,7 @@ test("ARCH-GATE-TREE-001 parent-child Relation is rejected because Node.parentId
 });
 
 async function sourceFiles(root: string): Promise<string[]> {
+  if (root.endsWith(".ts")) return [root];
   const files: string[] = [];
   for (const entry of await readdir(root, { withFileTypes: true })) {
     const path = join(root, entry.name);
