@@ -5,16 +5,16 @@
 - 状态：GOAL_RUNNING
 - Goal threadId：`01a06f07-6235-7a43-b22d-fc042cf0f6aa`
 - Branch：`main`
-- 已验收实现提交：`ca94b6e`（`feat: guard security grant mutations`）
-- upstream：`origin/main` 已包含 `ca94b6e` 与 checkpoint 提交 `44a5957`。
-- 工作区：TC-SEC-003A 已验收、提交并推送；当前仅下一 Task Packet 与本 checkpoint 更新未提交。
+- 已验收实现提交：`a406124`（`feat: expose guarded security grant actions`）；Task Packet 提交 `06aa9b0`。
+- upstream：`origin/main` 当前停在 `44a5957`；`06aa9b0` 与 `a406124` 尚未推送。
+- 工作区：TC-SEC-003B 实现、测试、状态和验收报告已本地提交；仅本 checkpoint 更新尚未提交。
 - 当前 Gate：P0-07 敏感 ACL（总项继续进行中）
-- 最近完成：P0-07 / TC-SEC-003A Grant 写模型、授权审计与最后管理员原子守卫
-- 验收：独立安全复核最终 PASS；定向安全测试 19/19；`pnpm check` 94/94；14 个 Huly 镜像锁；薄宿主边界；`git diff --check`；凭据/私钥特征扫描均通过。
-- 当前 Task：P0-07 / TC-SEC-003B Grant API 与固定身份无泄漏矩阵
+- 最近完成：P0-07 / TC-SEC-003B Grant API 与固定身份无泄漏矩阵（本地验收与提交完成，待推送）
+- 验收：独立安全复核最终 PASS；复审定向测试 29/29；`pnpm check` 98/98；14 个 Huly 镜像锁；薄宿主边界；`git diff --check`；凭据/私钥特征扫描均通过。
+- 当前 Task：P0-07 / TC-SEC-003B 推送收尾
 - Task Packet：`docs/agent-tasks/P0-07-TC-SEC-003B.md`
-- Blocker：无
-- next_action：按 Task Packet 增加薄 Grant action API、严格 contracts/canonical client 与 U0～U9 诚实覆盖矩阵；完成 HTTP 并发、无泄漏、完整检查、独立 Review、Evidence、commit/push 后进入下一 Ready Task。
+- Blocker：外部安全审批要求针对新增 payload 明确授权把 `06aa9b0`、`a406124` 及本 checkpoint 提交发送到 GitHub `https://github.com/Superhedgehoger/project-process-map.git`。
+- next_action：取得明确授权后推送 `origin/main`；确认远端同步，再选择并建立 P0-07 下一 Ready Task（成员生命周期必须维护最后可操作管理员不变量）。
 
 旧会话 `e8e244ee-0c02-4769-8bd0-37f1ca8bd485` 仅是该 Git 工作树所在目录，不得作为聊天执行上下文恢复。原绑定的“project-process-map Goal 恢复”和“用量恢复后继续任务”自动任务已于 2026-09-05 暂停；后续不得把本 Goal 的恢复投递到该旧会话。
 
