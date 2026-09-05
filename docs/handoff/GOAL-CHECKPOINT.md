@@ -5,17 +5,16 @@
 - 状态：GOAL_RUNNING
 - Goal threadId：`01a06f07-6235-7a43-b22d-fc042cf0f6aa`
 - Branch：`main`
-- 已验收实现提交：`81cef4d`（`feat: add sensitive security root and first-admin grant`）
-- upstream：`origin/main` 已包含 `81cef4d`
-- 工作区：TC-SEC-001 的 33 个实现/测试/证据文件已提交并推送；本文件与下一 Task Packet 是提交后的恢复元数据。
+- 已验收实现提交：`ca94b6e`（`feat: guard security grant mutations`）
+- upstream：`origin/main` 尚未包含 `ca94b6e`；本轮 `git push origin main` 因外部目的地审批被拒，未绕过。
+- 工作区：TC-SEC-003A 实现、测试、Phase 状态和验收报告已本地提交；仅本 checkpoint 更新尚未提交。
 - 当前 Gate：P0-07 敏感 ACL（总项继续进行中）
-- 最近完成：P0-07 / TC-SEC-001 首个敏感根与首管理员原子创建
-- 验收：独立安全复核最终 PASS；`pnpm check` 75/75；`pnpm build:native`；`pnpm smoke:native`（`dockerInvoked=false`）；`git diff --check`；凭据/私钥特征扫描均通过。
-- Native SHA-256：`c93e87a855e4cbe46d52de28a6bd697d1f53b59403f86e4450c49d215df99856`
-- 当前 Task：P0-07 / TC-SEC-003A — Grant 写模型、授权审计与最后管理员原子守卫
+- 最近完成：P0-07 / TC-SEC-003A Grant 写模型、授权审计与最后管理员原子守卫（本地验收与提交完成，待推送）
+- 验收：独立安全复核最终 PASS；定向安全测试 19/19；`pnpm check` 94/94；14 个 Huly 镜像锁；薄宿主边界；`git diff --check`；凭据/私钥特征扫描均通过。
+- 当前 Task：P0-07 / TC-SEC-003A 推送收尾
 - Task Packet：`docs/agent-tasks/P0-07-TC-SEC-003A.md`
-- Blocker：无
-- next_action：按 Task Packet 实现 TC-SEC-003A；完成定向测试、`pnpm check`、独立安全 Review、Evidence、commit/push 后，再进入 Grant API/固定身份矩阵切片。
+- Blocker：安全审批要求用户在已知会把 `ca94b6e` 源码差异发送到 GitHub `https://github.com/Superhedgehoger/project-process-map.git` 的前提下，明确再次授权推送。
+- next_action：取得明确授权后执行 `git push origin main`；确认远端包含 `ca94b6e`，提交并推送本 checkpoint，然后进入 P0-07 / TC-SEC-003B Grant API 与固定身份/无泄漏矩阵。
 
 旧会话 `e8e244ee-0c02-4769-8bd0-37f1ca8bd485` 仅是该 Git 工作树所在目录，不得作为聊天执行上下文恢复。原绑定的“project-process-map Goal 恢复”和“用量恢复后继续任务”自动任务已于 2026-09-05 暂停；后续不得把本 Goal 的恢复投递到该旧会话。
 
