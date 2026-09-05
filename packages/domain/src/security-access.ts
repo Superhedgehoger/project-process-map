@@ -30,6 +30,24 @@ export type SecurityGrant = Readonly<{
   updatedAtUtc: string;
 }>;
 
+export type SecurityGrantAuditAction = "granted" | "changed" | "revoked";
+
+export type SecurityGrantAuditEntry = Readonly<{
+  tenantId: TenantId;
+  id: string;
+  projectId: string;
+  securityDomainId: string;
+  actorPrincipalId: PrincipalId;
+  targetPrincipalId: PrincipalId;
+  action: SecurityGrantAuditAction;
+  previousCapability: SecurityCapability | null;
+  capability: SecurityCapability;
+  previousStatus: SecurityGrant["status"] | null;
+  status: SecurityGrant["status"];
+  permissionVersion: number;
+  occurredAtUtc: string;
+}>;
+
 const capabilityRank: Record<SecurityCapability, number> = {
   view: 1,
   contribute: 2,
@@ -50,4 +68,8 @@ export function grantAllows(
     if (Number.isNaN(expiresAt) || expiresAt <= evaluatedAt) return false;
   }
   return capabilityRank[grant.capability] >= capabilityRank[required];
+}
+
+export function isPermanentSecurityAdministrator(grant: SecurityGrant): boolean {
+  return grant.status === "active" && grant.capability === "manage_access" && grant.expiresAtUtc === null;
 }

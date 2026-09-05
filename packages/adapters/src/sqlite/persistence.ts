@@ -12,7 +12,7 @@ import type { ProjectNode } from "../../../domain/src/project-structure.ts";
 import type { ProjectMembership } from "../../../domain/src/project-access.ts";
 import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import type { SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
-import type { SecurityDomain, SecurityGrant } from "../../../domain/src/security-access.ts";
+import type { SecurityDomain, SecurityGrant, SecurityGrantAuditEntry } from "../../../domain/src/security-access.ts";
 import type {
   ClaimOptions,
   CommandReceipt,
@@ -29,7 +29,7 @@ export type SqlitePersistenceOptions = Readonly<{
 }>;
 
 const pathLocks = new Map<string, Promise<void>>();
-const currentSchemaVersion = 4;
+const currentSchemaVersion = 5;
 
 export class SqlitePersistence implements Persistence {
   readonly #database: DatabaseSync;
@@ -96,7 +96,15 @@ export class SqlitePersistence implements Persistence {
   async read<T>(tenantId: TenantId, work: (transaction: TransactionContext) => Promise<T>): Promise<T> {
     return await this.exclusive(async () => {
       this.ensureOpen();
-      return await work(this.context(tenantId));
+      this.#database.exec("BEGIN DEFERRED");
+      try {
+        const result = await work(this.context(tenantId));
+        this.#database.exec("ROLLBACK");
+        return result;
+      } catch (error) {
+        this.#database.exec("ROLLBACK");
+        throw error;
+      }
     });
   }
 
@@ -507,6 +515,139 @@ export class SqlitePersistence implements Persistence {
             grant.expiresAtUtc, grant.version, JSON.stringify(grant),
           );
         },
+        saveWithDomainVersion: async (grant, expectedGrantVersion, domain, expectedDomainVersion) => {
+          assertTenant(tenantId, grant.tenantId);
+          assertTenant(tenantId, domain.tenantId);
+          if (grant.securityDomainId !== domain.id) throw new Error("SECURITY_GRANT_DOMAIN_MISMATCH");
+
+          const currentDomain = this.#database.prepare(`
+            SELECT version, permission_version, domain_json FROM security_domains
+            WHERE tenant_id = ? AND security_domain_id = ?
+          `).get(tenantId, domain.id);
+          const currentDomainValue = currentDomain === undefined
+            ? undefined
+            : parseJson<SecurityDomain>(asString(currentDomain.domain_json));
+          if (currentDomain === undefined || currentDomainValue === undefined
+            || asNumber(currentDomain.version) !== expectedDomainVersion
+            || domain.version !== expectedDomainVersion + 1
+            || domain.permissionVersion !== asNumber(currentDomain.permission_version) + 1
+            || domain.projectId !== currentDomainValue.projectId
+            || domain.rootNodeId !== currentDomainValue.rootNodeId
+            || domain.parentSecurityDomainId !== currentDomainValue.parentSecurityDomainId
+            || domain.createdByPrincipalId !== currentDomainValue.createdByPrincipalId
+            || domain.createdAtUtc !== currentDomainValue.createdAtUtc
+            || domain.deletedAtUtc !== currentDomainValue.deletedAtUtc) {
+            throw new Error("SECURITY_DOMAIN_VERSION_CONFLICT");
+          }
+
+          const currentGrant = this.#database.prepare(`
+            SELECT version, grant_json FROM security_grants
+            WHERE tenant_id = ? AND security_domain_id = ? AND principal_id = ?
+          `).get(tenantId, grant.securityDomainId, grant.principalId);
+          const currentGrantValue = currentGrant === undefined
+            ? undefined
+            : parseJson<SecurityGrant>(asString(currentGrant.grant_json));
+          if (expectedGrantVersion === null) {
+            if (currentGrant !== undefined || grant.version !== 1) throw new Error("SECURITY_GRANT_VERSION_CONFLICT");
+          } else if (currentGrant === undefined || currentGrantValue === undefined
+            || asNumber(currentGrant.version) !== expectedGrantVersion
+            || grant.version !== expectedGrantVersion + 1
+            || grant.id !== currentGrantValue.id
+            || grant.createdAtUtc !== currentGrantValue.createdAtUtc) {
+            throw new Error("SECURITY_GRANT_VERSION_CONFLICT");
+          }
+
+          const proposedAdministrator = grant.capability === "manage_access"
+            && grant.status === "active"
+            && grant.expiresAtUtc === null
+            && this.#database.prepare(`
+              SELECT 1 FROM project_memberships AS membership
+              JOIN principals AS principal
+                ON principal.tenant_id = membership.tenant_id
+               AND principal.principal_id = membership.principal_id
+               AND principal.state = 'active' AND principal.kind = 'user'
+              WHERE membership.tenant_id = ? AND membership.project_id = ?
+                AND membership.principal_id = ?
+                AND membership.status = 'active' AND membership.role = 'project_manager'
+              LIMIT 1
+            `).get(tenantId, domain.projectId, grant.principalId) !== undefined;
+          const otherAdministrator = this.#database.prepare(`
+            SELECT 1 FROM security_grants AS grant_row
+            JOIN project_memberships AS membership
+              ON membership.tenant_id = grant_row.tenant_id
+             AND membership.project_id = ?
+             AND membership.principal_id = grant_row.principal_id
+             AND membership.status = 'active' AND membership.role = 'project_manager'
+            JOIN principals AS principal
+              ON principal.tenant_id = grant_row.tenant_id
+             AND principal.principal_id = grant_row.principal_id
+             AND principal.state = 'active' AND principal.kind = 'user'
+            WHERE grant_row.tenant_id = ? AND grant_row.security_domain_id = ?
+              AND grant_row.principal_id <> ?
+              AND grant_row.capability = 'manage_access' AND grant_row.status = 'active'
+              AND grant_row.expires_at_utc IS NULL
+            LIMIT 1
+          `).get(domain.projectId, tenantId, domain.id, grant.principalId);
+          if (!proposedAdministrator && otherAdministrator === undefined) {
+            throw new Error("SECURITY_DOMAIN_LAST_ADMINISTRATOR");
+          }
+
+          this.#database.exec("SAVEPOINT security_grant_domain_write");
+          try {
+            if (expectedGrantVersion === null) {
+              this.#database.prepare(`
+                INSERT INTO security_grants (
+                  tenant_id, security_domain_id, principal_id, capability, status,
+                  expires_at_utc, version, grant_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              `).run(
+                tenantId, grant.securityDomainId, grant.principalId, grant.capability, grant.status,
+                grant.expiresAtUtc, grant.version, JSON.stringify(grant),
+              );
+            } else {
+              const grantResult = this.#database.prepare(`
+                UPDATE security_grants
+                SET capability = ?, status = ?, expires_at_utc = ?, version = ?, grant_json = ?
+                WHERE tenant_id = ? AND security_domain_id = ? AND principal_id = ? AND version = ?
+              `).run(
+                grant.capability, grant.status, grant.expiresAtUtc, grant.version, JSON.stringify(grant),
+                tenantId, grant.securityDomainId, grant.principalId, expectedGrantVersion,
+              );
+              if (grantResult.changes !== 1) throw new Error("SECURITY_GRANT_VERSION_CONFLICT");
+            }
+            const domainResult = this.#database.prepare(`
+              UPDATE security_domains
+              SET permission_version = ?, version = ?, domain_json = ?
+              WHERE tenant_id = ? AND security_domain_id = ? AND version = ? AND permission_version = ?
+            `).run(
+              domain.permissionVersion, domain.version, JSON.stringify(domain), tenantId, domain.id,
+              expectedDomainVersion, domain.permissionVersion - 1,
+            );
+            if (domainResult.changes !== 1) throw new Error("SECURITY_DOMAIN_VERSION_CONFLICT");
+            this.#database.exec("RELEASE SAVEPOINT security_grant_domain_write");
+          } catch (error) {
+            this.#database.exec("ROLLBACK TO SAVEPOINT security_grant_domain_write");
+            this.#database.exec("RELEASE SAVEPOINT security_grant_domain_write");
+            throw error;
+          }
+        },
+      },
+      securityGrantAudits: {
+        append: async (entry) => {
+          assertTenant(tenantId, entry.tenantId);
+          this.#database.prepare(`
+            INSERT INTO security_grant_audits (
+              tenant_id, audit_id, project_id, security_domain_id, occurred_at_utc, audit_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+          `).run(tenantId, entry.id, entry.projectId, entry.securityDomainId, entry.occurredAtUtc, JSON.stringify(entry));
+        },
+        listByDomain: async (securityDomainId) => this.#database.prepare(`
+          SELECT audit_json FROM security_grant_audits
+          WHERE tenant_id = ? AND security_domain_id = ?
+          ORDER BY occurred_at_utc, audit_id
+        `).all(tenantId, securityDomainId).map(
+          (row) => parseJson<SecurityGrantAuditEntry>(asString(row.audit_json)),
+        ),
       },
       securityMigrations: {
         get: async (migrationId) => {
@@ -741,6 +882,19 @@ export class SqlitePersistence implements Persistence {
       CREATE INDEX IF NOT EXISTS security_grants_by_principal
         ON security_grants (tenant_id, principal_id, status, security_domain_id);
 
+      CREATE TABLE IF NOT EXISTS security_grant_audits (
+        tenant_id TEXT NOT NULL,
+        audit_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        security_domain_id TEXT NOT NULL,
+        occurred_at_utc TEXT NOT NULL,
+        audit_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, audit_id),
+        FOREIGN KEY (tenant_id, security_domain_id) REFERENCES security_domains (tenant_id, security_domain_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS security_grant_audits_by_domain
+        ON security_grant_audits (tenant_id, security_domain_id, occurred_at_utc, audit_id);
+
       CREATE TABLE IF NOT EXISTS project_nodes (
         tenant_id TEXT NOT NULL,
         node_id TEXT NOT NULL,
@@ -971,6 +1125,9 @@ export class SqlitePersistence implements Persistence {
     `).run(new Date().toISOString());
     this.#database.prepare(`
       INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc) VALUES (4, ?)
+    `).run(new Date().toISOString());
+    this.#database.prepare(`
+      INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc) VALUES (5, ?)
     `).run(new Date().toISOString());
   }
 

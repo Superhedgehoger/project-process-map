@@ -9,7 +9,7 @@ import type { ProjectNode } from "../../../domain/src/project-structure.ts";
 import type { ProjectMembership } from "../../../domain/src/project-access.ts";
 import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import type { SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
-import type { SecurityDomain, SecurityGrant } from "../../../domain/src/security-access.ts";
+import { isPermanentSecurityAdministrator, type SecurityDomain, type SecurityGrant, type SecurityGrantAuditEntry } from "../../../domain/src/security-access.ts";
 import type {
   ClaimOptions,
   CommandReceipt,
@@ -34,6 +34,7 @@ type MemoryState = {
   memberships: Map<string, ProjectMembership>;
   securityDomains: Map<string, SecurityDomain>;
   securityGrants: Map<string, SecurityGrant>;
+  securityGrantAudits: Map<string, SecurityGrantAuditEntry>;
   securityMigrations: Map<string, SecurityDomainMigration>;
   receipts: Map<string, CommandReceipt>;
   sequences: Map<string, number>;
@@ -60,6 +61,7 @@ function emptyState(): MemoryState {
     memberships: new Map(),
     securityDomains: new Map(),
     securityGrants: new Map(),
+    securityGrantAudits: new Map(),
     securityMigrations: new Map(),
     receipts: new Map(),
     sequences: new Map(),
@@ -87,6 +89,7 @@ function cloneState(state: MemoryState): MemoryState {
     memberships: new Map(structuredClone([...state.memberships])),
     securityDomains: new Map(structuredClone([...state.securityDomains])),
     securityGrants: new Map(structuredClone([...state.securityGrants])),
+    securityGrantAudits: new Map(structuredClone([...state.securityGrantAudits])),
     securityMigrations: new Map(structuredClone([...state.securityMigrations])),
     receipts: new Map(structuredClone([...state.receipts])),
     sequences: new Map(state.sequences),
@@ -423,6 +426,61 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
         if (state.securityGrants.has(key)) throw new Error("SECURITY_GRANT_ALREADY_EXISTS");
         state.securityGrants.set(key, structuredClone(grant));
       },
+      saveWithDomainVersion: async (grant, expectedGrantVersion, domain, expectedDomainVersion) => {
+        assertTenant(tenantId, grant.tenantId);
+        assertTenant(tenantId, domain.tenantId);
+        if (grant.securityDomainId !== domain.id) throw new Error("SECURITY_GRANT_DOMAIN_MISMATCH");
+        const domainKey = `${tenantPrefix}${domain.id}`;
+        const currentDomain = state.securityDomains.get(domainKey);
+        if (currentDomain === undefined
+          || currentDomain.version !== expectedDomainVersion
+          || domain.version !== expectedDomainVersion + 1
+          || domain.permissionVersion !== currentDomain.permissionVersion + 1
+          || domain.projectId !== currentDomain.projectId
+          || domain.rootNodeId !== currentDomain.rootNodeId
+          || domain.parentSecurityDomainId !== currentDomain.parentSecurityDomainId
+          || domain.createdByPrincipalId !== currentDomain.createdByPrincipalId
+          || domain.createdAtUtc !== currentDomain.createdAtUtc
+          || domain.deletedAtUtc !== currentDomain.deletedAtUtc) {
+          throw new Error("SECURITY_DOMAIN_VERSION_CONFLICT");
+        }
+        const grantKey = securityGrantKey(tenantId, grant.securityDomainId, grant.principalId);
+        const currentGrant = state.securityGrants.get(grantKey);
+        if (expectedGrantVersion === null) {
+          if (currentGrant !== undefined || grant.version !== 1) throw new Error("SECURITY_GRANT_VERSION_CONFLICT");
+        } else if (currentGrant === undefined
+          || currentGrant.version !== expectedGrantVersion
+          || grant.version !== expectedGrantVersion + 1
+          || grant.id !== currentGrant.id
+          || grant.createdAtUtc !== currentGrant.createdAtUtc) {
+          throw new Error("SECURITY_GRANT_VERSION_CONFLICT");
+        }
+        const resultingGrants = [...state.securityGrants.values()].filter(
+          (item) => item.tenantId === tenantId && item.securityDomainId === domain.id && item.principalId !== grant.principalId,
+        );
+        resultingGrants.push(grant);
+        if (!resultingGrants.some((item) => {
+          if (!isPermanentSecurityAdministrator(item)) return false;
+          const membership = state.memberships.get(membershipKey(tenantId, domain.projectId, item.principalId));
+          const principal = state.principals.get(`${tenantPrefix}${item.principalId}`);
+          return membership?.status === "active" && membership.role === "project_manager"
+            && principal?.status === "active" && principal.kind === "user";
+        })) throw new Error("SECURITY_DOMAIN_LAST_ADMINISTRATOR");
+        state.securityGrants.set(grantKey, structuredClone(grant));
+        state.securityDomains.set(domainKey, structuredClone(domain));
+      },
+    },
+    securityGrantAudits: {
+      append: async (entry) => {
+        assertTenant(tenantId, entry.tenantId);
+        const key = `${tenantPrefix}${entry.id}`;
+        if (state.securityGrantAudits.has(key)) throw new Error("SECURITY_AUDIT_ALREADY_EXISTS");
+        state.securityGrantAudits.set(key, structuredClone(entry));
+      },
+      listByDomain: async (securityDomainId) => [...state.securityGrantAudits.values()]
+        .filter((entry) => entry.tenantId === tenantId && entry.securityDomainId === securityDomainId)
+        .sort((left, right) => left.occurredAtUtc.localeCompare(right.occurredAtUtc) || left.id.localeCompare(right.id))
+        .map((entry) => structuredClone(entry)),
     },
     securityMigrations: {
       get: async (migrationId) => clone(state.securityMigrations.get(`${tenantPrefix}${migrationId}`)),

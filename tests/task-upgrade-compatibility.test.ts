@@ -54,7 +54,7 @@ test("P0-05A-T1a SQLite upgrades a legacy Task and receipt without stranding the
     await old.close();
 
     const legacy = new DatabaseSync(path);
-    legacy.exec("DROP TABLE security_grants; DROP TABLE security_domains; DELETE FROM schema_migrations WHERE version = 4");
+    legacy.exec("DROP TABLE security_grant_audits; DROP TABLE security_grants; DROP TABLE security_domains; DELETE FROM schema_migrations WHERE version IN (4, 5)");
     const row = legacy.prepare("SELECT task_json FROM product_tasks WHERE tenant_id = ? AND task_id = ?")
       .get(tenant, "task-upgrade") as { task_json: string };
     const task = JSON.parse(row.task_json) as Record<string, unknown>;
@@ -121,7 +121,7 @@ test("P0-05A-T1a SQLite upgrades a legacy Task and receipt without stranding the
     await upgraded.close();
 
     const evidence = new DatabaseSync(path, { readOnly: true });
-    assert.equal((evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version, 4);
+    assert.equal((evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version, 5);
     evidence.close();
   } finally {
     await rm(directory, { recursive: true, force: true });

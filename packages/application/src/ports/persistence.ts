@@ -8,7 +8,7 @@ import type { ProjectNode } from "../../../domain/src/project-structure.ts";
 import type { ProjectMembership } from "../../../domain/src/project-access.ts";
 import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import type { SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
-import type { SecurityDomain, SecurityGrant } from "../../../domain/src/security-access.ts";
+import type { SecurityDomain, SecurityGrant, SecurityGrantAuditEntry } from "../../../domain/src/security-access.ts";
 
 export type CommandScope = Readonly<{
   principalId: PrincipalId;
@@ -109,6 +109,17 @@ export interface SecurityGrantRepository {
   get(securityDomainId: string, principalId: PrincipalId): Promise<SecurityGrant | undefined>;
   listByDomain(securityDomainId: string): Promise<SecurityGrant[]>;
   insert(grant: SecurityGrant): Promise<void>;
+  saveWithDomainVersion(
+    grant: SecurityGrant,
+    expectedGrantVersion: number | null,
+    securityDomain: SecurityDomain,
+    expectedDomainVersion: number,
+  ): Promise<void>;
+}
+
+export interface SecurityGrantAuditRepository {
+  append(entry: SecurityGrantAuditEntry): Promise<void>;
+  listByDomain(securityDomainId: string): Promise<SecurityGrantAuditEntry[]>;
 }
 
 export interface SecurityDomainMigrationRepository {
@@ -148,6 +159,7 @@ export type TransactionContext = Readonly<{
   memberships: ProjectMembershipRepository;
   securityDomains: SecurityDomainRepository;
   securityGrants: SecurityGrantRepository;
+  securityGrantAudits: SecurityGrantAuditRepository;
   securityMigrations: SecurityDomainMigrationRepository;
   receipts: CommandReceiptRepository;
   sequences: ProjectSequenceRepository;
