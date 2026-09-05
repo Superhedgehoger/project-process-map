@@ -6,20 +6,12 @@ export type ProjectMembership = Readonly<{
   principalId: PrincipalId;
   role: "project_manager" | "member";
   status: "active" | "revoked";
-  /** Empty means public project content only; sensitive domains require an explicit grant. */
+  /** @deprecated Compatibility for pre-v4 domains only. Formal SecurityDomain rows use SecurityGrant. */
   securityDomainIds: readonly string[];
   version: number;
   createdAtUtc: string;
   updatedAtUtc: string;
 }>;
-
-export function canAccessSecurityDomain(
-  membership: ProjectMembership | undefined,
-  securityDomainId: string | null,
-): membership is ProjectMembership {
-  if (membership?.status !== "active") return false;
-  return securityDomainId === null || membership.securityDomainIds.includes(securityDomainId);
-}
 
 export function isProjectManager(membership: ProjectMembership | undefined): boolean {
   return membership?.status === "active" && membership.role === "project_manager";

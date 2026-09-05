@@ -9,6 +9,7 @@ import type { ProjectNode } from "../../../domain/src/project-structure.ts";
 import type { ProjectMembership } from "../../../domain/src/project-access.ts";
 import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import type { SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
+import type { SecurityDomain, SecurityGrant } from "../../../domain/src/security-access.ts";
 import type {
   ClaimOptions,
   CommandReceipt,
@@ -31,6 +32,8 @@ type MemoryState = {
   identityMappings: Map<string, ExternalIdentityMapping>;
   principals: Map<string, Principal>;
   memberships: Map<string, ProjectMembership>;
+  securityDomains: Map<string, SecurityDomain>;
+  securityGrants: Map<string, SecurityGrant>;
   securityMigrations: Map<string, SecurityDomainMigration>;
   receipts: Map<string, CommandReceipt>;
   sequences: Map<string, number>;
@@ -55,6 +58,8 @@ function emptyState(): MemoryState {
     identityMappings: new Map(),
     principals: new Map(),
     memberships: new Map(),
+    securityDomains: new Map(),
+    securityGrants: new Map(),
     securityMigrations: new Map(),
     receipts: new Map(),
     sequences: new Map(),
@@ -80,6 +85,8 @@ function cloneState(state: MemoryState): MemoryState {
     identityMappings: new Map(structuredClone([...state.identityMappings])),
     principals: new Map(structuredClone([...state.principals])),
     memberships: new Map(structuredClone([...state.memberships])),
+    securityDomains: new Map(structuredClone([...state.securityDomains])),
+    securityGrants: new Map(structuredClone([...state.securityGrants])),
     securityMigrations: new Map(structuredClone([...state.securityMigrations])),
     receipts: new Map(structuredClone([...state.receipts])),
     sequences: new Map(state.sequences),
@@ -179,11 +186,42 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
       listByProject: async (projectId) => [...state.nodes.values()]
         .filter((node) => node.tenantId === tenantId && node.projectId === projectId)
         .map((node) => structuredClone(node)),
+      hasSecurityDomainReference: async (securityDomainId) => [...state.nodes.values()].some(
+        (node) => node.tenantId === tenantId && node.securityDomainId === securityDomainId,
+      ),
       insert: async (node) => {
         if (node.tenantId !== tenantId) throw new Error("TENANT_CONTEXT_MISMATCH");
         const key = `${tenantPrefix}${node.id}`;
         if (state.nodes.has(key)) throw new Error(`Aggregate already exists: ${node.id}`);
         state.nodes.set(key, structuredClone(node));
+      },
+      assignSecurityDomain: async (nodeId, projectId, securityDomainId, expectedVersion) => {
+        const key = `${tenantPrefix}${nodeId}`;
+        const current = state.nodes.get(key);
+        if (current === undefined) throw new Error("NODE_NOT_FOUND");
+        if (current.projectId !== projectId) throw new Error("PROJECT_MISMATCH");
+        if (current.securityDomainId !== null) throw new Error("NODE_ALREADY_SENSITIVE");
+        if (current.version !== expectedVersion) throw new Error("NODE_VERSION_CONFLICT");
+        const domain = state.securityDomains.get(`${tenantPrefix}${securityDomainId}`);
+        if (domain?.projectId !== projectId || domain.rootNodeId !== nodeId) throw new Error("SECURITY_DOMAIN_ROOT_MISMATCH");
+        const firstAdministrator = state.securityGrants.get(securityGrantKey(
+          tenantId,
+          securityDomainId,
+          domain.createdByPrincipalId,
+        ));
+        if (firstAdministrator?.status !== "active"
+          || firstAdministrator.capability !== "manage_access"
+          || firstAdministrator.expiresAtUtc !== null) {
+          throw new Error("SECURITY_DOMAIN_FIRST_ADMIN_REQUIRED");
+        }
+        const updated = {
+          ...current,
+          securityDomainId,
+          securityEpoch: current.securityEpoch + 1,
+          version: current.version + 1,
+        };
+        state.nodes.set(key, structuredClone(updated));
+        return structuredClone(updated);
       },
     },
     tasks: {
@@ -191,6 +229,9 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
       listByNode: async (nodeId) => [...state.tasks.values()]
         .filter((task) => task.tenantId === tenantId && task.ownerNodeId === nodeId)
         .map((task) => structuredClone(task)),
+      hasSecurityDomainReference: async (securityDomainId) => [...state.tasks.values()].some(
+        (task) => task.tenantId === tenantId && task.securityDomainId === securityDomainId,
+      ),
       insert: async (task) => {
         assertTenant(tenantId, task.tenantId);
         const key = `${tenantPrefix}${task.id}`;
@@ -218,6 +259,12 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
     },
     assets: {
       get: async (assetId) => clone(state.assets.get(`${tenantPrefix}${assetId}`)),
+      hasForNode: async (nodeId) => [...state.assets.values()].some(
+        (asset) => asset.tenantId === tenantId && asset.ownerNodeId === nodeId,
+      ),
+      hasSecurityDomainReference: async (securityDomainId) => [...state.assets.values()].some(
+        (asset) => asset.tenantId === tenantId && asset.securityDomainId === securityDomainId,
+      ),
       insert: async (asset) => {
         assertTenant(tenantId, asset.tenantId);
         const key = `${tenantPrefix}${asset.id}`;
@@ -347,6 +394,36 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
         state.memberships.set(key, structuredClone(membership));
       },
     },
+    securityDomains: {
+      get: async (securityDomainId) => clone(state.securityDomains.get(`${tenantPrefix}${securityDomainId}`)),
+      getByRoot: async (projectId, rootNodeId) => clone([...state.securityDomains.values()].find(
+        (domain) => domain.tenantId === tenantId && domain.projectId === projectId && domain.rootNodeId === rootNodeId,
+      )),
+      insert: async (domain) => {
+        assertTenant(tenantId, domain.tenantId);
+        const key = `${tenantPrefix}${domain.id}`;
+        if (state.securityDomains.has(key)) throw new Error("SECURITY_DOMAIN_ALREADY_EXISTS");
+        if ([...state.securityDomains.values()].some((item) => item.tenantId === tenantId
+          && item.projectId === domain.projectId && item.rootNodeId === domain.rootNodeId)) {
+          throw new Error("SECURITY_ROOT_ALREADY_EXISTS");
+        }
+        state.securityDomains.set(key, structuredClone(domain));
+      },
+    },
+    securityGrants: {
+      get: async (securityDomainId, principalId) => clone(state.securityGrants.get(
+        securityGrantKey(tenantId, securityDomainId, principalId),
+      )),
+      listByDomain: async (securityDomainId) => [...state.securityGrants.values()]
+        .filter((grant) => grant.tenantId === tenantId && grant.securityDomainId === securityDomainId)
+        .map((grant) => structuredClone(grant)),
+      insert: async (grant) => {
+        assertTenant(tenantId, grant.tenantId);
+        const key = securityGrantKey(tenantId, grant.securityDomainId, grant.principalId);
+        if (state.securityGrants.has(key)) throw new Error("SECURITY_GRANT_ALREADY_EXISTS");
+        state.securityGrants.set(key, structuredClone(grant));
+      },
+    },
     securityMigrations: {
       get: async (migrationId) => clone(state.securityMigrations.get(`${tenantPrefix}${migrationId}`)),
       insert: async (migration) => {
@@ -463,6 +540,10 @@ function identityKey(tenantId: TenantId, provider: string, connectionId: string,
 
 function membershipKey(tenantId: TenantId, projectId: string, principalId: string): string {
   return `${tenantId}\u0000${projectId}\u0000${principalId}`;
+}
+
+function securityGrantKey(tenantId: TenantId, securityDomainId: string, principalId: string): string {
+  return `${tenantId}\u0000${securityDomainId}\u0000${principalId}`;
 }
 
 function reviewActionOrder(action: TaskReviewActionRecord["action"]): number {

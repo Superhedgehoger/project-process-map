@@ -9,6 +9,7 @@ import {
   transitionSecurityMigration,
   type SecurityDomainMigration,
 } from "../packages/domain/src/security-migration.ts";
+import { grantAllows, type SecurityGrant } from "../packages/domain/src/security-access.ts";
 import {
   acceptTask,
   assignTaskAssignee,
@@ -208,4 +209,25 @@ test("ARCH-GATE-SECURITY-001 active and failed migration keeps old/new permissio
   const committed = transitionSecurityMigration(resumed, "committed", "2026-09-04T00:05:00.000Z");
   assert.deepEqual(effectiveSecurityDomains(committed), ["domain-new"]);
   assert.throws(() => transitionSecurityMigration(committed, "active", "2026-09-04T00:06:00.000Z"), /TRANSITION_INVALID/);
+});
+
+test("TC-SEC-001 an expired or malformed Grant timestamp fails closed", () => {
+  const grant: SecurityGrant = {
+    tenantId: tenant,
+    id: "grant-1",
+    securityDomainId: "domain-1",
+    principalId: principal,
+    capability: "manage_access",
+    status: "active",
+    expiresAtUtc: "2026-09-04T00:05:00.000Z",
+    grantedByPrincipalId: principal,
+    reason: "temporary access",
+    version: 1,
+    createdAtUtc: "2026-09-04T00:00:00.000Z",
+    updatedAtUtc: "2026-09-04T00:00:00.000Z",
+  };
+  assert.equal(grantAllows(grant, "view", "2026-09-04T00:04:59.999Z"), true);
+  assert.equal(grantAllows(grant, "view", "2026-09-04T00:05:00.000Z"), false);
+  assert.equal(grantAllows(grant, "view", "not-a-time"), false);
+  assert.equal(grantAllows({ ...grant, expiresAtUtc: "not-a-time" }, "view", "2026-09-04T00:01:00.000Z"), false);
 });

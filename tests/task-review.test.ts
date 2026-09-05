@@ -46,7 +46,7 @@ async function prepare(persistence: Persistence, taskId = "task-1"): Promise<voi
       nodeId: "node-1",
       parentId: null,
       title: "方案验收",
-      securityDomainId: "security-1",
+      securityDomainId: null,
       occurredAtUtc: "2026-09-04T08:00:00.000Z",
     });
   }
@@ -104,7 +104,7 @@ test("P0-05A-T1a required-review Task rejects a missing or ineligible reviewer a
         nodeId: "node-1",
         parentId: null,
         title: "方案验收",
-        securityDomainId: "security-1",
+        securityDomainId: null,
         occurredAtUtc: "2026-09-04T08:00:00.000Z",
       });
       await grantProjectMembership(fixture.persistence, tenant, "project-1", assignee, { securityDomainIds: ["security-1"] });

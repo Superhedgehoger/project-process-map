@@ -1,10 +1,9 @@
 import { createHash } from "node:crypto";
 import { eventTopic, type BackgroundJob, type DomainEvent, type OutboxMessage } from "../../../domain/src/events.ts";
 import type { PrincipalId, TenantId } from "../../../domain/src/identity.ts";
-import { canAccessSecurityDomain } from "../../../domain/src/project-access.ts";
 import { taskLifecycle, type ProductTask, type TaskLifecycleState, type TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import { ApplicationError } from "../errors.ts";
-import { assertProjectSecurityStable } from "../access/project-security.ts";
+import { assertProjectSecurityStable, canAccessProjectObject } from "../access/project-security.ts";
 import type { CommandScope, Persistence, TransactionContext } from "../ports/persistence.ts";
 
 export type CreateTaskCommand = Readonly<{
@@ -78,11 +77,15 @@ export class CreateTaskHandler {
     });
 
     return await this.#persistence.transaction(command.tenantId, async (transaction) => {
+      const authorizationAtUtc = new Date().toISOString();
       const node = await transaction.nodes.get(command.nodeId);
       if (node === undefined) throw new Error("NODE_NOT_FOUND");
       if (node.projectId !== command.projectId) throw new Error("PROJECT_MISMATCH");
       const actorMembership = await transaction.memberships.get(command.projectId, command.principalId);
-      if (!canAccessSecurityDomain(actorMembership, node.securityDomainId)) throw new ApplicationError("NODE_NOT_FOUND", "Node not found");
+      if (!await canAccessProjectObject(
+        transaction, actorMembership, command.principalId, command.projectId,
+        node.securityDomainId, "contribute", authorizationAtUtc,
+      )) throw new ApplicationError("NODE_NOT_FOUND", "Node not found");
       await assertProjectSecurityStable(transaction, command.projectId);
       const previous = await transaction.receipts.get<unknown>(scope);
       if (previous !== undefined) {
@@ -103,17 +106,27 @@ export class CreateTaskHandler {
       if (!command.requiresAcceptance && command.reviewerPrincipalId !== null) {
         throw new ApplicationError("REVIEWER_NOT_ALLOWED", "A reviewer is only valid for an acceptance task");
       }
-      if (command.assigneePrincipalId !== null && !canAccessSecurityDomain(
+      if (command.assigneePrincipalId !== null && !await canAccessProjectObject(
+        transaction,
         await transaction.memberships.get(command.projectId, command.assigneePrincipalId),
+        command.assigneePrincipalId,
+        command.projectId,
         node.securityDomainId,
+        "view",
+        authorizationAtUtc,
       )) throw new ApplicationError("ASSIGNEE_NOT_ELIGIBLE", "The assignee is not eligible for this task");
       if (command.assigneePrincipalId !== null) {
         const assignee = await transaction.principals.get(command.assigneePrincipalId);
         if (assignee?.status !== "active") throw new ApplicationError("ASSIGNEE_NOT_ELIGIBLE", "The assignee is not active");
       }
-      if (command.reviewerPrincipalId !== null && !canAccessSecurityDomain(
+      if (command.reviewerPrincipalId !== null && !await canAccessProjectObject(
+        transaction,
         await transaction.memberships.get(command.projectId, command.reviewerPrincipalId),
+        command.reviewerPrincipalId,
+        command.projectId,
         node.securityDomainId,
+        "view",
+        authorizationAtUtc,
       )) {
         throw new ApplicationError("REVIEWER_NOT_ELIGIBLE", "The reviewer is not eligible for this task");
       }
@@ -194,9 +207,11 @@ export async function listTasksForNode(persistence: Persistence, tenantId: Tenan
 export async function listTasksForNodeInTransaction(
   transaction: TransactionContext,
   nodeId: string,
-  include: (task: ProductTask) => boolean = () => true,
+  include: (task: ProductTask) => boolean | Promise<boolean> = () => true,
 ): Promise<TaskView[]> {
-  return await Promise.all((await transaction.tasks.listByNode(nodeId)).filter(include).map(
+  const selected: ProductTask[] = [];
+  for (const task of await transaction.tasks.listByNode(nodeId)) if (await include(task)) selected.push(task);
+  return await Promise.all(selected.map(
     async (task) => toTaskView(task, await transaction.tasks.listReviewActions(task.id)),
   ));
 }

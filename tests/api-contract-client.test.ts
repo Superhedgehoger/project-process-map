@@ -7,6 +7,7 @@ type BrowserClient = {
   createTask(nodeId: string, input: { title: string }, idempotencyKey: string): Promise<unknown>;
   getNode(nodeId: string): Promise<unknown>;
   actOnTask(taskId: string, action: string, input: { expectedVersion: number }, idempotencyKey: string): Promise<unknown>;
+  createSecurityRoot(nodeId: string, input: { expectedNodeVersion: number; reason: string }, idempotencyKey: string): Promise<unknown>;
 };
 type BrowserClientConstructor = new (options: { fetch: typeof fetch; timeoutMilliseconds: number }) => BrowserClient;
 
@@ -87,6 +88,39 @@ test("P0-05A-T1a embedded client supports explicit assignment action routes", as
     });
     await client.actOnTask("T-1", "assign-assignee", { expectedVersion: 1 }, "assign-1");
     assert.match(requestedUrl, /\/actions\/assign-assignee$/);
+  } finally {
+    if (previous === undefined) delete target.ProjectProcessMapBrowserClient;
+    else target.ProjectProcessMapBrowserClient = previous;
+  }
+});
+
+test("TC-SEC-001 embedded client decodes the sensitive-root command contract", async () => {
+  const target = globalThis as typeof globalThis & { ProjectProcessMapBrowserClient?: BrowserClientConstructor };
+  const previous = target.ProjectProcessMapBrowserClient;
+  let requestedUrl = "";
+  try {
+    Function(projectProcessMapBrowserClientSource)();
+    const Constructor = target.ProjectProcessMapBrowserClient;
+    assert.ok(Constructor);
+    const client = new Constructor({
+      timeoutMilliseconds: 1_000,
+      fetch: async (input) => {
+        requestedUrl = String(input);
+        return response(201, {
+          value: {
+            securityDomainId: "security-1",
+            rootNodeId: "N-1",
+            permissionVersion: 1,
+            creatorCapability: "manage_access",
+            nodeVersion: 2,
+            securityEpoch: 2,
+          },
+          replayed: false,
+        });
+      },
+    });
+    await client.createSecurityRoot("N-1", { expectedNodeVersion: 1, reason: "受限" }, "security-root-1");
+    assert.match(requestedUrl, /\/api\/nodes\/N-1\/security-domain$/);
   } finally {
     if (previous === undefined) delete target.ProjectProcessMapBrowserClient;
     else target.ProjectProcessMapBrowserClient = previous;

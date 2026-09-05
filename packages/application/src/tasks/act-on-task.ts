@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { eventTopic, type DomainEvent, type OutboxMessage } from "../../../domain/src/events.ts";
 import type { PrincipalId, TenantId } from "../../../domain/src/identity.ts";
-import { canAccessSecurityDomain, isProjectManager } from "../../../domain/src/project-access.ts";
+import { isProjectManager } from "../../../domain/src/project-access.ts";
 import {
   acceptTask,
   assignTaskAssignee,
@@ -15,7 +15,7 @@ import {
   type TaskReviewActionRecord,
 } from "../../../domain/src/tasks.ts";
 import { ApplicationError } from "../errors.ts";
-import { assertProjectSecurityStable } from "../access/project-security.ts";
+import { assertProjectSecurityStable, canAccessProjectObject } from "../access/project-security.ts";
 import type { CommandScope, Persistence, TransactionContext } from "../ports/persistence.ts";
 import { toTaskView, type TaskView } from "./create-task.ts";
 
@@ -62,10 +62,14 @@ export class ActOnTaskHandler {
     });
 
     return await this.#persistence.transaction(command.tenantId, async (transaction) => {
+      const authorizationAtUtc = new Date().toISOString();
       const task = await transaction.tasks.get(command.taskId);
       if (task === undefined || task.deletedAtUtc !== null) throw new ApplicationError("TASK_NOT_FOUND", "Task not found");
       const actorMembership = await transaction.memberships.get(task.projectId, command.principalId);
-      if (!canAccessSecurityDomain(actorMembership, task.securityDomainId)) throw new ApplicationError("TASK_NOT_FOUND", "Task not found");
+      if (!await canAccessProjectObject(
+        transaction, actorMembership, command.principalId, task.projectId,
+        task.securityDomainId, actionCapability(command.action), authorizationAtUtc,
+      )) throw new ApplicationError("TASK_NOT_FOUND", "Task not found");
       await assertProjectSecurityStable(transaction, task.projectId);
       const manager = isProjectManager(actorMembership);
       assertAuthorized(task, command, manager);
@@ -76,7 +80,10 @@ export class ActOnTaskHandler {
           command.action === "assign_reviewer" ? "A reviewer is required" : "An assignee is required",
         );
         const candidate = await transaction.memberships.get(task.projectId, candidatePrincipalId);
-        if (!canAccessSecurityDomain(candidate, task.securityDomainId)) {
+        if (!await canAccessProjectObject(
+          transaction, candidate, candidatePrincipalId, task.projectId,
+          task.securityDomainId, "view", authorizationAtUtc,
+        )) {
           throw new ApplicationError(
             command.action === "assign_reviewer" ? "REVIEWER_NOT_ELIGIBLE" : "ASSIGNEE_NOT_ELIGIBLE",
             command.action === "assign_reviewer" ? "The reviewer is not eligible for this task" : "The assignee is not eligible for this task",
@@ -255,6 +262,12 @@ function eventType(action: TaskCommandAction): string {
   return action === "submit" || action === "accept" || action === "reject" || action === "withdraw"
     ? `project-map.task.review.${action === "submit" ? "submitted" : action === "accept" ? "accepted" : action === "reject" ? "rejected" : "withdrawn"}`
     : `project-map.task.${action === "complete" ? "completed" : action === "assign_reviewer" ? "reviewer_assigned" : action === "assign_assignee" ? "assignee_assigned" : "started"}`;
+}
+
+function actionCapability(action: TaskCommandAction): "contribute" | "edit" {
+  return action === "assign_assignee" || action === "assign_reviewer" || action === "accept" || action === "reject"
+    ? "edit"
+    : "contribute";
 }
 
 function validate(command: ActOnTaskCommand): void {

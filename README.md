@@ -11,6 +11,7 @@ GitHub：<https://github.com/Superhedgehoger/project-process-map>
 - 从临时目录解包、启动和纵向冒烟：`pnpm smoke:native`
 - Product API 健康检查与 SQLite/文件持久化纵向链路：`pnpm dev:api`
 - 必验任务 API：显式验收人快照、开始、提交、退回、再次提交和通过；所有动作要求期望版本与幂等键
+- 敏感根 API：项目经理可把空叶节点转换为首个敏感根，并在一个事务内取得首名 `manage_access`；非授权成员看不到该节点
 - Worker 健康检查：`pnpm dev:worker`
 - 本地 Node/事件/Outbox 原子性与幂等原型：`pnpm test`
 - Phase 0 大样例与最小签字模板：`pnpm fixtures:generate`
@@ -44,7 +45,7 @@ pnpm smoke:native
 HOST=127.0.0.1 PORT=4100 ./bin/project-process-map
 ```
 
-发行制品依赖 Node.js 24，默认使用 `data/project-process-map.sqlite` 与 `data/assets/`，API 和 Worker 共享持久队列。冒烟已覆盖页面 → 节点 → 任务 → 文件与两轮任务验收 → 停止 → 重启 → 回读，且确认没有调用 Docker。P0-07 正式身份与授权完成前，程序主动拒绝 `0.0.0.0` 等非本机监听，避免把尚未完成成员配置的服务暴露到公网。生产发布仍需补干净 Linux、TLS/反向代理、正式 SaaS 登录、备份、签名和升级/回滚演练。
+发行制品依赖 Node.js 24，默认使用 `data/project-process-map.sqlite` 与 `data/assets/`，API 和 Worker 共享持久队列。冒烟已覆盖页面 → 节点 → 敏感根 → 任务 → 文件与两轮任务验收 → 停止 → 重启 → 回读，且确认没有调用 Docker。P0-07 正式身份与授权完成前，程序主动拒绝 `0.0.0.0` 等非本机监听，避免把尚未完成成员配置的服务暴露到公网。生产发布仍需补干净 Linux、TLS/反向代理、正式 SaaS 登录、备份、签名和升级/回滚演练。
 
 任务状态命令使用统一入口：
 
@@ -55,6 +56,16 @@ Idempotency-Key: <稳定请求键>
 ```
 
 当前 `P0-05A-T1a` 只开放显式验收人分支。SQLite/Memory 均持久保存最小 `ProjectMembership`：负责人才能开始、提交、撤回或免验完成，项目经理可以改派负责人/验收人并参与通过或退回；每次请求先按当前成员状态和安全域授权，再处理幂等回放。模板角色槽位、节点负责人回退、授权变更审计和完整 P0-07 管理入口仍未实现。Huly 登录主体没有成员配置时会得到空列表/404，不会自动获得项目权限。
+
+首次建立敏感根使用独立命令，不能由普通建节点接口直接写 `securityDomainId`：
+
+```text
+POST /api/nodes/{nodeId}/security-domain
+Idempotency-Key: <稳定请求键>
+{"expectedNodeVersion":1,"reason":"限制访问的审计理由"}
+```
+
+本期为 `P0-07 / TC-SEC-001` 的安全子切片，只允许转换无后代、无任务和无文件的空叶节点。新任务和文件继承该域；在子树迁移完成前，敏感节点下新增普通子节点会被拒绝。SQLite schema v4 使用正式 `SecurityDomain` 与 `SecurityGrant` 作为新域权威；v3 遗留域仅兼容读取，不能借旧成员快照获得写入或授权管理能力。嵌套域、非空子树迁移、Grant 管理/审计、最后管理员保护、正式成员配置及全通道 ACL 仍属于后续 P0-07。
 
 ### Docker 的保留范围
 
@@ -96,6 +107,7 @@ Huly 扩展现在仅作为 SaaS 启动入口，不复制任务 DTO、状态机�
 7. `ARCH-GATE-01`：修正租户/身份、Task/树权威、Asset、持久事务、集成恢复和 UI 契约边界。
 8. `P0-ND-02`：无 Docker 干净 Linux、正式登录、备份和升级回滚。
 9. `P0-05A`：进行中；`T1a` 已完成显式验收人的任务验收周期、最小持久成员授权和旧任务恢复，后续继续角色解析、权限管理入口和交付物完成守卫。
+10. `P0-07`：进行中；`TC-SEC-001` 已完成空叶节点的首个敏感根与首管理员原子创建，后续继续成员/Grant 管理、子树迁移、最后管理员保护和全通道 ACL。
 
 项目负责人已批准 P0-01 许可证风险闸门，可继续本地 Phase 0 集成；该批准是项目风险接受，不替代生产发布前的正式法律审查。
 

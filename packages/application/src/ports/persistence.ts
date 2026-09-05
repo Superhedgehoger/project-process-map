@@ -8,6 +8,7 @@ import type { ProjectNode } from "../../../domain/src/project-structure.ts";
 import type { ProjectMembership } from "../../../domain/src/project-access.ts";
 import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import type { SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
+import type { SecurityDomain, SecurityGrant } from "../../../domain/src/security-access.ts";
 
 export type CommandScope = Readonly<{
   principalId: PrincipalId;
@@ -25,7 +26,14 @@ export type CommandReceipt<TResult = unknown> = Readonly<{
 export interface ProjectNodeRepository {
   get(nodeId: string): Promise<ProjectNode | undefined>;
   listByProject(projectId: string): Promise<ProjectNode[]>;
+  hasSecurityDomainReference(securityDomainId: string): Promise<boolean>;
   insert(node: ProjectNode): Promise<void>;
+  assignSecurityDomain(
+    nodeId: string,
+    projectId: string,
+    securityDomainId: string,
+    expectedVersion: number,
+  ): Promise<ProjectNode>;
 }
 
 export interface CommandReceiptRepository {
@@ -36,6 +44,7 @@ export interface CommandReceiptRepository {
 export interface TaskRepository {
   get(taskId: string): Promise<ProductTask | undefined>;
   listByNode(nodeId: string): Promise<ProductTask[]>;
+  hasSecurityDomainReference(securityDomainId: string): Promise<boolean>;
   insert(task: ProductTask): Promise<void>;
   update(task: ProductTask, expectedVersion: number): Promise<void>;
   appendReviewAction(action: TaskReviewActionRecord): Promise<void>;
@@ -44,6 +53,8 @@ export interface TaskRepository {
 
 export interface AssetRepository {
   get(assetId: string): Promise<Asset | undefined>;
+  hasForNode(nodeId: string): Promise<boolean>;
+  hasSecurityDomainReference(securityDomainId: string): Promise<boolean>;
   insert(asset: Asset): Promise<void>;
   update(asset: Asset, expectedVersion: number): Promise<void>;
   insertBinding(binding: AssetBinding): Promise<void>;
@@ -88,6 +99,18 @@ export interface ProjectMembershipRepository {
   update(membership: ProjectMembership, expectedVersion: number): Promise<void>;
 }
 
+export interface SecurityDomainRepository {
+  get(securityDomainId: string): Promise<SecurityDomain | undefined>;
+  getByRoot(projectId: string, rootNodeId: string): Promise<SecurityDomain | undefined>;
+  insert(securityDomain: SecurityDomain): Promise<void>;
+}
+
+export interface SecurityGrantRepository {
+  get(securityDomainId: string, principalId: PrincipalId): Promise<SecurityGrant | undefined>;
+  listByDomain(securityDomainId: string): Promise<SecurityGrant[]>;
+  insert(grant: SecurityGrant): Promise<void>;
+}
+
 export interface SecurityDomainMigrationRepository {
   get(migrationId: string): Promise<SecurityDomainMigration | undefined>;
   insert(migration: SecurityDomainMigration): Promise<void>;
@@ -123,6 +146,8 @@ export type TransactionContext = Readonly<{
   identities: IdentityMappingRepository;
   principals: PrincipalRepository;
   memberships: ProjectMembershipRepository;
+  securityDomains: SecurityDomainRepository;
+  securityGrants: SecurityGrantRepository;
   securityMigrations: SecurityDomainMigrationRepository;
   receipts: CommandReceiptRepository;
   sequences: ProjectSequenceRepository;

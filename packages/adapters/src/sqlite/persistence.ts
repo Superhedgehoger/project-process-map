@@ -12,6 +12,7 @@ import type { ProjectNode } from "../../../domain/src/project-structure.ts";
 import type { ProjectMembership } from "../../../domain/src/project-access.ts";
 import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import type { SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
+import type { SecurityDomain, SecurityGrant } from "../../../domain/src/security-access.ts";
 import type {
   ClaimOptions,
   CommandReceipt,
@@ -28,7 +29,7 @@ export type SqlitePersistenceOptions = Readonly<{
 }>;
 
 const pathLocks = new Map<string, Promise<void>>();
-const currentSchemaVersion = 3;
+const currentSchemaVersion = 4;
 
 export class SqlitePersistence implements Persistence {
   readonly #database: DatabaseSync;
@@ -137,6 +138,11 @@ export class SqlitePersistence implements Persistence {
         listByProject: async (projectId) => this.#database.prepare(
           "SELECT * FROM project_nodes WHERE tenant_id = ? AND project_id = ? ORDER BY node_id",
         ).all(tenantId, projectId).map(nodeFromRow),
+        hasSecurityDomainReference: async (securityDomainId) => this.#database.prepare(`
+          SELECT 1 FROM project_nodes
+          WHERE tenant_id = ? AND security_domain_id = ?
+          LIMIT 1
+        `).get(tenantId, securityDomainId) !== undefined,
         insert: async (node) => {
           if (node.tenantId !== tenantId) throw new Error("TENANT_CONTEXT_MISMATCH");
           this.#database.prepare(`
@@ -149,6 +155,37 @@ export class SqlitePersistence implements Persistence {
             node.securityDomainId, node.securityEpoch, node.version, node.deletedAtUtc,
           );
         },
+        assignSecurityDomain: async (nodeId, projectId, securityDomainId, expectedVersion) => {
+          const domainRow = this.#database.prepare(`
+            SELECT domain_json FROM security_domains
+            WHERE tenant_id = ? AND security_domain_id = ? AND project_id = ? AND root_node_id = ?
+          `).get(tenantId, securityDomainId, projectId, nodeId);
+          if (domainRow === undefined) throw new Error("SECURITY_DOMAIN_ROOT_MISMATCH");
+          const domain = parseJson<SecurityDomain>(asString(domainRow.domain_json));
+          const firstAdministrator = this.#database.prepare(`
+            SELECT capability, status, expires_at_utc FROM security_grants
+            WHERE tenant_id = ? AND security_domain_id = ? AND principal_id = ?
+          `).get(tenantId, securityDomainId, domain.createdByPrincipalId);
+          if (firstAdministrator === undefined
+            || firstAdministrator.capability !== "manage_access"
+            || firstAdministrator.status !== "active"
+            || firstAdministrator.expires_at_utc !== null) {
+            throw new Error("SECURITY_DOMAIN_FIRST_ADMIN_REQUIRED");
+          }
+          const result = this.#database.prepare(`
+            UPDATE project_nodes
+            SET security_domain_id = ?, security_epoch = security_epoch + 1, version = version + 1
+            WHERE tenant_id = ? AND node_id = ? AND project_id = ? AND version = ? AND security_domain_id IS NULL
+          `).run(
+            securityDomainId, tenantId, nodeId, projectId, expectedVersion,
+          );
+          if (result.changes !== 1) throw new Error("NODE_VERSION_CONFLICT");
+          const row = this.#database.prepare(
+            "SELECT * FROM project_nodes WHERE tenant_id = ? AND node_id = ?",
+          ).get(tenantId, nodeId);
+          if (row === undefined) throw new Error("NODE_NOT_FOUND");
+          return nodeFromRow(row);
+        },
       },
       tasks: {
         get: async (taskId) => {
@@ -160,6 +197,12 @@ export class SqlitePersistence implements Persistence {
           WHERE tenant_id = ? AND owner_node_id = ?
           ORDER BY task_id
         `).all(tenantId, nodeId).map((row) => productTaskFromJson(asString(row.task_json))),
+        hasSecurityDomainReference: async (securityDomainId) => this.#database.prepare(`
+          SELECT task_json FROM product_tasks WHERE tenant_id = ?
+        `).all(tenantId).some((row) => {
+          const task = productTaskFromJson(asString(row.task_json));
+          return task.securityDomainId === securityDomainId;
+        }),
         insert: async (task) => {
           assertTenant(tenantId, task.tenantId);
           this.#database.prepare(`
@@ -195,6 +238,15 @@ export class SqlitePersistence implements Persistence {
           const row = this.#database.prepare("SELECT asset_json FROM assets WHERE tenant_id = ? AND asset_id = ?").get(tenantId, assetId);
           return row === undefined ? undefined : parseJson<Asset>(asString(row.asset_json));
         },
+        hasForNode: async (nodeId) => this.#database.prepare(`
+          SELECT asset_json FROM assets WHERE tenant_id = ? AND owner_node_id = ?
+        `).get(tenantId, nodeId) !== undefined,
+        hasSecurityDomainReference: async (securityDomainId) => this.#database.prepare(`
+          SELECT asset_json FROM assets WHERE tenant_id = ?
+        `).all(tenantId).some((row) => {
+          const asset = parseJson<Asset>(asString(row.asset_json));
+          return asset.securityDomainId === securityDomainId;
+        }),
         insert: async (asset) => {
           assertTenant(tenantId, asset.tenantId);
           this.#database.prepare(`
@@ -404,6 +456,58 @@ export class SqlitePersistence implements Persistence {
           if (result.changes !== 1) throw new Error("PROJECT_MEMBERSHIP_VERSION_CONFLICT");
         },
       },
+      securityDomains: {
+        get: async (securityDomainId) => {
+          const row = this.#database.prepare(`
+            SELECT domain_json FROM security_domains WHERE tenant_id = ? AND security_domain_id = ?
+          `).get(tenantId, securityDomainId);
+          return row === undefined ? undefined : parseJson<SecurityDomain>(asString(row.domain_json));
+        },
+        getByRoot: async (projectId, rootNodeId) => {
+          const row = this.#database.prepare(`
+            SELECT domain_json FROM security_domains
+            WHERE tenant_id = ? AND project_id = ? AND root_node_id = ?
+          `).get(tenantId, projectId, rootNodeId);
+          return row === undefined ? undefined : parseJson<SecurityDomain>(asString(row.domain_json));
+        },
+        insert: async (domain) => {
+          assertTenant(tenantId, domain.tenantId);
+          this.#database.prepare(`
+            INSERT INTO security_domains (
+              tenant_id, security_domain_id, project_id, root_node_id, parent_security_domain_id,
+              permission_version, version, domain_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            tenantId, domain.id, domain.projectId, domain.rootNodeId, domain.parentSecurityDomainId,
+            domain.permissionVersion, domain.version, JSON.stringify(domain),
+          );
+        },
+      },
+      securityGrants: {
+        get: async (securityDomainId, principalId) => {
+          const row = this.#database.prepare(`
+            SELECT grant_json FROM security_grants
+            WHERE tenant_id = ? AND security_domain_id = ? AND principal_id = ?
+          `).get(tenantId, securityDomainId, principalId);
+          return row === undefined ? undefined : parseJson<SecurityGrant>(asString(row.grant_json));
+        },
+        listByDomain: async (securityDomainId) => this.#database.prepare(`
+          SELECT grant_json FROM security_grants
+          WHERE tenant_id = ? AND security_domain_id = ? ORDER BY principal_id
+        `).all(tenantId, securityDomainId).map((row) => parseJson<SecurityGrant>(asString(row.grant_json))),
+        insert: async (grant) => {
+          assertTenant(tenantId, grant.tenantId);
+          this.#database.prepare(`
+            INSERT INTO security_grants (
+              tenant_id, security_domain_id, principal_id, capability, status,
+              expires_at_utc, version, grant_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            tenantId, grant.securityDomainId, grant.principalId, grant.capability, grant.status,
+            grant.expiresAtUtc, grant.version, JSON.stringify(grant),
+          );
+        },
+      },
       securityMigrations: {
         get: async (migrationId) => {
           const row = this.#database.prepare(`
@@ -605,6 +709,37 @@ export class SqlitePersistence implements Persistence {
       ) STRICT;
       CREATE INDEX IF NOT EXISTS project_memberships_by_principal
         ON project_memberships (tenant_id, principal_id, status, project_id);
+
+      CREATE TABLE IF NOT EXISTS security_domains (
+        tenant_id TEXT NOT NULL,
+        security_domain_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        root_node_id TEXT NOT NULL,
+        parent_security_domain_id TEXT,
+        permission_version INTEGER NOT NULL CHECK (permission_version > 0),
+        version INTEGER NOT NULL CHECK (version > 0),
+        domain_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, security_domain_id),
+        UNIQUE (tenant_id, project_id, root_node_id),
+        FOREIGN KEY (tenant_id, root_node_id) REFERENCES project_nodes (tenant_id, node_id),
+        FOREIGN KEY (tenant_id, parent_security_domain_id) REFERENCES security_domains (tenant_id, security_domain_id)
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS security_grants (
+        tenant_id TEXT NOT NULL,
+        security_domain_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        capability TEXT NOT NULL CHECK (capability IN ('view', 'contribute', 'edit', 'manage_access')),
+        status TEXT NOT NULL CHECK (status IN ('active', 'revoked')),
+        expires_at_utc TEXT,
+        version INTEGER NOT NULL CHECK (version > 0),
+        grant_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, security_domain_id, principal_id),
+        FOREIGN KEY (tenant_id, security_domain_id) REFERENCES security_domains (tenant_id, security_domain_id),
+        FOREIGN KEY (tenant_id, principal_id) REFERENCES principals (tenant_id, principal_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS security_grants_by_principal
+        ON security_grants (tenant_id, principal_id, status, security_domain_id);
 
       CREATE TABLE IF NOT EXISTS project_nodes (
         tenant_id TEXT NOT NULL,
@@ -833,6 +968,9 @@ export class SqlitePersistence implements Persistence {
     `).run(new Date().toISOString());
     this.#database.prepare(`
       INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc) VALUES (3, ?)
+    `).run(new Date().toISOString());
+    this.#database.prepare(`
+      INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc) VALUES (4, ?)
     `).run(new Date().toISOString());
   }
 

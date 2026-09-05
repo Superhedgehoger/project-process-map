@@ -4,8 +4,7 @@ import { eventTopic, type BackgroundJob, type DomainEvent, type OutboxMessage } 
 import type { ExternalBinding } from "../../../domain/src/external-reference.ts";
 import type { PrincipalId, TenantId } from "../../../domain/src/identity.ts";
 import { advanceIntegrationOperation, type IntegrationOperation } from "../../../domain/src/integration-operations.ts";
-import { canAccessSecurityDomain } from "../../../domain/src/project-access.ts";
-import { assertProjectSecurityStable } from "../access/project-security.ts";
+import { assertProjectSecurityStable, canAccessProjectObject } from "../access/project-security.ts";
 import type { AssetContentPort, StoredAssetContent } from "../ports/integrations.ts";
 import type { CommandScope, Persistence, TransactionContext } from "../ports/persistence.ts";
 
@@ -77,7 +76,7 @@ export class AttachTaskAssetHandler {
     const operationId = `op:asset-ingest:${hash(`${command.tenantId}\u0000${command.principalId}\u0000${command.idempotencyKey}`).slice(0, 32)}`;
 
     const initialized = await this.#persistence.transaction(command.tenantId, async (transaction) => {
-      const task = await authorizedTask(transaction, command);
+      const task = await authorizedTask(transaction, command, new Date().toISOString());
       const replay = await readReplay(transaction, scope, fingerprint);
       if (replay !== undefined) return { replay };
       const previousOperation = await transaction.integrationOperations.get(operationId);
@@ -178,7 +177,7 @@ export class AttachTaskAssetHandler {
     }
 
     return await this.#persistence.transaction(command.tenantId, async (transaction) => {
-      await authorizedTask(transaction, command);
+      await authorizedTask(transaction, command, new Date().toISOString());
       const replay = await readReplay(transaction, scope, fingerprint);
       if (replay !== undefined) return { value: replay, replayed: true };
       let asset = await requiredAsset(transaction, command.assetId);
@@ -318,11 +317,13 @@ export async function listTaskAssets(
 export async function listTaskAssetsInTransaction(
   transaction: TransactionContext,
   taskId: string,
-  include: (asset: Asset) => boolean = () => true,
+  include: (asset: Asset) => boolean | Promise<boolean> = () => true,
 ): Promise<AssetView[]> {
   const bindings = await transaction.assets.listBindings("task", taskId);
   const assets = await Promise.all(bindings.map(async (binding) => await transaction.assets.get(binding.assetId)));
-  return assets.filter((asset): asset is Asset => asset !== undefined).filter(include).map((asset) => toAssetView(asset, taskId));
+  const selected: Asset[] = [];
+  for (const asset of assets) if (asset !== undefined && await include(asset)) selected.push(asset);
+  return selected.map((asset) => toAssetView(asset, taskId));
 }
 
 function toAssetView(asset: Asset, taskId: string): AssetView {
@@ -359,11 +360,14 @@ async function requiredAsset(transaction: TransactionContext, assetId: string): 
   return asset;
 }
 
-async function authorizedTask(transaction: TransactionContext, command: AttachTaskAssetCommand) {
+async function authorizedTask(transaction: TransactionContext, command: AttachTaskAssetCommand, authorizationAtUtc: string) {
   const task = await transaction.tasks.get(command.taskId);
   if (task === undefined || task.deletedAtUtc !== null) throw new Error("TASK_NOT_FOUND");
   const membership = await transaction.memberships.get(task.projectId, command.principalId);
-  if (!canAccessSecurityDomain(membership, task.securityDomainId)) throw new Error("TASK_NOT_FOUND");
+  if (!await canAccessProjectObject(
+    transaction, membership, command.principalId, task.projectId,
+    task.securityDomainId, "contribute", authorizationAtUtc,
+  )) throw new Error("TASK_NOT_FOUND");
   await assertProjectSecurityStable(transaction, task.projectId);
   return task;
 }

@@ -2,14 +2,14 @@ import { createHash, randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { AttachTaskAssetHandler, listTaskAssetsInTransaction } from "../../../../packages/application/src/assets/attach-task-asset.ts";
 import { ApplicationError } from "../../../../packages/application/src/errors.ts";
-import { assertProjectSecurityStable } from "../../../../packages/application/src/access/project-security.ts";
+import { assertProjectSecurityStable, canAccessProjectObject } from "../../../../packages/application/src/access/project-security.ts";
 import type { AssetContentPort } from "../../../../packages/application/src/ports/integrations.ts";
 import type { Persistence } from "../../../../packages/application/src/ports/persistence.ts";
 import { ActOnTaskHandler, type TaskCommandAction } from "../../../../packages/application/src/tasks/act-on-task.ts";
 import { CreateTaskHandler, listTasksForNodeInTransaction } from "../../../../packages/application/src/tasks/create-task.ts";
+import { CreateSecurityRootHandler } from "../../../../packages/application/src/security/create-security-root.ts";
 import type { ApiNode } from "../../../../packages/contracts/src/project-process-map-api.ts";
 import { principalId, type PrincipalId, type TenantId } from "../../../../packages/domain/src/identity.ts";
-import { canAccessSecurityDomain } from "../../../../packages/domain/src/project-access.ts";
 import type { ProjectNode } from "../../../../packages/domain/src/project-structure.ts";
 import { deterministicPublicId, optionalBodyBoolean, optionalBodyString, readJson, requiredHeader, requiredPositiveInteger, requiredString, sendJson } from "../http.ts";
 
@@ -33,8 +33,15 @@ export async function routeProjectRequest(
       const membership = await transaction.memberships.get("phase0-project", identity.principalId);
       if (membership === undefined || membership.status !== "active") return [];
       await assertProjectSecurityStable(transaction, "phase0-project");
-      return (await transaction.nodes.listByProject("phase0-project"))
-        .filter((node) => canAccessSecurityDomain(membership, node.securityDomainId));
+      const visible: ProjectNode[] = [];
+      const atUtc = new Date().toISOString();
+      for (const node of await transaction.nodes.listByProject("phase0-project")) {
+        if (await canAccessProjectObject(
+          transaction, membership, identity.principalId, node.projectId,
+          node.securityDomainId, "view", atUtc,
+        )) visible.push(node);
+      }
+      return visible;
     });
     sendJson(response, 200, nodes.map(publicNode).sort((left, right) => left.id.localeCompare(right.id)));
     return true;
@@ -46,12 +53,19 @@ export async function routeProjectRequest(
       const node = await transaction.nodes.get(nodeId);
       if (node === undefined) throw new ApplicationError("NODE_NOT_FOUND", `Node not found: ${nodeId}`);
       const membership = await transaction.memberships.get(node.projectId, identity.principalId);
-      if (!canAccessSecurityDomain(membership, node.securityDomainId)) throw new ApplicationError("NODE_NOT_FOUND", `Node not found: ${nodeId}`);
+      const atUtc = new Date().toISOString();
+      if (!await canAccessProjectObject(
+        transaction, membership, identity.principalId, node.projectId,
+        node.securityDomainId, "view", atUtc,
+      )) throw new ApplicationError("NODE_NOT_FOUND", `Node not found: ${nodeId}`);
       await assertProjectSecurityStable(transaction, node.projectId);
       const tasks = await listTasksForNodeInTransaction(
         transaction,
         nodeId,
-        (task) => canAccessSecurityDomain(membership, task.securityDomainId),
+        async (task) => await canAccessProjectObject(
+          transaction, membership, identity.principalId, task.projectId,
+          task.securityDomainId, "view", atUtc,
+        ),
       );
       return {
         node: publicNode(node),
@@ -60,7 +74,10 @@ export async function routeProjectRequest(
           files: await listTaskAssetsInTransaction(
             transaction,
             task.id,
-            (asset) => canAccessSecurityDomain(membership, asset.securityDomainId),
+            async (asset) => await canAccessProjectObject(
+              transaction, membership, identity.principalId, asset.projectId,
+              asset.securityDomainId, "view", atUtc,
+            ),
           ),
         }))),
       };
@@ -69,13 +86,38 @@ export async function routeProjectRequest(
     return true;
   }
   const taskMatch = url.pathname.match(/^\/api\/nodes\/([^/]+)\/tasks$/);
+  const securityRootMatch = url.pathname.match(/^\/api\/nodes\/([^/]+)\/security-domain$/);
+  if (request.method === "POST" && securityRootMatch?.[1] !== undefined) {
+    const nodeId = decodeURIComponent(securityRootMatch[1]);
+    const body = await readJson(request);
+    const idempotencyKey = requiredHeader(request, "idempotency-key");
+    const principalKey = commandKey(identity, idempotencyKey);
+    const result = await new CreateSecurityRootHandler(persistence).execute({
+      tenantId: identity.tenantId,
+      commandId: deterministicPublicId("cmd-security-root", principalKey),
+      idempotencyKey,
+      correlationId: request.headers["x-correlation-id"]?.toString() ?? randomUUID(),
+      principalId: identity.principalId,
+      projectId: "phase0-project",
+      nodeId,
+      securityDomainId: deterministicPublicId("security-domain", principalKey),
+      expectedNodeVersion: requiredPositiveInteger(body, "expectedNodeVersion"),
+      reason: requiredString(body, "reason"),
+      occurredAtUtc: new Date().toISOString(),
+    });
+    sendJson(response, result.replayed ? 200 : 201, result);
+    return true;
+  }
   if (request.method === "POST" && taskMatch?.[1] !== undefined) {
     const nodeId = decodeURIComponent(taskMatch[1]);
     const node = await persistence.read(identity.tenantId, async (transaction) => {
       const candidate = await transaction.nodes.get(nodeId);
       if (candidate === undefined) return undefined;
       const membership = await transaction.memberships.get(candidate.projectId, identity.principalId);
-      return canAccessSecurityDomain(membership, candidate.securityDomainId) ? candidate : undefined;
+      return await canAccessProjectObject(
+        transaction, membership, identity.principalId, candidate.projectId,
+        candidate.securityDomainId, "contribute", new Date().toISOString(),
+      ) ? candidate : undefined;
     });
     if (node === undefined) throw new ApplicationError("NODE_NOT_FOUND", `Node not found: ${nodeId}`);
     const body = await readJson(request);
@@ -141,7 +183,10 @@ export async function routeProjectRequest(
       const candidate = await transaction.tasks.get(taskId);
       if (candidate === undefined) return undefined;
       const membership = await transaction.memberships.get(candidate.projectId, identity.principalId);
-      return canAccessSecurityDomain(membership, candidate.securityDomainId) ? candidate : undefined;
+      return await canAccessProjectObject(
+        transaction, membership, identity.principalId, candidate.projectId,
+        candidate.securityDomainId, "contribute", new Date().toISOString(),
+      ) ? candidate : undefined;
     });
     if (task === undefined) throw new ApplicationError("TASK_NOT_FOUND", `Task not found: ${taskId}`);
     const body = await readJson(request);

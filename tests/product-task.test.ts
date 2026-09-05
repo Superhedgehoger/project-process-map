@@ -26,7 +26,7 @@ async function prepare(persistence: Persistence): Promise<void> {
     nodeId: "node-1",
     parentId: null,
     title: "方案设计",
-    securityDomainId: "security-1",
+    securityDomainId: null,
     occurredAtUtc: "2026-09-04T01:00:00.000Z",
   });
 }

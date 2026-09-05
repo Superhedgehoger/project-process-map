@@ -14,7 +14,7 @@
 - 退回理由必填；退回后再次提交生成新 `cycleNumber`。每条 submitted/accepted/rejected/withdrawn 动作保存当轮验收人、操作者、时间和说明，只追加不覆盖。
 - Task 更新、Review Action、最小 DomainEvent、Outbox 和命令回执在同一持久事务提交。事件只含 task、node 和 cycle 标识，不携带提交说明或退回理由。
 - Memory 与 SQLite 使用同一 Repository 契约；SQLite 关闭重开后仍能恢复任务版本和全部验收历史。
-- SQLite schema v3 对旧 `task_json`、创建回执和无验收人字段做兼容读取；旧的未指派任务可由项目经理显式改派后继续，未知的未来 schema 版本拒绝启动。
+- 任务兼容结构始于 SQLite schema v3；当前 schema v4 新增正式 SecurityDomain/SecurityGrant，同时继续兼容旧 `task_json`、创建回执和无验收人字段。旧的未指派普通任务可由项目经理显式改派后继续，未知的未来 schema 版本拒绝启动。
 - 当前安全域迁移期间整项目 API fail-closed；节点详情还逐 Task/Asset 重验安全域，避免迁移尚未实现交集判定时泄漏验收理由或文件元数据。
 - Huly 不参与产品验收事务，也不能把外部 Done 解释成 Product Task 已验收。协作状态更新投影将在独立 Adapter 切片实现，失败不得回滚本地验收事实。
 

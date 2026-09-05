@@ -46,6 +46,18 @@ export type ApiTaskReviewAction = Readonly<{
 }>;
 
 export type ApiNodeDetail = Readonly<{ node: ApiNode; tasks: ApiTask[] }>;
+export type ApiSecurityRoot = Readonly<{
+  securityDomainId: string;
+  rootNodeId: string;
+  permissionVersion: number;
+  creatorCapability: "manage_access";
+  nodeVersion: number;
+  securityEpoch: number;
+}>;
+export type CreateSecurityRootRequest = Readonly<{
+  expectedNodeVersion: number;
+  reason: string;
+}>;
 export type CreateTaskRequest = Readonly<{
   title: string;
   taskId?: string;
@@ -154,6 +166,18 @@ export function decodeAsset(value: unknown): ApiAsset {
     lifecycleState: oneOf(record.lifecycleState, ["initiated", "uploading", "scanning", "available", "quarantined", "failed", "deleted"] as const, "asset.lifecycleState"),
     scanState: oneOf(record.scanState, ["scanning", "available", "quarantined", "failed"] as const, "asset.scanState"),
     version: positiveInteger(record.version, "asset.version"),
+  };
+}
+
+export function decodeSecurityRoot(value: unknown): ApiSecurityRoot {
+  const record = object(value, "security root");
+  return {
+    securityDomainId: string(record.securityDomainId, "securityRoot.securityDomainId"),
+    rootNodeId: string(record.rootNodeId, "securityRoot.rootNodeId"),
+    permissionVersion: positiveInteger(record.permissionVersion, "securityRoot.permissionVersion"),
+    creatorCapability: oneOf(record.creatorCapability, ["manage_access"] as const, "securityRoot.creatorCapability"),
+    nodeVersion: positiveInteger(record.nodeVersion, "securityRoot.nodeVersion"),
+    securityEpoch: positiveInteger(record.securityEpoch, "securityRoot.securityEpoch"),
   };
 }
 

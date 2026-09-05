@@ -47,6 +47,16 @@ try {
   assert.equal(nodes.status, 200);
   assert.equal((await nodes.json() as unknown[]).length, 6);
 
+  const secured = await fetch(`${ready.url}/api/nodes/N-02/security-domain`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "native-security-root" },
+    body: JSON.stringify({
+      expectedNodeVersion: 1,
+      reason: "无 Docker 敏感根持久化验证",
+    }),
+  });
+  assert.equal(secured.status, 201);
+
   const created = await fetch(`${ready.url}/api/nodes/N-04/tasks`, {
     method: "POST",
     headers: { "content-type": "application/json", "idempotency-key": "native-smoke-task" },
@@ -86,6 +96,8 @@ try {
   assert.equal(await exitCode(child), 0, firstRuntime.stderr());
 
   const secondRuntime = await startRelease(installRoot, fakeBin, runtimeData);
+  const securedAfterRestart = await fetch(`${secondRuntime.ready.url}/api/nodes/N-02`);
+  assert.equal(securedAfterRestart.status, 200);
   const detailResponse = await fetch(`${secondRuntime.ready.url}/api/nodes/N-04`);
   assert.equal(detailResponse.status, 200);
   const detail = await detailResponse.json() as { tasks: Array<{ id: string; files: Array<{ id: string }> }> };
@@ -107,7 +119,7 @@ try {
     status: "ok",
     release: basename(archive),
     dockerInvoked: false,
-    verticalPath: "page -> nodes -> task -> asset + two-cycle review -> restart -> readback",
+    verticalPath: "page -> nodes -> sensitive root + task + asset + two-cycle review -> restart -> readback",
     persistence: "sqlite+filesystem",
   }));
 } finally {

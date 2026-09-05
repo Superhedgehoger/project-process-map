@@ -3,9 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { executeCreateNode } from "../packages/application/src/create-node.ts";
 import { SqlitePersistence } from "../packages/adapters/src/sqlite/persistence.ts";
-import { principalId, tenantId } from "../packages/domain/src/identity.ts";
+import { tenantId } from "../packages/domain/src/identity.ts";
 import {
   checkpointSecurityMigration,
   effectiveSecurityDomains,
@@ -20,18 +19,19 @@ test("ARCH-GATE-SECURITY-002 migration cursor survives restart and stale workers
   const path = join(directory, "security.sqlite");
   try {
     const first = new SqlitePersistence({ path });
-    await executeCreateNode(first, {
-      tenantId: tenant,
-      commandId: "node-command",
-      idempotencyKey: "node-request",
-      correlationId: "security-migration",
-      principalId: principalId("principal-security"),
-      projectId: "project-1",
-      nodeId: "node-root",
-      parentId: null,
-      title: "敏感阶段",
-      securityDomainId: "domain-old",
-      occurredAtUtc: "2026-09-04T05:00:00.000Z",
+    await first.transaction(tenant, async (transaction) => {
+      await transaction.nodes.insert({
+        tenantId: tenant,
+        id: "node-root",
+        projectId: "project-1",
+        parentId: null,
+        title: "敏感阶段",
+        kind: "work_package",
+        securityDomainId: "domain-old",
+        securityEpoch: 1,
+        version: 1,
+        deletedAtUtc: null,
+      });
     });
     const planned = migration();
     const active = transitionSecurityMigration(planned, "active", "2026-09-04T05:01:00.000Z");

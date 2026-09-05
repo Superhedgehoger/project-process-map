@@ -23,7 +23,7 @@ function command(tenant: TenantId = tenantA, overrides: Partial<CreateNodeComman
     nodeId: "node-1",
     parentId: null,
     title: "启动",
-    securityDomainId: "security-1",
+    securityDomainId: null,
     occurredAtUtc: "2026-09-03T10:00:00.000Z",
     ...overrides,
   };
@@ -64,6 +64,23 @@ test("ARCH-GATE-PERSIST-001 memory and SQLite commit tenant-scoped Node, minimal
       assert.equal(JSON.stringify(result.event).includes("after"), false, fixture.name);
       assert.equal(result.outbox.topic, "project-map.node.created.v1", fixture.name);
       assert.equal(await fixture.outbox.countReady("2026-09-03T10:00:00.000Z"), 1, fixture.name);
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+test("TC-SEC-001 ordinary node creation cannot bypass the atomic first-admin security command", async () => {
+  for (const fixture of await fixtures()) {
+    try {
+      await assert.rejects(
+        executeCreateNode(fixture.persistence, command(tenantA, { securityDomainId: "bypass-domain" })),
+        (error) => error instanceof Error && "code" in error
+          && error.code === "SECURITY_DOMAIN_ASSIGNMENT_REQUIRES_COMMAND",
+        fixture.name,
+      );
+      assert.equal(await fixture.persistence.read(tenantA, async (tx) => await tx.nodes.get("node-1")), undefined, fixture.name);
+      assert.equal(await fixture.outbox.countReady("9999-12-31T23:59:59.999Z"), 0, fixture.name);
     } finally {
       await fixture.cleanup();
     }

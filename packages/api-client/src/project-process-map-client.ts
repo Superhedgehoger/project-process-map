@@ -15,6 +15,11 @@ class ProjectProcessMapBrowserClient {
   health() { return this.request('/health', {}, false, value => this.decodeHealth(value)); }
   listNodes() { return this.request('/api/nodes', {}, false, value => this.decodeNodes(value)); }
   getNode(nodeId) { return this.request('/api/nodes/' + encodeURIComponent(nodeId), {}, false, value => this.decodeNodeDetail(value)); }
+  createSecurityRoot(nodeId, input, idempotencyKey) {
+    return this.request('/api/nodes/' + encodeURIComponent(nodeId) + '/security-domain', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': this.requiredKey(idempotencyKey) }, body: JSON.stringify(input)
+    }, true, value => this.decodeCommand(value, item => this.decodeSecurityRoot(item)));
+  }
   createTask(nodeId, input, idempotencyKey) {
     return this.request('/api/nodes/' + encodeURIComponent(nodeId) + '/tasks', {
       method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': this.requiredKey(idempotencyKey) }, body: JSON.stringify(input)
@@ -115,6 +120,13 @@ class ProjectProcessMapBrowserClient {
     this.nonNegative(item.size, 'asset.size'); this.text(item.sha256, 'asset.sha256');
     this.oneOf(item.lifecycleState, ['initiated','uploading','scanning','available','quarantined','failed','deleted'], 'asset.lifecycleState');
     this.oneOf(item.scanState, ['scanning','available','quarantined','failed'], 'asset.scanState'); this.positive(item.version, 'asset.version');
+    return item;
+  }
+  decodeSecurityRoot(value) {
+    const item = this.record(value, 'security root');
+    this.text(item.securityDomainId, 'securityRoot.securityDomainId'); this.text(item.rootNodeId, 'securityRoot.rootNodeId');
+    this.positive(item.permissionVersion, 'securityRoot.permissionVersion'); this.oneOf(item.creatorCapability, ['manage_access'], 'securityRoot.creatorCapability');
+    this.positive(item.nodeVersion, 'securityRoot.nodeVersion'); this.positive(item.securityEpoch, 'securityRoot.securityEpoch');
     return item;
   }
   decodeCommand(value, decodeValue) {

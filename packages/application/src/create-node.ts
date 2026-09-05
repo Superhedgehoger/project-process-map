@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { eventTopic, type DomainEvent, type OutboxMessage } from "../../domain/src/events.ts";
 import type { PrincipalId, TenantId } from "../../domain/src/identity.ts";
 import type { ProjectNode } from "../../domain/src/project-structure.ts";
+import { ApplicationError } from "./errors.ts";
 import type { CommandScope, Persistence } from "./ports/persistence.ts";
 
 export type CreateNodeCommand = Readonly<{
@@ -41,6 +42,12 @@ export async function executeCreateNode(
   failurePoint?: CreateNodeFailurePoint,
 ): Promise<CreateNodeResult> {
   validate(command);
+  if (command.securityDomainId !== null) {
+    throw new ApplicationError(
+      "SECURITY_DOMAIN_ASSIGNMENT_REQUIRES_COMMAND",
+      "A sensitive root must be created through the security-domain command",
+    );
+  }
   const scope: CommandScope = {
     principalId: command.principalId,
     operation: "create_node",
@@ -65,6 +72,12 @@ export async function executeCreateNode(
     if (command.parentId !== null) {
       const parent = await transaction.nodes.get(command.parentId);
       if (parent === undefined || parent.projectId !== command.projectId) throw new Error("PARENT_NODE_NOT_FOUND");
+      if (parent.securityDomainId !== null) {
+        throw new ApplicationError(
+          "SECURITY_DOMAIN_ASSIGNMENT_REQUIRES_COMMAND",
+          "Creating a child under a sensitive node requires inheritance support",
+        );
+      }
     }
     const projectSequence = await transaction.sequences.next(command.projectId);
     const node: ProjectNode = {
@@ -149,4 +162,3 @@ function hash(value: unknown): string {
 function inject(expected: CreateNodeFailurePoint | undefined, actual: CreateNodeFailurePoint): void {
   if (expected === actual) throw new Error(`Injected failure: ${actual}`);
 }
-
