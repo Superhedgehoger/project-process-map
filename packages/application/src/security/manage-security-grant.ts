@@ -9,6 +9,7 @@ import type {
   SecurityGrantAuditAction,
   SecurityGrantAuditEntry,
 } from "../../../domain/src/security-access.ts";
+import { isCanonicalUtcTimestamp } from "../../../domain/src/security-access.ts";
 import { assertProjectSecurityStable, canAccessProjectObject } from "../access/project-security.ts";
 import { ApplicationError } from "../errors.ts";
 import type { CommandScope, Persistence, TransactionContext } from "../ports/persistence.ts";
@@ -298,7 +299,7 @@ function validate(command: ManageSecurityGrantCommand): void {
     throw new ApplicationError("VALIDATION_FAILED", "revoke does not accept capability or expiry");
   }
   if (command.expiresAtUtc !== null
-    && (!command.expiresAtUtc.endsWith("Z") || Number.isNaN(Date.parse(command.expiresAtUtc)))) {
+    && !isCanonicalUtcTimestamp(command.expiresAtUtc)) {
     throw new ApplicationError("VALIDATION_FAILED", "expiresAtUtc must be UTC");
   }
   if (!command.occurredAtUtc.endsWith("Z") || Number.isNaN(Date.parse(command.occurredAtUtc))) {

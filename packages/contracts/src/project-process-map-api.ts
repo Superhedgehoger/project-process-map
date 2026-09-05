@@ -58,6 +58,28 @@ export type CreateSecurityRootRequest = Readonly<{
   expectedNodeVersion: number;
   reason: string;
 }>;
+export type ApiSecurityGrant = Readonly<{
+  securityDomainId: string;
+  targetPrincipalId: string;
+  capability: "view" | "contribute" | "edit" | "manage_access";
+  status: "active" | "revoked";
+  expiresAtUtc: string | null;
+  grantVersion: number;
+  permissionVersion: number;
+  domainVersion: number;
+}>;
+export type SetSecurityGrantRequest = Readonly<{
+  capability: ApiSecurityGrant["capability"];
+  expiresAtUtc: string | null;
+  expectedGrantVersion: number | null;
+  expectedDomainVersion: number;
+  reason: string;
+}>;
+export type RevokeSecurityGrantRequest = Readonly<{
+  expectedGrantVersion: number;
+  expectedDomainVersion: number;
+  reason: string;
+}>;
 export type CreateTaskRequest = Readonly<{
   title: string;
   taskId?: string;
@@ -181,6 +203,27 @@ export function decodeSecurityRoot(value: unknown): ApiSecurityRoot {
   };
 }
 
+export function decodeSecurityGrant(value: unknown): ApiSecurityGrant {
+  const record = object(value, "security grant");
+  exactKeys(record, [
+    "securityDomainId", "targetPrincipalId", "capability", "status", "expiresAtUtc",
+    "grantVersion", "permissionVersion", "domainVersion",
+  ], "security grant");
+  return {
+    securityDomainId: string(record.securityDomainId, "securityGrant.securityDomainId"),
+    targetPrincipalId: string(record.targetPrincipalId, "securityGrant.targetPrincipalId"),
+    capability: oneOf(
+      record.capability, ["view", "contribute", "edit", "manage_access"] as const,
+      "securityGrant.capability",
+    ),
+    status: oneOf(record.status, ["active", "revoked"] as const, "securityGrant.status"),
+    expiresAtUtc: nullableUtcString(record.expiresAtUtc, "securityGrant.expiresAtUtc"),
+    grantVersion: positiveInteger(record.grantVersion, "securityGrant.grantVersion"),
+    permissionVersion: positiveInteger(record.permissionVersion, "securityGrant.permissionVersion"),
+    domainVersion: positiveInteger(record.domainVersion, "securityGrant.domainVersion"),
+  };
+}
+
 export class ContractDecodeError extends Error {
   constructor(message: string) {
     super(message);
@@ -217,6 +260,24 @@ function boolean(value: unknown, name: string): boolean {
 
 function nullableNonEmptyString(value: unknown, name: string): string | null {
   return value === null ? null : string(value, name);
+}
+
+function nullableUtcString(value: unknown, name: string): string | null {
+  if (value === null) return null;
+  const parsed = string(value, name);
+  if (!isCanonicalUtcString(parsed)) throw new ContractDecodeError(`${name} must be UTC`);
+  return parsed;
+}
+
+function exactKeys(record: Record<string, unknown>, allowed: readonly string[], name: string): void {
+  const fields = new Set(allowed);
+  if (Object.keys(record).some((key) => !fields.has(key))) throw new ContractDecodeError(`${name} contains unsupported fields`);
+}
+
+function isCanonicalUtcString(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return false;
+  const parsed = Date.parse(value);
+  return !Number.isNaN(parsed) && new Date(parsed).toISOString() === value;
 }
 
 function positiveInteger(value: unknown, name: string): number {

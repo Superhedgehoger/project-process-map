@@ -8,9 +8,11 @@ import type { Persistence } from "../../../../packages/application/src/ports/per
 import { ActOnTaskHandler, type TaskCommandAction } from "../../../../packages/application/src/tasks/act-on-task.ts";
 import { CreateTaskHandler, listTasksForNodeInTransaction } from "../../../../packages/application/src/tasks/create-task.ts";
 import { CreateSecurityRootHandler } from "../../../../packages/application/src/security/create-security-root.ts";
+import { ManageSecurityGrantHandler } from "../../../../packages/application/src/security/manage-security-grant.ts";
 import type { ApiNode } from "../../../../packages/contracts/src/project-process-map-api.ts";
 import { principalId, type PrincipalId, type TenantId } from "../../../../packages/domain/src/identity.ts";
 import type { ProjectNode } from "../../../../packages/domain/src/project-structure.ts";
+import { isCanonicalUtcTimestamp } from "../../../../packages/domain/src/security-access.ts";
 import { deterministicPublicId, optionalBodyBoolean, optionalBodyString, readJson, requiredHeader, requiredPositiveInteger, requiredString, sendJson } from "../http.ts";
 
 export type ProductRequestIdentity = Readonly<{ tenantId: TenantId; principalId: PrincipalId }>;
@@ -87,6 +89,43 @@ export async function routeProjectRequest(
   }
   const taskMatch = url.pathname.match(/^\/api\/nodes\/([^/]+)\/tasks$/);
   const securityRootMatch = url.pathname.match(/^\/api\/nodes\/([^/]+)\/security-domain$/);
+  const securityGrantActionMatch = url.pathname.match(
+    /^\/api\/security-domains\/([^/]+)\/grants\/([^/]+)\/actions\/([^/]+)$/,
+  );
+  if (request.method === "POST" && securityGrantActionMatch?.[1] !== undefined
+    && securityGrantActionMatch[2] !== undefined && securityGrantActionMatch[3] !== undefined) {
+    const securityDomainId = decodePathIdentifier(securityGrantActionMatch[1]);
+    const targetPrincipalId = principalId(decodePathIdentifier(securityGrantActionMatch[2]));
+    const action = securityGrantAction(securityGrantActionMatch[3]);
+    const body = await readJson(request);
+    const allowedFields = action === "set"
+      ? ["capability", "expiresAtUtc", "expectedGrantVersion", "expectedDomainVersion", "reason"]
+      : ["expectedGrantVersion", "expectedDomainVersion", "reason"];
+    assertExactFields(body, allowedFields);
+    const idempotencyKey = requiredHeader(request, "idempotency-key");
+    const principalKey = commandKey(identity, idempotencyKey);
+    const result = await new ManageSecurityGrantHandler(persistence).execute({
+      tenantId: identity.tenantId,
+      commandId: deterministicPublicId(`cmd-security-grant-${action}`, principalKey),
+      idempotencyKey,
+      correlationId: request.headers["x-correlation-id"]?.toString() ?? randomUUID(),
+      principalId: identity.principalId,
+      projectId: "phase0-project",
+      securityDomainId,
+      targetPrincipalId,
+      action,
+      capability: action === "set" ? requiredCapability(body, "capability") : null,
+      expiresAtUtc: action === "set" ? requiredNullableUtc(body, "expiresAtUtc") : null,
+      expectedGrantVersion: action === "set"
+        ? requiredNullablePositiveInteger(body, "expectedGrantVersion")
+        : requiredPositiveInteger(body, "expectedGrantVersion"),
+      expectedDomainVersion: requiredPositiveInteger(body, "expectedDomainVersion"),
+      reason: requiredString(body, "reason"),
+      occurredAtUtc: new Date().toISOString(),
+    });
+    sendJson(response, 200, result);
+    return true;
+  }
   if (request.method === "POST" && securityRootMatch?.[1] !== undefined) {
     const nodeId = decodeURIComponent(securityRootMatch[1]);
     const body = await readJson(request);
@@ -218,6 +257,55 @@ export async function routeProjectRequest(
     return true;
   }
   return false;
+}
+
+function securityGrantAction(value: string): "set" | "revoke" {
+  if (value === "set" || value === "revoke") return value;
+  throw new ApplicationError("NOT_FOUND", "Security grant action not found");
+}
+
+function decodePathIdentifier(value: string): string {
+  try {
+    const decoded = decodeURIComponent(value);
+    if (decoded.trim().length === 0 || decoded.includes("\u0000")) throw new Error("invalid identifier");
+    return decoded;
+  } catch {
+    throw new ApplicationError("VALIDATION_FAILED", "Path identifier is invalid");
+  }
+}
+
+function assertExactFields(body: Record<string, unknown>, allowed: readonly string[]): void {
+  const allowedFields = new Set(allowed);
+  if (Object.keys(body).some((field) => !allowedFields.has(field))) {
+    throw new ApplicationError("VALIDATION_FAILED", "Request body contains unsupported fields");
+  }
+}
+
+function requiredNullablePositiveInteger(body: Record<string, unknown>, name: string): number | null {
+  const value = body[name];
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new ApplicationError("VALIDATION_FAILED", `${name} must be null or a positive integer`);
+  }
+  return value;
+}
+
+function requiredNullableUtc(body: Record<string, unknown>, name: string): string | null {
+  const value = body[name];
+  if (value === null) return null;
+  if (typeof value !== "string" || !isCanonicalUtcTimestamp(value)) {
+    throw new ApplicationError("VALIDATION_FAILED", `${name} must be null or a UTC timestamp`);
+  }
+  return value;
+}
+
+function requiredCapability(
+  body: Record<string, unknown>,
+  name: string,
+): "view" | "contribute" | "edit" | "manage_access" {
+  const value = body[name];
+  if (value === "view" || value === "contribute" || value === "edit" || value === "manage_access") return value;
+  throw new ApplicationError("VALIDATION_FAILED", `${name} is invalid`);
 }
 
 function taskAction(value: string): TaskCommandAction {

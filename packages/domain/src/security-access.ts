@@ -61,13 +61,20 @@ export function grantAllows(
   atUtc: string,
 ): boolean {
   if (grant?.status !== "active") return false;
+  if (!isCanonicalUtcTimestamp(atUtc)) return false;
   const evaluatedAt = Date.parse(atUtc);
-  if (Number.isNaN(evaluatedAt)) return false;
   if (grant.expiresAtUtc !== null) {
+    if (!isCanonicalUtcTimestamp(grant.expiresAtUtc)) return false;
     const expiresAt = Date.parse(grant.expiresAtUtc);
-    if (Number.isNaN(expiresAt) || expiresAt <= evaluatedAt) return false;
+    if (expiresAt <= evaluatedAt) return false;
   }
   return capabilityRank[grant.capability] >= capabilityRank[required];
+}
+
+export function isCanonicalUtcTimestamp(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return false;
+  const parsed = Date.parse(value);
+  return !Number.isNaN(parsed) && new Date(parsed).toISOString() === value;
 }
 
 export function isPermanentSecurityAdministrator(grant: SecurityGrant): boolean {

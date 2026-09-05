@@ -20,6 +20,18 @@ class ProjectProcessMapBrowserClient {
       method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': this.requiredKey(idempotencyKey) }, body: JSON.stringify(input)
     }, true, value => this.decodeCommand(value, item => this.decodeSecurityRoot(item)));
   }
+  setSecurityGrant(securityDomainId, targetPrincipalId, input, idempotencyKey) {
+    return this.securityGrantAction(securityDomainId, targetPrincipalId, 'set', input, idempotencyKey);
+  }
+  revokeSecurityGrant(securityDomainId, targetPrincipalId, input, idempotencyKey) {
+    return this.securityGrantAction(securityDomainId, targetPrincipalId, 'revoke', input, idempotencyKey);
+  }
+  securityGrantAction(securityDomainId, targetPrincipalId, action, input, idempotencyKey) {
+    if (!['set','revoke'].includes(action)) throw new Error('security grant action is invalid');
+    return this.request('/api/security-domains/' + encodeURIComponent(securityDomainId) + '/grants/' + encodeURIComponent(targetPrincipalId) + '/actions/' + action, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': this.requiredKey(idempotencyKey) }, body: JSON.stringify(input)
+    }, true, value => this.decodeCommand(value, item => this.decodeSecurityGrant(item)));
+  }
   createTask(nodeId, input, idempotencyKey) {
     return this.request('/api/nodes/' + encodeURIComponent(nodeId) + '/tasks', {
       method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': this.requiredKey(idempotencyKey) }, body: JSON.stringify(input)
@@ -129,6 +141,20 @@ class ProjectProcessMapBrowserClient {
     this.positive(item.nodeVersion, 'securityRoot.nodeVersion'); this.positive(item.securityEpoch, 'securityRoot.securityEpoch');
     return item;
   }
+  decodeSecurityGrant(value) {
+    const item = this.record(value, 'security grant');
+    this.exactFields(item, ['securityDomainId','targetPrincipalId','capability','status','expiresAtUtc','grantVersion','permissionVersion','domainVersion'], 'security grant');
+    return {
+      securityDomainId: this.text(item.securityDomainId, 'securityGrant.securityDomainId'),
+      targetPrincipalId: this.text(item.targetPrincipalId, 'securityGrant.targetPrincipalId'),
+      capability: this.oneOf(item.capability, ['view','contribute','edit','manage_access'], 'securityGrant.capability'),
+      status: this.oneOf(item.status, ['active','revoked'], 'securityGrant.status'),
+      expiresAtUtc: this.nullableUtc(item.expiresAtUtc, 'securityGrant.expiresAtUtc'),
+      grantVersion: this.positive(item.grantVersion, 'securityGrant.grantVersion'),
+      permissionVersion: this.positive(item.permissionVersion, 'securityGrant.permissionVersion'),
+      domainVersion: this.positive(item.domainVersion, 'securityGrant.domainVersion')
+    };
+  }
   decodeCommand(value, decodeValue) {
     const item = this.record(value, 'command result');
     if (typeof item.replayed !== 'boolean') throw new Error('command replayed must be boolean');
@@ -140,9 +166,11 @@ class ProjectProcessMapBrowserClient {
   }
   text(value, name) { if (typeof value !== 'string' || value.length === 0) throw new Error(name + ' must be a non-empty string'); return value; }
   nullableText(value, name) { if (value !== null) this.text(value, name); return value; }
+  nullableUtc(value, name) { if (value !== null && (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(this.text(value, name)) || Number.isNaN(Date.parse(value)) || new Date(Date.parse(value)).toISOString() !== value)) throw new Error(name + ' must be UTC'); return value; }
   positive(value, name) { if (!Number.isSafeInteger(value) || value <= 0) throw new Error(name + ' must be a positive integer'); return value; }
   nonNegative(value, name) { if (!Number.isSafeInteger(value) || value < 0) throw new Error(name + ' must be a non-negative integer'); return value; }
   oneOf(value, options, name) { if (typeof value !== 'string' || !options.includes(value)) throw new Error(name + ' is invalid'); return value; }
+  exactFields(value, allowed, name) { const fields = new Set(allowed); if (Object.keys(value).some(key => !fields.has(key))) throw new Error(name + ' contains unsupported fields'); }
 }
 globalThis.ProjectProcessMapBrowserClient = ProjectProcessMapBrowserClient;
 `;

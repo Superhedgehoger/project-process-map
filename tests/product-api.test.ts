@@ -5,7 +5,7 @@ import test from "node:test";
 import { Script } from "node:vm";
 import { createProductApi, type ProductApiOptions } from "../apps/product-api/src/app.ts";
 import { startProductApiServer } from "../apps/product-api/src/server.ts";
-import { decodeCommandResult, decodeSecurityRoot, decodeTaskSummary } from "../packages/contracts/src/project-process-map-api.ts";
+import { decodeCommandResult, decodeSecurityGrant, decodeSecurityRoot, decodeTaskSummary } from "../packages/contracts/src/project-process-map-api.ts";
 import { resolveExternalIdentity } from "../packages/application/src/identity/resolve-external-identity.ts";
 import { MemoryAssetContent } from "../packages/adapters/src/memory/asset-content.ts";
 import { MemoryPersistence } from "../packages/adapters/src/memory/persistence.ts";
@@ -312,6 +312,294 @@ test("TC-SEC-001 Product API creates one sensitive root while an ungranted membe
   assert.equal(ungrantedExisting.body, ungrantedMissing.body);
 });
 
+test("TC-SEC-003B Product API exposes strict Grant actions without existence leakage", async () => {
+  const persistence = new MemoryPersistence();
+  const assetContent = new MemoryAssetContent();
+  const u6Api = createProductApi({ collaborationMode: "disabled", persistence, assetContent });
+  const domainId = await createApiSecurityRoot(u6Api, "grant-api-root");
+  const viewer = await apiIdentity(persistence, assetContent, "U4-viewer", "member");
+  const ungrantedManager = await apiIdentity(persistence, assetContent, "U3-manager", "project_manager");
+
+  const setViewer = grantRequest(u6Api, domainId, viewer.principalId, "set", "set-viewer", {
+    capability: "view",
+    expiresAtUtc: null,
+    expectedGrantVersion: null,
+    expectedDomainVersion: 1,
+    reason: "viewer needs access",
+  });
+  const created = await setViewer;
+  assert.equal(created.status, 200);
+  const result = decodeCommandResult(JSON.parse(created.body), decodeSecurityGrant);
+  assert.equal(result.value.capability, "view");
+  assert.equal(result.value.permissionVersion, 2);
+  assert.equal(created.body.includes("viewer needs access"), false);
+
+  const replay = await grantRequest(u6Api, domainId, viewer.principalId, "set", "set-viewer", {
+    capability: "view",
+    expiresAtUtc: null,
+    expectedGrantVersion: null,
+    expectedDomainVersion: 1,
+    reason: "viewer needs access",
+  });
+  assert.equal(replay.status, 200);
+  assert.equal(decodeCommandResult(JSON.parse(replay.body), decodeSecurityGrant).replayed, true);
+
+  const changed = await grantRequest(u6Api, domainId, viewer.principalId, "set", "change-viewer", {
+    capability: "contribute",
+    expiresAtUtc: null,
+    expectedGrantVersion: 1,
+    expectedDomainVersion: 2,
+    reason: "change capability",
+  });
+  assert.equal(changed.status, 200);
+  assert.equal(decodeCommandResult(JSON.parse(changed.body), decodeSecurityGrant).value.grantVersion, 2);
+  const temporary = await grantRequest(u6Api, domainId, viewer.principalId, "set", "expire-viewer", {
+    capability: "contribute",
+    expiresAtUtc: "2099-01-01T00:00:00.000Z",
+    expectedGrantVersion: 2,
+    expectedDomainVersion: 3,
+    reason: "temporary access",
+  });
+  assert.equal(temporary.status, 200);
+  assert.equal(decodeCommandResult(JSON.parse(temporary.body), decodeSecurityGrant).value.expiresAtUtc, "2099-01-01T00:00:00.000Z");
+  const revoked = await grantRequest(u6Api, domainId, viewer.principalId, "revoke", "revoke-viewer", {
+    expectedGrantVersion: 3,
+    expectedDomainVersion: 4,
+    reason: "access ended",
+  });
+  assert.equal(revoked.status, 200);
+  assert.equal(decodeCommandResult(JSON.parse(revoked.body), decodeSecurityGrant).value.status, "revoked");
+
+  const differentPayload = await grantRequest(u6Api, domainId, viewer.principalId, "set", "set-viewer", {
+    capability: "edit",
+    expiresAtUtc: null,
+    expectedGrantVersion: 1,
+    expectedDomainVersion: 2,
+    reason: "different",
+  });
+  assert.equal(differentPayload.status, 409);
+  assert.equal((JSON.parse(differentPayload.body) as { code: string }).code, "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD");
+
+  const spoofed = await grantRequest(u6Api, domainId, viewer.principalId, "set", "spoofed", {
+    capability: "edit",
+    expiresAtUtc: null,
+    expectedGrantVersion: 1,
+    expectedDomainVersion: 2,
+    reason: "attempt",
+    actorPrincipalId: viewer.principalId,
+  });
+  assert.equal(spoofed.status, 422);
+  assert.equal((JSON.parse(spoofed.body) as { code: string }).code, "VALIDATION_FAILED");
+
+  const missingKey = await call(
+    u6Api,
+    `/api/security-domains/${encodeURIComponent(domainId)}/grants/${encodeURIComponent(viewer.principalId)}/actions/set`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        capability: "edit", expiresAtUtc: null, expectedGrantVersion: 1, expectedDomainVersion: 2, reason: "missing key",
+      }),
+    },
+  );
+  assert.equal(missingKey.status, 422);
+  assert.equal((JSON.parse(missingKey.body) as { code: string }).code, "IDEMPOTENCY_KEY_REQUIRED");
+
+  const invalidRevokeVersion = await grantRequest(
+    u6Api, domainId, viewer.principalId, "revoke", "invalid-revoke-version",
+    { expectedGrantVersion: null, expectedDomainVersion: 2, reason: "invalid" },
+  );
+  assert.equal(invalidRevokeVersion.status, 422);
+  assert.equal((JSON.parse(invalidRevokeVersion.body) as { code: string }).code, "VALIDATION_FAILED");
+
+  const invalidCalendar = await grantRequest(u6Api, domainId, viewer.principalId, "set", "invalid-calendar", {
+    capability: "view",
+    expiresAtUtc: "2099-02-30T00:00:00.000Z",
+    expectedGrantVersion: 4,
+    expectedDomainVersion: 5,
+    reason: "invalid calendar date",
+  });
+  assert.equal(invalidCalendar.status, 422);
+  assert.equal((JSON.parse(invalidCalendar.body) as { code: string }).code, "VALIDATION_FAILED");
+
+  const malformedPath = await call(u6Api, "/api/security-domains/%/grants/x/actions/set", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "malformed-path" },
+    body: JSON.stringify({
+      capability: "view", expiresAtUtc: null, expectedGrantVersion: null, expectedDomainVersion: 1, reason: "invalid path",
+    }),
+  });
+  assert.equal(malformedPath.status, 422);
+  assert.deepEqual(JSON.parse(malformedPath.body), { code: "VALIDATION_FAILED", message: "Path identifier is invalid" });
+
+  const authorization = { authorization: "Bearer U3-manager", "content-type": "application/json" };
+  const deniedBodies: string[] = [];
+  for (const [candidateDomain, candidateTarget, key] of [
+    [domainId, viewer.principalId, "existing-existing"],
+    ["missing-domain", viewer.principalId, "missing-existing"],
+    [domainId, "missing-target", "existing-missing"],
+    ["missing-domain", "missing-target", "missing-missing"],
+  ] as const) {
+    const denied = await grantRequest(
+      ungrantedManager.api, candidateDomain, candidateTarget, "set", key,
+      { capability: "view", expiresAtUtc: null, expectedGrantVersion: null, expectedDomainVersion: 1, reason: "probe" },
+      authorization,
+    );
+    assert.equal(denied.status, 404);
+    deniedBodies.push(denied.body);
+    assert.equal(denied.body.includes(candidateDomain), false);
+    assert.equal(denied.body.includes(candidateTarget), false);
+    assert.equal(denied.body.includes("probe"), false);
+  }
+  assert.equal(new Set(deniedBodies).size, 1);
+
+  const lastAdministrator = await grantRequest(u6Api, domainId, "phase0-user", "revoke", "last-admin", {
+    expectedGrantVersion: 1,
+    expectedDomainVersion: 5,
+    reason: "invalid last admin removal",
+  });
+  assert.equal(lastAdministrator.status, 409);
+  assert.equal((JSON.parse(lastAdministrator.body) as { code: string }).code, "SECURITY_DOMAIN_LAST_ADMINISTRATOR");
+
+  const state = await persistence.read(phase0Tenant, async (transaction) => ({
+    domain: await transaction.securityDomains.get(domainId),
+    viewerGrant: await transaction.securityGrants.get(domainId, viewer.principalId),
+    audits: await transaction.securityGrantAudits.listByDomain(domainId),
+  }));
+  assert.equal(state.domain?.version, 5);
+  assert.equal(state.viewerGrant?.status, "revoked");
+  assert.equal(state.audits.length, 4);
+  assert.equal(JSON.stringify(state.audits).includes("viewer needs access"), false);
+});
+
+test("TC-SEC-003B fixed identities cannot turn RBAC, view/edit or an old receipt into Grant write access", async () => {
+  const persistence = new MemoryPersistence();
+  const assetContent = new MemoryAssetContent();
+  const managerApi = createProductApi({ collaborationMode: "disabled", persistence, assetContent });
+  const domainId = await createApiSecurityRoot(managerApi, "grant-api-identities");
+  const identities = {
+    U0: await apiIdentity(persistence, assetContent, "U0-non-member", null),
+    U1: await apiIdentity(persistence, assetContent, "U1-member", "member"),
+    U2: await apiIdentity(persistence, assetContent, "U2-owner-unmodeled", "member"),
+    U3: await apiIdentity(persistence, assetContent, "U3-ungranted-manager", "project_manager"),
+    U4: await apiIdentity(persistence, assetContent, "U4-viewer", "member"),
+    U5: await apiIdentity(persistence, assetContent, "U5-editor", "member"),
+    U7: await apiIdentity(persistence, assetContent, "U7-admin-unmodeled", "project_manager"),
+    U8: await apiIdentity(persistence, assetContent, "U8-emergency-unmodeled", "member"),
+    U9: await apiIdentity(persistence, assetContent, "U9-revoked", "project_manager"),
+  };
+  let domainVersion = 1;
+  for (const [identity, capability] of [[identities.U4, "view"], [identities.U5, "edit"], [identities.U9, "manage_access"]] as const) {
+    const response = await grantRequest(managerApi, domainId, identity.principalId, "set", `seed-${capability}`, {
+      capability,
+      expiresAtUtc: null,
+      expectedGrantVersion: null,
+      expectedDomainVersion: domainVersion,
+      reason: "fixed identity setup",
+    });
+    assert.equal(response.status, 200);
+    domainVersion += 1;
+  }
+
+  const viewerNode = await call(identities.U4.api, "/api/nodes/N-03", {
+    headers: { authorization: "Bearer U4-viewer" },
+  });
+  assert.equal(viewerNode.status, 200);
+
+  for (const [name, identity] of Object.entries(identities).filter(([name]) => name !== "U9")) {
+    const denied = await grantRequest(identity.api, domainId, identities.U1.principalId, "set", `denied-${name}`, {
+      capability: "view",
+      expiresAtUtc: null,
+      expectedGrantVersion: null,
+      expectedDomainVersion: domainVersion,
+      reason: "must not pass",
+    }, { authorization: `Bearer ${identity.subject}`, "content-type": "application/json" });
+    assert.equal(denied.status, 404, name);
+  }
+
+  const oldReceiptInput = {
+    capability: "view" as const,
+    expiresAtUtc: null,
+    expectedGrantVersion: null,
+    expectedDomainVersion: domainVersion,
+    reason: "before revocation",
+  };
+  const beforeRevocation = await grantRequest(
+    identities.U9.api, domainId, identities.U1.principalId, "set", "u9-old-receipt", oldReceiptInput,
+    { authorization: "Bearer U9-revoked", "content-type": "application/json" },
+  );
+  assert.equal(beforeRevocation.status, 200);
+  domainVersion += 1;
+  const revokeU9 = await grantRequest(managerApi, domainId, identities.U9.principalId, "revoke", "revoke-u9", {
+    expectedGrantVersion: 1,
+    expectedDomainVersion: domainVersion,
+    reason: "remove access",
+  });
+  assert.equal(revokeU9.status, 200);
+  const replayAfterRevocation = await grantRequest(
+    identities.U9.api, domainId, identities.U1.principalId, "set", "u9-old-receipt", oldReceiptInput,
+    { authorization: "Bearer U9-revoked", "content-type": "application/json" },
+  );
+  assert.equal(replayAfterRevocation.status, 404);
+});
+
+test("TC-SEC-003B API concurrency and all last-admin mutations preserve an actionable administrator", async () => {
+  for (const action of ["revoke", "downgrade", "temporary"] as const) {
+    const persistence = new MemoryPersistence();
+    const assetContent = new MemoryAssetContent();
+    const managerApi = createProductApi({ collaborationMode: "disabled", persistence, assetContent });
+    const domainId = await createApiSecurityRoot(managerApi, `last-admin-${action}`);
+    const response = action === "revoke"
+      ? await grantRequest(managerApi, domainId, "phase0-user", "revoke", `last-${action}`, {
+        expectedGrantVersion: 1, expectedDomainVersion: 1, reason: "forbidden",
+      })
+      : await grantRequest(managerApi, domainId, "phase0-user", "set", `last-${action}`, {
+        capability: action === "downgrade" ? "edit" : "manage_access",
+        expiresAtUtc: action === "temporary" ? "2099-01-01T00:00:00.000Z" : null,
+        expectedGrantVersion: 1,
+        expectedDomainVersion: 1,
+        reason: "forbidden",
+      });
+    assert.equal(response.status, 409, action);
+    assert.equal((JSON.parse(response.body) as { code: string }).code, "SECURITY_DOMAIN_LAST_ADMINISTRATOR", action);
+    const grant = await persistence.read(phase0Tenant, async (transaction) => (
+      await transaction.securityGrants.get(domainId, principalId("phase0-user"))
+    ));
+    assert.equal(grant?.capability, "manage_access", action);
+    assert.equal(grant?.status, "active", action);
+    assert.equal(grant?.expiresAtUtc, null, action);
+  }
+
+  const persistence = new MemoryPersistence();
+  const assetContent = new MemoryAssetContent();
+  const managerApi = createProductApi({ collaborationMode: "disabled", persistence, assetContent });
+  const domainId = await createApiSecurityRoot(managerApi, "admin-race");
+  const secondAdmin = await apiIdentity(persistence, assetContent, "U6-second-admin", "project_manager");
+  assert.equal((await grantRequest(managerApi, domainId, secondAdmin.principalId, "set", "add-second-admin", {
+    capability: "manage_access",
+    expiresAtUtc: null,
+    expectedGrantVersion: null,
+    expectedDomainVersion: 1,
+    reason: "backup administrator",
+  })).status, 200);
+  const results = await Promise.all([
+    grantRequest(managerApi, domainId, secondAdmin.principalId, "revoke", "first-revokes-second", {
+      expectedGrantVersion: 1, expectedDomainVersion: 2, reason: "race",
+    }),
+    grantRequest(
+      secondAdmin.api, domainId, "phase0-user", "revoke", "second-revokes-first",
+      { expectedGrantVersion: 1, expectedDomainVersion: 2, reason: "race" },
+      { authorization: "Bearer U6-second-admin", "content-type": "application/json" },
+    ),
+  ]);
+  assert.equal(results.filter((result) => result.status === 200).length, 1);
+  const grants = await persistence.read(phase0Tenant, async (transaction) => (
+    await transaction.securityGrants.listByDomain(domainId)
+  ));
+  assert.equal(grants.filter((grant) => grant.status === "active"
+    && grant.capability === "manage_access" && grant.expiresAtUtc === null).length, 1);
+});
+
 test("P0-ND-01 public network binding is rejected before runtime dependencies are opened", async () => {
   const persistence = new MemoryPersistence();
   await assert.rejects(startProductApiServer(
@@ -354,6 +642,55 @@ test("ARCH-GATE-RECOVERY-002 operator recovery routes are deny-by-default", asyn
 
 function createTestProductApi(options: Omit<ProductApiOptions, "persistence" | "assetContent">) {
   return createProductApi({ ...options, persistence: new MemoryPersistence(), assetContent: new MemoryAssetContent() });
+}
+
+async function createApiSecurityRoot(handler: Handler, key: string): Promise<string> {
+  const response = await call(handler, "/api/nodes/N-03/security-domain", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": key },
+    body: JSON.stringify({ expectedNodeVersion: 1, reason: "grant API fixture" }),
+  });
+  assert.equal(response.status, 201);
+  return decodeCommandResult(JSON.parse(response.body), decodeSecurityRoot).value.securityDomainId;
+}
+
+async function apiIdentity(
+  persistence: MemoryPersistence,
+  assetContent: MemoryAssetContent,
+  subject: string,
+  role: "project_manager" | "member" | null,
+) {
+  const external = { provider: "huly", connectionId: "test", externalTenantRef: "workspace-1", externalSubjectRef: subject } as const;
+  const api = createProductApi({
+    collaborationMode: "huly",
+    persistence,
+    assetContent,
+    externalIdentityVerifier: { authenticate: async () => external },
+    collaborationProjectionConfigured: true,
+  });
+  const resolved = await resolveExternalIdentity(persistence, { tenantId: phase0Tenant, ...external });
+  if (role !== null) await grantProjectMembership(persistence, phase0Tenant, "phase0-project", resolved, { role });
+  return { api, principalId: resolved, subject };
+}
+
+async function grantRequest(
+  handler: Handler,
+  domainId: string,
+  targetPrincipalId: string,
+  action: "set" | "revoke",
+  idempotencyKey: string,
+  body: Record<string, unknown>,
+  headers: Record<string, string> = { "content-type": "application/json" },
+) {
+  return await call(
+    handler,
+    `/api/security-domains/${encodeURIComponent(domainId)}/grants/${encodeURIComponent(targetPrincipalId)}/actions/${action}`,
+    {
+      method: "POST",
+      headers: { ...headers, "idempotency-key": idempotencyKey },
+      body: JSON.stringify(body),
+    },
+  );
 }
 
 async function call(

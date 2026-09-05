@@ -230,4 +230,5 @@ test("TC-SEC-001 an expired or malformed Grant timestamp fails closed", () => {
   assert.equal(grantAllows(grant, "view", "2026-09-04T00:05:00.000Z"), false);
   assert.equal(grantAllows(grant, "view", "not-a-time"), false);
   assert.equal(grantAllows({ ...grant, expiresAtUtc: "not-a-time" }, "view", "2026-09-04T00:01:00.000Z"), false);
+  assert.equal(grantAllows({ ...grant, expiresAtUtc: "2026-02-30T00:00:00.000Z" }, "view", "2026-02-01T00:00:00.000Z"), false);
 });
