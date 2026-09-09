@@ -134,7 +134,11 @@ export interface SecurityGrantAuditRepository {
 export interface SecurityDomainMigrationRepository {
   get(migrationId: string): Promise<SecurityDomainMigration | undefined>;
   insert(migration: SecurityDomainMigration): Promise<void>;
-  update(migration: SecurityDomainMigration, expectedVersion: number): Promise<void>;
+  saveProgressPreservingPlan(
+    migrationId: string,
+    migration: SecurityDomainMigration,
+    expectedVersion: number,
+  ): Promise<void>;
   listRecoverable(): Promise<SecurityDomainMigration[]>;
 }
 

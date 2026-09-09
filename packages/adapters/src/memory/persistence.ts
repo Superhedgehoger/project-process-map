@@ -8,7 +8,7 @@ import type { IntegrationOperation, IntegrationStepAttempt } from "../../../doma
 import type { ProjectNode } from "../../../domain/src/project-structure.ts";
 import type { ProjectMembership, ProjectMembershipSecurityAuditEntry } from "../../../domain/src/project-access.ts";
 import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
-import type { SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
+import { assertSecurityMigrationProgressChange, type SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
 import { grantAllows, isCanonicalUtcTimestamp, isPermanentSecurityAdministrator, type SecurityDomain, type SecurityGrant, type SecurityGrantAuditEntry } from "../../../domain/src/security-access.ts";
 import type {
   ClaimOptions,
@@ -561,12 +561,23 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
         }
         state.securityMigrations.set(key, structuredClone(migration));
       },
-      update: async (migration, expectedVersion) => {
-        assertTenant(tenantId, migration.tenantId);
-        const key = `${tenantPrefix}${migration.id}`;
+      saveProgressPreservingPlan: async (migrationId, migration, expectedVersion) => {
+        const key = `${tenantPrefix}${migrationId}`;
         const current = state.securityMigrations.get(key);
         if (current === undefined) throw new Error("SECURITY_MIGRATION_NOT_FOUND");
         if (current.version !== expectedVersion || migration.version !== expectedVersion + 1) throw new Error("SECURITY_MIGRATION_VERSION_CONFLICT");
+        if (migration.tenantId !== tenantId || migration.id !== migrationId
+          || migration.projectId !== current.projectId || migration.rootNodeId !== current.rootNodeId
+          || migration.sourceSecurityDomainId !== current.sourceSecurityDomainId
+          || migration.targetSecurityDomainId !== current.targetSecurityDomainId
+          || migration.hierarchyRevision !== current.hierarchyRevision
+          || migration.sourceSecurityEpoch !== current.sourceSecurityEpoch
+          || migration.targetSecurityEpoch !== current.targetSecurityEpoch
+          || migration.totalItems !== current.totalItems || migration.deadlineAtUtc !== current.deadlineAtUtc
+          || migration.createdAtUtc !== current.createdAtUtc) {
+          throw new Error("SECURITY_MIGRATION_PLAN_IMMUTABLE");
+        }
+        assertSecurityMigrationProgressChange(current, migration);
         state.securityMigrations.set(key, structuredClone(migration));
       },
       listRecoverable: async () => [...state.securityMigrations.values()]

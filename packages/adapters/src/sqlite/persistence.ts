@@ -11,7 +11,7 @@ import type { IntegrationOperation, IntegrationStepAttempt } from "../../../doma
 import type { ProjectNode } from "../../../domain/src/project-structure.ts";
 import type { ProjectMembership, ProjectMembershipSecurityAuditEntry } from "../../../domain/src/project-access.ts";
 import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
-import type { SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
+import { assertSecurityMigrationProgressChange, type SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
 import {
   grantAllows,
   isCanonicalUtcTimestamp,
@@ -801,9 +801,9 @@ export class SqlitePersistence implements Persistence {
       securityMigrations: {
         get: async (migrationId) => {
           const row = this.#database.prepare(`
-            SELECT migration_json FROM security_domain_migrations WHERE tenant_id = ? AND migration_id = ?
+            SELECT * FROM security_domain_migrations WHERE tenant_id = ? AND migration_id = ?
           `).get(tenantId, migrationId);
-          return row === undefined ? undefined : parseJson<SecurityDomainMigration>(asString(row.migration_json));
+          return row === undefined ? undefined : securityMigrationFromRow(row);
         },
         insert: async (migration) => {
           assertTenant(tenantId, migration.tenantId);
@@ -818,26 +818,49 @@ export class SqlitePersistence implements Persistence {
             migration.updatedAtUtc, migration.version, JSON.stringify(migration),
           );
         },
-        update: async (migration, expectedVersion) => {
-          assertTenant(tenantId, migration.tenantId);
-          if (migration.version !== expectedVersion + 1) throw new Error("SECURITY_MIGRATION_VERSION_CONFLICT");
+        saveProgressPreservingPlan: async (migrationId, migration, expectedVersion) => {
+          const currentRow = this.#database.prepare(`
+            SELECT tenant_id, migration_id, project_id, root_node_id, state, hierarchy_revision,
+                   cursor, total_items, migrated_items, next_attempt_at_utc, updated_at_utc, version, migration_json
+            FROM security_domain_migrations WHERE tenant_id = ? AND migration_id = ?
+          `).get(tenantId, migrationId);
+          if (currentRow === undefined) throw new Error("SECURITY_MIGRATION_NOT_FOUND");
+          const current = securityMigrationFromRow(currentRow);
+          if (current.version !== asNumber(currentRow.version) || current.version !== expectedVersion
+            || migration.version !== expectedVersion + 1) {
+            throw new Error("SECURITY_MIGRATION_VERSION_CONFLICT");
+          }
+          if (migration.tenantId !== tenantId || migration.id !== migrationId
+            || migration.projectId !== current.projectId || migration.rootNodeId !== current.rootNodeId
+            || migration.sourceSecurityDomainId !== current.sourceSecurityDomainId
+            || migration.targetSecurityDomainId !== current.targetSecurityDomainId
+            || migration.hierarchyRevision !== current.hierarchyRevision
+            || migration.sourceSecurityEpoch !== current.sourceSecurityEpoch
+            || migration.targetSecurityEpoch !== current.targetSecurityEpoch
+            || migration.totalItems !== current.totalItems || migration.deadlineAtUtc !== current.deadlineAtUtc
+            || migration.createdAtUtc !== current.createdAtUtc) {
+            throw new Error("SECURITY_MIGRATION_PLAN_IMMUTABLE");
+          }
+          assertSecurityMigrationProgressChange(current, migration);
           const result = this.#database.prepare(`
             UPDATE security_domain_migrations
-            SET state = ?, hierarchy_revision = ?, cursor = ?, total_items = ?, migrated_items = ?,
+            SET state = ?, cursor = ?, migrated_items = ?,
                 next_attempt_at_utc = ?, updated_at_utc = ?, version = ?, migration_json = ?
             WHERE tenant_id = ? AND migration_id = ? AND version = ?
           `).run(
-            migration.state, migration.hierarchyRevision, migration.cursor, migration.totalItems, migration.migratedItems,
+            migration.state, migration.cursor, migration.migratedItems,
             migration.nextAttemptAtUtc, migration.updatedAtUtc, migration.version, JSON.stringify(migration),
-            tenantId, migration.id, expectedVersion,
+            tenantId, migrationId, expectedVersion,
           );
           if (result.changes !== 1) throw new Error("SECURITY_MIGRATION_VERSION_CONFLICT");
         },
         listRecoverable: async () => this.#database.prepare(`
-          SELECT migration_json FROM security_domain_migrations
-          WHERE tenant_id = ? AND state NOT IN ('committed', 'rolled_back')
+          SELECT * FROM security_domain_migrations
+          WHERE tenant_id = ?
           ORDER BY migration_id
-        `).all(tenantId).map((row) => parseJson<SecurityDomainMigration>(asString(row.migration_json))),
+        `).all(tenantId)
+          .map((row) => securityMigrationFromRow(row))
+          .filter((migration) => !["committed", "rolled_back"].includes(migration.state)),
       },
       receipts: {
         get: async <T>(scope: CommandScope) => {
@@ -1474,6 +1497,20 @@ function nodeFromRow(row: Record<string, unknown>): ProjectNode {
     version: asNumber(row.version),
     deletedAtUtc: nullableString(row.deleted_at_utc),
   };
+}
+
+function securityMigrationFromRow(row: Record<string, unknown>): SecurityDomainMigration {
+  const migration = parseJson<SecurityDomainMigration>(asString(row.migration_json));
+  if (migration.tenantId !== asString(row.tenant_id) || migration.id !== asString(row.migration_id)
+    || migration.projectId !== asString(row.project_id) || migration.rootNodeId !== asString(row.root_node_id)
+    || migration.state !== asString(row.state) || migration.hierarchyRevision !== asNumber(row.hierarchy_revision)
+    || migration.cursor !== nullableString(row.cursor) || migration.totalItems !== asNumber(row.total_items)
+    || migration.migratedItems !== asNumber(row.migrated_items)
+    || migration.nextAttemptAtUtc !== nullableString(row.next_attempt_at_utc)
+    || migration.updatedAtUtc !== asString(row.updated_at_utc) || migration.version !== asNumber(row.version)) {
+    throw new Error("SECURITY_MIGRATION_PERSISTENCE_INCONSISTENT");
+  }
+  return migration;
 }
 
 function principalFromRow(row: Record<string, unknown>): Principal {

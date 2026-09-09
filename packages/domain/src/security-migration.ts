@@ -82,6 +82,29 @@ export function checkpointSecurityMigration(
   };
 }
 
+export function assertSecurityMigrationProgressChange(
+  current: SecurityDomainMigration,
+  proposed: SecurityDomainMigration,
+): void {
+  const expected = current.state === proposed.state
+    ? checkpointSecurityMigration(current, {
+      cursor: proposed.cursor ?? "",
+      migratedItems: proposed.migratedItems,
+      occurredAtUtc: proposed.updatedAtUtc,
+    })
+    : transitionSecurityMigration(current, proposed.state, proposed.updatedAtUtc, proposed.failure);
+  if (!sameMigration(expected, proposed)) throw new Error("SECURITY_MIGRATION_PROGRESS_INVALID");
+}
+
+function sameMigration(left: SecurityDomainMigration, right: SecurityDomainMigration): boolean {
+  const fields: ReadonlyArray<keyof SecurityDomainMigration> = [
+    "tenantId", "id", "projectId", "rootNodeId", "sourceSecurityDomainId", "targetSecurityDomainId",
+    "hierarchyRevision", "sourceSecurityEpoch", "targetSecurityEpoch", "state", "cursor", "totalItems",
+    "migratedItems", "failure", "nextAttemptAtUtc", "deadlineAtUtc", "version", "createdAtUtc", "updatedAtUtc",
+  ];
+  return fields.every((field) => left[field] === right[field]);
+}
+
 function assertUtc(value: string): void {
   if (!value.endsWith("Z") || Number.isNaN(Date.parse(value))) throw new Error("INVALID_UTC_TIMESTAMP");
 }
