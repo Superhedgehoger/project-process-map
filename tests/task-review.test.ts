@@ -257,7 +257,9 @@ test("P0-05A-T1a a manager can recover an unassigned task without taking over as
       await fixture.persistence.transaction(tenant, async (transaction) => {
         const task = await transaction.tasks.get("task-assignment");
         assert.ok(task);
-        await transaction.tasks.update({ ...task, assigneePrincipalId: null, version: task.version + 1 }, task.version);
+        await transaction.tasks.savePreservingSecurityOwnership(
+          task.id, { ...task, assigneePrincipalId: null, version: task.version + 1 }, task.version,
+        );
       });
       const handler = new ActOnTaskHandler(fixture.persistence);
       await assert.rejects(handler.execute({

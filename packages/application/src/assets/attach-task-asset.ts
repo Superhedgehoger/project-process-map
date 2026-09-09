@@ -185,18 +185,18 @@ export class AttachTaskAssetHandler {
       if (operation.fingerprint !== fingerprint) throw new Error("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD");
       if (asset.lifecycleState === "failed" || asset.lifecycleState === "initiated") {
         const uploading = transitionAsset(asset, "uploading");
-        await transaction.assets.update(uploading, asset.version);
+        await transaction.assets.savePreservingSecurityOwnership(asset.id, uploading, asset.version);
         asset = uploading;
       }
       if (asset.lifecycleState === "uploading") {
         const scanning = transitionAsset(asset, "scanning");
-        await transaction.assets.update(scanning, asset.version);
+        await transaction.assets.savePreservingSecurityOwnership(asset.id, scanning, asset.version);
         asset = scanning;
       }
       if (asset.lifecycleState === "scanning" && stored.scanState !== "scanning") {
         const target = stored.scanState === "available" ? "available" : stored.scanState === "quarantined" ? "quarantined" : "failed";
         const updated = transitionAsset(asset, target, target === "failed" ? { failureCode: "CONTENT_SCAN_FAILED" } : {});
-        await transaction.assets.update(updated, asset.version);
+        await transaction.assets.savePreservingSecurityOwnership(asset.id, updated, asset.version);
         asset = updated;
       }
       const priorReplica = await transaction.externalBindings.getByOwner("asset", asset.id, "blob_replica");
@@ -275,12 +275,12 @@ export class AttachTaskAssetHandler {
       if (operation.state === "completed") return;
       if (asset.lifecycleState === "initiated" || asset.lifecycleState === "failed") {
         const uploading = transitionAsset(asset, "uploading");
-        await transaction.assets.update(uploading, asset.version);
+        await transaction.assets.savePreservingSecurityOwnership(asset.id, uploading, asset.version);
         asset = uploading;
       }
       if (asset.lifecycleState === "uploading") {
         const failed = transitionAsset(asset, "failed", { failureCode: "CONTENT_STORE_FAILED" });
-        await transaction.assets.update(failed, asset.version);
+        await transaction.assets.savePreservingSecurityOwnership(asset.id, failed, asset.version);
       }
       const updated = advanceIntegrationOperation(operation, {
         state: "retryable",

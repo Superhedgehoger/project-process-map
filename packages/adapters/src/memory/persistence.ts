@@ -244,12 +244,16 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
         if (state.tasks.has(key)) throw new Error("TASK_ALREADY_EXISTS");
         state.tasks.set(key, structuredClone(task));
       },
-      update: async (task, expectedVersion) => {
-        assertTenant(tenantId, task.tenantId);
-        const key = `${tenantPrefix}${task.id}`;
+      savePreservingSecurityOwnership: async (taskId, task, expectedVersion) => {
+        const key = `${tenantPrefix}${taskId}`;
         const existing = state.tasks.get(key);
         if (existing === undefined) throw new Error("TASK_NOT_FOUND");
         if (existing.version !== expectedVersion || task.version !== expectedVersion + 1) throw new Error("TASK_VERSION_CONFLICT");
+        if (task.tenantId !== tenantId || task.id !== taskId
+          || task.projectId !== existing.projectId || task.ownerNodeId !== existing.ownerNodeId
+          || task.securityDomainId !== existing.securityDomainId || task.securityEpoch !== existing.securityEpoch) {
+          throw new Error("TASK_SECURITY_OWNERSHIP_IMMUTABLE");
+        }
         state.tasks.set(key, structuredClone(task));
       },
       appendReviewAction: async (action) => {
@@ -277,12 +281,17 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
         if (state.assets.has(key)) throw new Error("ASSET_ALREADY_EXISTS");
         state.assets.set(key, structuredClone(asset));
       },
-      update: async (asset, expectedVersion) => {
-        assertTenant(tenantId, asset.tenantId);
-        const key = `${tenantPrefix}${asset.id}`;
+      savePreservingSecurityOwnership: async (assetId, asset, expectedVersion) => {
+        const key = `${tenantPrefix}${assetId}`;
         const existing = state.assets.get(key);
         if (existing === undefined) throw new Error("ASSET_NOT_FOUND");
         if (existing.version !== expectedVersion || asset.version !== expectedVersion + 1) throw new Error("ASSET_VERSION_CONFLICT");
+        if (asset.tenantId !== tenantId || asset.id !== assetId
+          || asset.projectId !== existing.projectId || asset.ownerNodeId !== existing.ownerNodeId
+          || asset.securityDomainId !== existing.securityDomainId || asset.securityEpoch !== existing.securityEpoch
+          || asset.uploaderPrincipalId !== existing.uploaderPrincipalId) {
+          throw new Error("ASSET_SECURITY_OWNERSHIP_IMMUTABLE");
+        }
         state.assets.set(key, structuredClone(asset));
       },
       insertBinding: async (binding) => {

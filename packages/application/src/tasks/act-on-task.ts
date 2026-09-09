@@ -107,7 +107,7 @@ export class ActOnTaskHandler {
 
       const existingActions = await transaction.tasks.listReviewActions(task.id);
       const { updated, reviewAction } = applyAction(task, existingActions, command);
-      await transaction.tasks.update(updated, task.version);
+      await transaction.tasks.savePreservingSecurityOwnership(task.id, updated, task.version);
       if (reviewAction !== null) await transaction.tasks.appendReviewAction(reviewAction);
       const allActions = reviewAction === null ? existingActions : [...existingActions, reviewAction];
       const event = await appendEvent(transaction, command, updated, reviewAction?.cycleNumber ?? null);

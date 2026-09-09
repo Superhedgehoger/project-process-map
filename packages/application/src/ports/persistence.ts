@@ -46,7 +46,7 @@ export interface TaskRepository {
   listByNode(nodeId: string): Promise<ProductTask[]>;
   hasSecurityDomainReference(securityDomainId: string): Promise<boolean>;
   insert(task: ProductTask): Promise<void>;
-  update(task: ProductTask, expectedVersion: number): Promise<void>;
+  savePreservingSecurityOwnership(taskId: string, task: ProductTask, expectedVersion: number): Promise<void>;
   appendReviewAction(action: TaskReviewActionRecord): Promise<void>;
   listReviewActions(taskId: string): Promise<TaskReviewActionRecord[]>;
 }
@@ -56,7 +56,7 @@ export interface AssetRepository {
   hasForNode(nodeId: string): Promise<boolean>;
   hasSecurityDomainReference(securityDomainId: string): Promise<boolean>;
   insert(asset: Asset): Promise<void>;
-  update(asset: Asset, expectedVersion: number): Promise<void>;
+  savePreservingSecurityOwnership(assetId: string, asset: Asset, expectedVersion: number): Promise<void>;
   insertBinding(binding: AssetBinding): Promise<void>;
   listBindings(targetType: AssetBinding["targetType"], targetId: string): Promise<AssetBinding[]>;
 }

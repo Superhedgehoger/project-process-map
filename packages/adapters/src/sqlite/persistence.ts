@@ -225,14 +225,31 @@ export class SqlitePersistence implements Persistence {
             VALUES (?, ?, ?, ?, ?, ?, ?)
           `).run(tenantId, task.id, task.projectId, task.ownerNodeId, task.executionState, task.version, JSON.stringify(task));
         },
-        update: async (task, expectedVersion) => {
-          assertTenant(tenantId, task.tenantId);
-          if (task.version !== expectedVersion + 1) throw new Error("TASK_VERSION_CONFLICT");
+        savePreservingSecurityOwnership: async (taskId, task, expectedVersion) => {
+          const currentRow = this.#database.prepare(`
+            SELECT tenant_id, task_id, project_id, owner_node_id, version, task_json
+            FROM product_tasks WHERE tenant_id = ? AND task_id = ?
+          `).get(tenantId, taskId);
+          if (currentRow === undefined) throw new Error("TASK_NOT_FOUND");
+          const current = productTaskFromJson(asString(currentRow.task_json));
+          if (current.tenantId !== asString(currentRow.tenant_id) || current.id !== asString(currentRow.task_id)
+            || current.projectId !== asString(currentRow.project_id) || current.ownerNodeId !== asString(currentRow.owner_node_id)) {
+            throw new Error("TASK_SECURITY_OWNERSHIP_IMMUTABLE");
+          }
+          if (current.version !== asNumber(currentRow.version) || current.version !== expectedVersion
+            || task.version !== expectedVersion + 1) {
+            throw new Error("TASK_VERSION_CONFLICT");
+          }
+          if (task.tenantId !== tenantId || task.id !== taskId
+            || task.projectId !== current.projectId || task.ownerNodeId !== current.ownerNodeId
+            || task.securityDomainId !== current.securityDomainId || task.securityEpoch !== current.securityEpoch) {
+            throw new Error("TASK_SECURITY_OWNERSHIP_IMMUTABLE");
+          }
           const result = this.#database.prepare(`
             UPDATE product_tasks
-            SET project_id = ?, owner_node_id = ?, lifecycle_state = ?, version = ?, task_json = ?
+            SET lifecycle_state = ?, version = ?, task_json = ?
             WHERE tenant_id = ? AND task_id = ? AND version = ?
-          `).run(task.projectId, task.ownerNodeId, task.executionState, task.version, JSON.stringify(task), tenantId, task.id, expectedVersion);
+          `).run(task.executionState, task.version, JSON.stringify(task), tenantId, taskId, expectedVersion);
           if (result.changes !== 1) throw new Error("TASK_VERSION_CONFLICT");
         },
         appendReviewAction: async (action) => {
@@ -269,14 +286,32 @@ export class SqlitePersistence implements Persistence {
             VALUES (?, ?, ?, ?, ?, ?, ?)
           `).run(tenantId, asset.id, asset.projectId, asset.ownerNodeId, asset.lifecycleState, asset.version, JSON.stringify(asset));
         },
-        update: async (asset, expectedVersion) => {
-          assertTenant(tenantId, asset.tenantId);
-          if (asset.version !== expectedVersion + 1) throw new Error("ASSET_VERSION_CONFLICT");
+        savePreservingSecurityOwnership: async (assetId, asset, expectedVersion) => {
+          const currentRow = this.#database.prepare(`
+            SELECT tenant_id, asset_id, project_id, owner_node_id, version, asset_json
+            FROM assets WHERE tenant_id = ? AND asset_id = ?
+          `).get(tenantId, assetId);
+          if (currentRow === undefined) throw new Error("ASSET_NOT_FOUND");
+          const current = parseJson<Asset>(asString(currentRow.asset_json));
+          if (current.tenantId !== asString(currentRow.tenant_id) || current.id !== asString(currentRow.asset_id)
+            || current.projectId !== asString(currentRow.project_id) || current.ownerNodeId !== asString(currentRow.owner_node_id)) {
+            throw new Error("ASSET_SECURITY_OWNERSHIP_IMMUTABLE");
+          }
+          if (current.version !== asNumber(currentRow.version) || current.version !== expectedVersion
+            || asset.version !== expectedVersion + 1) {
+            throw new Error("ASSET_VERSION_CONFLICT");
+          }
+          if (asset.tenantId !== tenantId || asset.id !== assetId
+            || asset.projectId !== current.projectId || asset.ownerNodeId !== current.ownerNodeId
+            || asset.securityDomainId !== current.securityDomainId || asset.securityEpoch !== current.securityEpoch
+            || asset.uploaderPrincipalId !== current.uploaderPrincipalId) {
+            throw new Error("ASSET_SECURITY_OWNERSHIP_IMMUTABLE");
+          }
           const result = this.#database.prepare(`
             UPDATE assets
-            SET project_id = ?, owner_node_id = ?, lifecycle_state = ?, version = ?, asset_json = ?
+            SET lifecycle_state = ?, version = ?, asset_json = ?
             WHERE tenant_id = ? AND asset_id = ? AND version = ?
-          `).run(asset.projectId, asset.ownerNodeId, asset.lifecycleState, asset.version, JSON.stringify(asset), tenantId, asset.id, expectedVersion);
+          `).run(asset.lifecycleState, asset.version, JSON.stringify(asset), tenantId, assetId, expectedVersion);
           if (result.changes !== 1) throw new Error("ASSET_VERSION_CONFLICT");
         },
         insertBinding: async (binding) => {

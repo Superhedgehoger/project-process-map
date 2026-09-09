@@ -14,8 +14,8 @@
 
 ## 必须保持的不变量
 
-1. 既有 Task 的 `tenantId/id/projectId/ownerNodeId/securityDomainId/securityEpoch/createdAtUtc` 对普通保存不可变。
-2. 既有 Asset 的 `tenantId/id/projectId/ownerNodeId/securityDomainId/securityEpoch/uploaderPrincipalId/createdAtUtc` 对普通保存不可变；不得通过生命周期更新改变上传者或安全归属。
+1. 既有 Task 当前模型中的 `tenantId/id/projectId/ownerNodeId/securityDomainId/securityEpoch` 对普通保存不可变。
+2. 既有 Asset 当前模型中的 `tenantId/id/projectId/ownerNodeId/securityDomainId/securityEpoch/uploaderPrincipalId` 对普通保存不可变；不得通过生命周期更新改变上传者或安全归属。Task/Asset 当前领域模型均无 `createdAtUtc`，本切片不得凭空扩展产品模型。
 3. Memory/SQLite 持久层自身执行 CAS 与不可变字段校验，稳定拒绝 public→sensitive、sensitive→public、Domain A→B、epoch 重写、跨节点、跨项目和身份字段重写。
 4. 即使事务回调捕获持久层错误，也不得留下部分写；SQLite 重启与并发 CAS 保留原始安全归属。
 5. 普通 Task 生命周期、验收周期、负责人/验收人改派，以及 Asset initiated→uploading→scanning→终态转换继续工作。
