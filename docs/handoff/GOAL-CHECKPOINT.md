@@ -5,16 +5,16 @@
 - 状态：GOAL_RUNNING
 - Goal threadId：`01a06f07-6235-7a43-b22d-fc042cf0f6aa`
 - Branch：`main`
-- 已验收实现提交：`9956ee1`（`feat: inherit security for new child nodes`）。
-- upstream：`origin/main` 已包含 `8b56009` 与全部 TC-SEC-003C 提交；本地待推送提交为 `9956ee1`，另有本 checkpoint/下一 Task Packet 待提交。
-- 工作区：TC-SEC-002A 实现、测试、Evidence 与 Phase 状态已提交；当前仅下一 Task Packet 与 checkpoint 更新未提交。
+- 已验收实现提交：`2f6c6a4`（`feat: protect task and asset security ownership`）。
+- upstream：`origin/main` 当前为 `302fd69`；本地待推送提交为 `2f6c6a4`，另有本 checkpoint/下一 Task Packet 待提交。
+- 工作区：TC-SEC-002B 实现、测试、Evidence 与 Phase 状态已提交；当前仅下一 Task Packet 与 checkpoint 更新未提交。
 - 当前 Gate：P0-07 敏感 ACL（总项继续进行中）
-- 最近完成：P0-07 / TC-SEC-002A 敏感父节点下新建后代的同域继承
-- 验收：独立安全 Review 首轮纪元/正式根一致性阻断已修复，最终 PASS；定向复验 19/19；`pnpm check` 113/113；14 个 Huly 镜像锁；扩展边界；`git diff --check`；凭据/私钥特征扫描均通过。
-- 当前 Task：P0-07 / TC-SEC-002B Task/Asset 安全归属不可变守卫
-- Task Packet：`docs/agent-tasks/P0-07-TC-SEC-002B.md`
+- 最近完成：P0-07 / TC-SEC-002B Task/Asset 安全归属不可变守卫
+- 验收：独立安全 Review 首轮 Task Packet/SQLite 漂移阻断已修复，最终 PASS；定向复验 32/32；`pnpm check` 118/118；14 个 Huly 镜像锁；扩展边界；`git diff --check`；凭据/私钥特征扫描均通过。
+- 当前 Task：P0-07 / TC-SEC-002C 安全域迁移计划不可变与进度保存守卫
+- Task Packet：`docs/agent-tasks/P0-07-TC-SEC-002C.md`
 - Blocker：本地提交尚未推送；GitHub push 需要当前 payload 的明确确认。
-- next_action：提交本 checkpoint 与 TC-SEC-002B Task Packet；获准后推送 `8b56009..HEAD`。推送成功后收紧普通 Task/Asset persistence save 的安全归属不可变约束，补 Memory/SQLite 篡改、捕获错误、CAS、并发与重启验收。
+- next_action：提交本 checkpoint 与 TC-SEC-002C Task Packet；获准后推送 `302fd69..HEAD`。推送成功后移除通用 migration update，加入计划不可变、CAS、row/JSON 漂移、捕获错误、并发与重启守卫。
 
 旧会话 `e8e244ee-0c02-4769-8bd0-37f1ca8bd485` 仅是该 Git 工作树所在目录，不得作为聊天执行上下文恢复。原绑定的“project-process-map Goal 恢复”和“用量恢复后继续任务”自动任务已于 2026-09-05 暂停；后续不得把本 Goal 的恢复投递到该旧会话。
 
