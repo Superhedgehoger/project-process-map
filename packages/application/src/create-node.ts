@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import { eventTopic, type DomainEvent, type OutboxMessage } from "../../domain/src/events.ts";
 import type { PrincipalId, TenantId } from "../../domain/src/identity.ts";
+import { isProjectManager } from "../../domain/src/project-access.ts";
 import type { ProjectNode } from "../../domain/src/project-structure.ts";
+import { canAccessProjectObject, assertProjectSecurityStable } from "./access/project-security.ts";
 import { ApplicationError } from "./errors.ts";
-import type { CommandScope, Persistence } from "./ports/persistence.ts";
+import type { CommandScope, Persistence, TransactionContext } from "./ports/persistence.ts";
 
 export type CreateNodeCommand = Readonly<{
   tenantId: TenantId;
@@ -63,22 +65,17 @@ export async function executeCreateNode(
   });
 
   return await persistence.transaction(command.tenantId, async (transaction) => {
+    const inheritance = await resolveInheritance(transaction, command, new Date().toISOString());
     const previous = await transaction.receipts.get<Omit<CreateNodeResult, "replayed">>(scope);
     if (previous !== undefined) {
       if (previous.fingerprint !== fingerprint) throw new Error("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD");
+      if (previous.result.node.securityDomainId !== inheritance.securityDomainId
+        || previous.result.node.securityEpoch !== inheritance.securityEpoch) {
+        throw new ApplicationError("PARENT_NODE_NOT_FOUND", "Parent node not found");
+      }
       return { ...structuredClone(previous.result), replayed: true };
     }
     if (await transaction.nodes.get(command.nodeId) !== undefined) throw new Error(`Aggregate already exists: ${command.nodeId}`);
-    if (command.parentId !== null) {
-      const parent = await transaction.nodes.get(command.parentId);
-      if (parent === undefined || parent.projectId !== command.projectId) throw new Error("PARENT_NODE_NOT_FOUND");
-      if (parent.securityDomainId !== null) {
-        throw new ApplicationError(
-          "SECURITY_DOMAIN_ASSIGNMENT_REQUIRES_COMMAND",
-          "Creating a child under a sensitive node requires inheritance support",
-        );
-      }
-    }
     const projectSequence = await transaction.sequences.next(command.projectId);
     const node: ProjectNode = {
       tenantId: command.tenantId,
@@ -87,8 +84,8 @@ export async function executeCreateNode(
       parentId: command.parentId,
       title: command.title,
       kind: command.kind ?? "work_package",
-      securityDomainId: command.securityDomainId,
-      securityEpoch: 1,
+      securityDomainId: inheritance.securityDomainId,
+      securityEpoch: inheritance.securityEpoch,
       version: 1,
       deletedAtUtc: null,
     };
@@ -108,7 +105,7 @@ export async function executeCreateNode(
       occurredAtUtc: command.occurredAtUtc,
       correlationId: command.correlationId,
       causationId: command.commandId,
-      originalSecurityDomainId: command.securityDomainId,
+      originalSecurityDomainId: node.securityDomainId,
       originalSecurityEpoch: node.securityEpoch,
       payload: { nodeId: node.id, parentId: node.parentId, title: node.title, kind: node.kind },
     };
@@ -138,6 +135,37 @@ export async function executeCreateNode(
     inject(failurePoint, "after_idempotency");
     return { ...result, replayed: false };
   });
+}
+
+async function resolveInheritance(
+  transaction: TransactionContext,
+  command: CreateNodeCommand,
+  authorizationAtUtc: string,
+): Promise<Readonly<{ securityDomainId: string | null; securityEpoch: number }>> {
+  if (command.parentId === null) return { securityDomainId: null, securityEpoch: 1 };
+  const parent = await transaction.nodes.get(command.parentId);
+  if (parent === undefined || parent.projectId !== command.projectId || parent.deletedAtUtc !== null) {
+    throw new ApplicationError("PARENT_NODE_NOT_FOUND", "Parent node not found");
+  }
+  if (parent.securityDomainId === null) return { securityDomainId: null, securityEpoch: 1 };
+
+  const principal = await transaction.principals.get(command.principalId);
+  const membership = await transaction.memberships.get(command.projectId, command.principalId);
+  const domain = await transaction.securityDomains.get(parent.securityDomainId);
+  const root = domain === undefined ? undefined : await transaction.nodes.get(domain.rootNodeId);
+  if (principal?.status !== "active" || principal.kind !== "user" || !isProjectManager(membership)
+    || domain === undefined || domain.projectId !== command.projectId || domain.deletedAtUtc !== null
+    || domain.parentSecurityDomainId !== null || root === undefined || root.projectId !== command.projectId
+    || root.deletedAtUtc !== null || root.securityDomainId !== domain.id
+    || parent.securityEpoch !== root.securityEpoch
+    || !await canAccessProjectObject(
+      transaction, membership, command.principalId, command.projectId,
+      domain.id, "edit", authorizationAtUtc,
+    )) {
+    throw new ApplicationError("PARENT_NODE_NOT_FOUND", "Parent node not found");
+  }
+  await assertProjectSecurityStable(transaction, command.projectId);
+  return { securityDomainId: domain.id, securityEpoch: parent.securityEpoch };
 }
 
 function validate(command: CreateNodeCommand): void {

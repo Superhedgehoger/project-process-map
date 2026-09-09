@@ -14,6 +14,7 @@ import {
   type CreateSecurityRootCommand,
   type CreateSecurityRootFailurePoint,
 } from "../packages/application/src/security/create-security-root.ts";
+import { ManageSecurityGrantHandler } from "../packages/application/src/security/manage-security-grant.ts";
 import { CreateTaskHandler } from "../packages/application/src/tasks/create-task.ts";
 import { MemoryPersistence } from "../packages/adapters/src/memory/persistence.ts";
 import { MemoryAssetContent } from "../packages/adapters/src/memory/asset-content.ts";
@@ -88,6 +89,23 @@ function command(overrides: Partial<CreateSecurityRootCommand> = {}): CreateSecu
     expectedNodeVersion: 1,
     reason: "项目商业方案需要限制访问",
     occurredAtUtc: "2026-09-04T11:01:00.000Z",
+    ...overrides,
+  };
+}
+
+function childCommand(overrides: Partial<Parameters<typeof executeCreateNode>[1]> = {}): Parameters<typeof executeCreateNode>[1] {
+  return {
+    tenantId: tenant,
+    commandId: "create-sensitive-child",
+    idempotencyKey: "create-sensitive-child",
+    correlationId: "security-inheritance",
+    principalId: manager,
+    projectId: "project-security",
+    nodeId: "sensitive-child",
+    parentId: "node-security",
+    title: "敏感后代",
+    securityDomainId: null,
+    occurredAtUtc: "2026-09-04T11:02:00.000Z",
     ...overrides,
   };
 }
@@ -306,19 +324,23 @@ test("TC-SEC-001 empty-leaf and legacy-ID guards fail closed without partial wri
   }
 });
 
-test("TC-SEC-001 a secured leaf protects inherited Task and Asset paths and rejects public children", async () => {
+test("TC-SEC-002A a sensitive child, Task and Asset inherit the parent domain", async () => {
   const persistence = new MemoryPersistence();
   try {
     await prepare(persistence);
     await new CreateSecurityRootHandler(persistence).execute(command());
-    await assert.rejects(executeCreateNode(persistence, {
+    const child = await executeCreateNode(persistence, {
       tenantId: tenant, commandId: "late-child", idempotencyKey: "late-child", correlationId: "security-root",
       principalId: manager, projectId: "project-security", nodeId: "late-child", parentId: "node-security",
-      title: "禁止公开后代", securityDomainId: null, occurredAtUtc: "2026-09-04T11:02:00.000Z",
-    }), /inheritance support/);
+      title: "敏感后代", securityDomainId: null, occurredAtUtc: "2026-09-04T11:02:00.000Z",
+    });
+    assert.equal(child.node.securityDomainId, command().securityDomainId);
+    assert.equal(child.node.securityEpoch, 2);
+    assert.equal(child.event.originalSecurityDomainId, command().securityDomainId);
+    assert.equal(child.event.originalSecurityEpoch, 2);
     const task = {
       tenantId: tenant, commandId: "secure-task", idempotencyKey: "secure-task", correlationId: "security-root",
-      principalId: manager, projectId: "project-security", nodeId: "node-security", taskId: "secure-task",
+      principalId: manager, projectId: "project-security", nodeId: "late-child", taskId: "secure-task",
       title: "敏感任务", assigneePrincipalId: manager, requiresAcceptance: false, reviewerPrincipalId: null,
       occurredAtUtc: "2026-09-04T11:03:00.000Z",
     } as const;
@@ -342,6 +364,360 @@ test("TC-SEC-001 a secured leaf protects inherited Task and Asset paths and reje
     assert.equal(stored.asset?.securityDomainId, command().securityDomainId);
   } finally {
     await persistence.close();
+  }
+});
+
+test("TC-SEC-002A sensitive inheritance and replay reauthorize in Memory and SQLite", async () => {
+  for (const name of ["memory", "sqlite"] as const) {
+    const current = await fixture(name);
+    try {
+      await prepare(current.persistence);
+      await new CreateSecurityRootHandler(current.persistence).execute(command());
+      const created = await executeCreateNode(current.persistence, childCommand());
+      assert.equal(created.node.securityDomainId, command().securityDomainId, name);
+      assert.equal(created.node.securityEpoch, 2, name);
+      assert.equal(created.event.originalSecurityDomainId, command().securityDomainId, name);
+      assert.equal(created.outbox.payload.originalSecurityEpoch, 2, name);
+      const replay = await executeCreateNode(current.persistence, childCommand({ commandId: "retry-sensitive-child" }));
+      assert.equal(replay.replayed, true, name);
+
+      const alternate = principalId(`alternate-security-manager-${name}`);
+      await grantProjectMembership(current.persistence, tenant, "project-security", alternate, { role: "project_manager" });
+      await new ManageSecurityGrantHandler(current.persistence).execute({
+        tenantId: tenant,
+        commandId: `grant-alternate-${name}`,
+        idempotencyKey: `grant-alternate-${name}`,
+        correlationId: "security-inheritance",
+        principalId: manager,
+        projectId: "project-security",
+        securityDomainId: command().securityDomainId,
+        targetPrincipalId: alternate,
+        action: "set",
+        capability: "manage_access",
+        expiresAtUtc: null,
+        expectedGrantVersion: null,
+        expectedDomainVersion: 1,
+        reason: "replacement administrator",
+        occurredAtUtc: "2026-09-04T11:03:00.000Z",
+      });
+      await new ManageSecurityGrantHandler(current.persistence).execute({
+        tenantId: tenant,
+        commandId: `revoke-original-${name}`,
+        idempotencyKey: `revoke-original-${name}`,
+        correlationId: "security-inheritance",
+        principalId: alternate,
+        projectId: "project-security",
+        securityDomainId: command().securityDomainId,
+        targetPrincipalId: manager,
+        action: "revoke",
+        capability: null,
+        expiresAtUtc: null,
+        expectedGrantVersion: 1,
+        expectedDomainVersion: 2,
+        reason: "remove access",
+        occurredAtUtc: "2026-09-04T11:04:00.000Z",
+      });
+      await assert.rejects(
+        executeCreateNode(current.persistence, childCommand({ commandId: "replay-after-grant-revoke" })),
+        (error) => error instanceof ApplicationError && error.code === "PARENT_NODE_NOT_FOUND",
+        name,
+      );
+    } finally {
+      await current.cleanup();
+    }
+  }
+});
+
+test("TC-SEC-002A a member with edit and a manager without Grant receive the same minimal parent error", async () => {
+  for (const name of ["memory", "sqlite"] as const) {
+    const current = await fixture(name);
+    try {
+      await prepare(current.persistence);
+      await new CreateSecurityRootHandler(current.persistence).execute(command());
+      await new ManageSecurityGrantHandler(current.persistence).execute({
+        tenantId: tenant,
+        commandId: `grant-member-edit-${name}`,
+        idempotencyKey: `grant-member-edit-${name}`,
+        correlationId: "security-inheritance",
+        principalId: manager,
+        projectId: "project-security",
+        securityDomainId: command().securityDomainId,
+        targetPrincipalId: member,
+        action: "set",
+        capability: "edit",
+        expiresAtUtc: null,
+        expectedGrantVersion: null,
+        expectedDomainVersion: 1,
+        reason: "edit content only",
+        occurredAtUtc: "2026-09-04T11:03:00.000Z",
+      });
+      const ungrantedManager = principalId(`ungranted-manager-${name}`);
+      await grantProjectMembership(current.persistence, tenant, "project-security", ungrantedManager, { role: "project_manager" });
+      const errors: ApplicationError[] = [];
+      for (const [actor, parentId] of [
+        [member, "node-security"],
+        [ungrantedManager, "node-security"],
+        [ungrantedManager, "missing-sensitive-parent"],
+      ] as const) {
+        try {
+          await executeCreateNode(current.persistence, childCommand({
+            commandId: `denied-${actor}-${parentId}-${name}`,
+            idempotencyKey: `denied-${actor}-${parentId}-${name}`,
+            nodeId: `denied-${actor}-${parentId}-${name}`,
+            principalId: actor,
+            parentId,
+          }));
+          assert.fail("expected parent denial");
+        } catch (error) {
+          assert.ok(error instanceof ApplicationError, name);
+          errors.push(error);
+        }
+      }
+      assert.deepEqual(errors.map((error) => [error.code, error.message]), [
+        ["PARENT_NODE_NOT_FOUND", "Parent node not found"],
+        ["PARENT_NODE_NOT_FOUND", "Parent node not found"],
+        ["PARENT_NODE_NOT_FOUND", "Parent node not found"],
+      ], name);
+    } finally {
+      await current.cleanup();
+    }
+  }
+});
+
+test("TC-SEC-002A inherited child creation rolls back at every existing failure point", async () => {
+  for (const name of ["memory", "sqlite"] as const) {
+    for (const failurePoint of ["after_aggregate", "after_event", "after_outbox", "after_idempotency"] as const) {
+      const current = await fixture(name);
+      try {
+        await prepare(current.persistence);
+        await new CreateSecurityRootHandler(current.persistence).execute(command());
+        const beforeEvents = (await current.events()).length;
+        const beforeOutbox = await current.outbox.countReady("9999-12-31T23:59:59.999Z");
+        await assert.rejects(
+          executeCreateNode(current.persistence, childCommand(), failurePoint),
+          new RegExp(failurePoint),
+          `${name}:${failurePoint}`,
+        );
+        const state = await current.persistence.read(tenant, async (transaction) => ({
+          node: await transaction.nodes.get(childCommand().nodeId),
+          receipt: await transaction.receipts.get({
+            principalId: manager,
+            operation: "create_node",
+            idempotencyKey: childCommand().idempotencyKey,
+          }),
+        }));
+        assert.equal(state.node, undefined, `${name}:${failurePoint}`);
+        assert.equal(state.receipt, undefined, `${name}:${failurePoint}`);
+        assert.equal((await current.events()).length, beforeEvents, `${name}:${failurePoint}`);
+        assert.equal(await current.outbox.countReady("9999-12-31T23:59:59.999Z"), beforeOutbox, `${name}:${failurePoint}`);
+      } finally {
+        await current.cleanup();
+      }
+    }
+  }
+});
+
+test("TC-SEC-002A legacy, nested and migrating parent scopes fail closed", async () => {
+  for (const name of ["memory", "sqlite"] as const) {
+    const current = await fixture(name);
+    try {
+      await prepare(current.persistence);
+      await new CreateSecurityRootHandler(current.persistence).execute(command());
+      await current.persistence.transaction(tenant, async (transaction) => {
+        await transaction.nodes.insert({
+          tenantId: tenant,
+          id: "legacy-sensitive-parent",
+          projectId: "project-security",
+          parentId: null,
+          title: "Legacy parent",
+          kind: "work_package",
+          securityDomainId: "legacy-only-domain",
+          securityEpoch: 1,
+          version: 1,
+          deletedAtUtc: null,
+        });
+        await transaction.nodes.insert({
+          tenantId: tenant,
+          id: "nested-sensitive-parent",
+          projectId: "project-security",
+          parentId: null,
+          title: "Nested parent",
+          kind: "work_package",
+          securityDomainId: "nested-sensitive-domain",
+          securityEpoch: 2,
+          version: 1,
+          deletedAtUtc: null,
+        });
+        await transaction.nodes.insert({
+          tenantId: tenant,
+          id: "stale-epoch-parent",
+          projectId: "project-security",
+          parentId: null,
+          title: "Stale epoch parent",
+          kind: "work_package",
+          securityDomainId: command().securityDomainId,
+          securityEpoch: 1,
+          version: 1,
+          deletedAtUtc: null,
+        });
+        await transaction.nodes.insert({
+          tenantId: tenant,
+          id: "deleted-formal-root",
+          projectId: "project-security",
+          parentId: null,
+          title: "Deleted formal root",
+          kind: "work_package",
+          securityDomainId: "deleted-root-domain",
+          securityEpoch: 2,
+          version: 1,
+          deletedAtUtc: "2026-09-04T11:03:00.000Z",
+        });
+        await transaction.nodes.insert({
+          tenantId: tenant,
+          id: "live-parent-with-deleted-root",
+          projectId: "project-security",
+          parentId: null,
+          title: "Live parent with deleted root",
+          kind: "work_package",
+          securityDomainId: "deleted-root-domain",
+          securityEpoch: 2,
+          version: 1,
+          deletedAtUtc: null,
+        });
+        await transaction.securityDomains.insert({
+          tenantId: tenant,
+          id: "nested-sensitive-domain",
+          projectId: "project-security",
+          rootNodeId: "nested-sensitive-parent",
+          parentSecurityDomainId: command().securityDomainId,
+          permissionVersion: 1,
+          version: 1,
+          createdByPrincipalId: manager,
+          createdAtUtc: "2026-09-04T11:03:00.000Z",
+          deletedAtUtc: null,
+        });
+        await transaction.securityDomains.insert({
+          tenantId: tenant,
+          id: "deleted-root-domain",
+          projectId: "project-security",
+          rootNodeId: "deleted-formal-root",
+          parentSecurityDomainId: null,
+          permissionVersion: 1,
+          version: 1,
+          createdByPrincipalId: manager,
+          createdAtUtc: "2026-09-04T11:03:00.000Z",
+          deletedAtUtc: null,
+        });
+        await transaction.securityGrants.insert({
+          tenantId: tenant,
+          id: "grant:nested-sensitive-domain:security-manager",
+          securityDomainId: "nested-sensitive-domain",
+          principalId: manager,
+          capability: "manage_access",
+          status: "active",
+          expiresAtUtc: null,
+          grantedByPrincipalId: manager,
+          reason: "test fixture",
+          version: 1,
+          createdAtUtc: "2026-09-04T11:03:00.000Z",
+          updatedAtUtc: "2026-09-04T11:03:00.000Z",
+        });
+        await transaction.securityGrants.insert({
+          tenantId: tenant,
+          id: "grant:deleted-root-domain:security-manager",
+          securityDomainId: "deleted-root-domain",
+          principalId: manager,
+          capability: "manage_access",
+          status: "active",
+          expiresAtUtc: null,
+          grantedByPrincipalId: manager,
+          reason: "test fixture",
+          version: 1,
+          createdAtUtc: "2026-09-04T11:03:00.000Z",
+          updatedAtUtc: "2026-09-04T11:03:00.000Z",
+        });
+      });
+      for (const parentId of [
+        "legacy-sensitive-parent",
+        "nested-sensitive-parent",
+        "stale-epoch-parent",
+        "live-parent-with-deleted-root",
+      ]) {
+        await assert.rejects(
+          executeCreateNode(current.persistence, childCommand({
+            commandId: `reject-${parentId}-${name}`,
+            idempotencyKey: `reject-${parentId}-${name}`,
+            nodeId: `child-of-${parentId}-${name}`,
+            parentId,
+          })),
+          (error) => error instanceof ApplicationError && error.code === "PARENT_NODE_NOT_FOUND",
+          `${name}:${parentId}`,
+        );
+      }
+      await current.persistence.transaction(tenant, async (transaction) => {
+        await transaction.securityMigrations.insert({
+          tenantId: tenant,
+          id: `inheritance-migration-${name}`,
+          projectId: "project-security",
+          rootNodeId: "node-security",
+          sourceSecurityDomainId: command().securityDomainId,
+          targetSecurityDomainId: "future-domain",
+          hierarchyRevision: 1,
+          sourceSecurityEpoch: 2,
+          targetSecurityEpoch: 3,
+          state: "active",
+          cursor: null,
+          totalItems: 1,
+          migratedItems: 0,
+          failure: null,
+          nextAttemptAtUtc: null,
+          deadlineAtUtc: "2026-09-04T12:00:00.000Z",
+          version: 1,
+          createdAtUtc: "2026-09-04T11:03:00.000Z",
+          updatedAtUtc: "2026-09-04T11:03:00.000Z",
+        });
+      });
+      await assert.rejects(
+        executeCreateNode(current.persistence, childCommand({
+          commandId: `reject-migration-${name}`,
+          idempotencyKey: `reject-migration-${name}`,
+        })),
+        (error) => error instanceof ApplicationError && error.code === "SECURITY_MIGRATION_IN_PROGRESS",
+        `${name}:migration`,
+      );
+    } finally {
+      await current.cleanup();
+    }
+  }
+});
+
+test("TC-SEC-002A SQLite concurrent retry and restart preserve one inherited child", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppm-sensitive-child-race-"));
+  const path = join(directory, "inheritance.sqlite");
+  const first = new SqlitePersistence({ path, busyTimeoutMilliseconds: 5_000 });
+  try {
+    await prepare(first);
+    await new CreateSecurityRootHandler(first).execute(command());
+    const second = new SqlitePersistence({ path, busyTimeoutMilliseconds: 5_000 });
+    const results = await Promise.all([
+      executeCreateNode(first, childCommand()),
+      executeCreateNode(second, childCommand({ commandId: "concurrent-sensitive-child" })),
+    ]);
+    assert.equal(results.filter((result) => result.replayed).length, 1);
+    assert.equal(results.every((result) => result.node.securityDomainId === command().securityDomainId), true);
+    await second.close();
+    await first.close();
+    const restarted = new SqlitePersistence({ path });
+    const node = await restarted.read(tenant, async (transaction) => transaction.nodes.get(childCommand().nodeId));
+    const events = (await restarted.listEvents(tenant)).filter((event) => event.aggregateId === childCommand().nodeId);
+    assert.equal(node?.securityDomainId, command().securityDomainId);
+    assert.equal(node?.securityEpoch, 2);
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.originalSecurityDomainId, command().securityDomainId);
+    await restarted.close();
+  } finally {
+    await first.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });
 
