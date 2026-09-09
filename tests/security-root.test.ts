@@ -21,6 +21,7 @@ import { MemoryAssetContent } from "../packages/adapters/src/memory/asset-conten
 import { SqlitePersistence } from "../packages/adapters/src/sqlite/persistence.ts";
 import type { DomainEvent } from "../packages/domain/src/events.ts";
 import { principalId, tenantId } from "../packages/domain/src/identity.ts";
+import { transitionSecurityMigration, type SecurityDomainMigration } from "../packages/domain/src/security-migration.ts";
 import { grantProjectMembership } from "./support/project-membership.ts";
 
 const tenant = tenantId("tenant-security-root");
@@ -655,7 +656,7 @@ test("TC-SEC-002A legacy, nested and migrating parent scopes fail closed", async
         );
       }
       await current.persistence.transaction(tenant, async (transaction) => {
-        await transaction.securityMigrations.insert({
+        const planned: SecurityDomainMigration = {
           tenantId: tenant,
           id: `inheritance-migration-${name}`,
           projectId: "project-security",
@@ -665,7 +666,7 @@ test("TC-SEC-002A legacy, nested and migrating parent scopes fail closed", async
           hierarchyRevision: 1,
           sourceSecurityEpoch: 2,
           targetSecurityEpoch: 3,
-          state: "active",
+          state: "planned",
           cursor: null,
           totalItems: 1,
           migratedItems: 0,
@@ -675,7 +676,10 @@ test("TC-SEC-002A legacy, nested and migrating parent scopes fail closed", async
           version: 1,
           createdAtUtc: "2026-09-04T11:03:00.000Z",
           updatedAtUtc: "2026-09-04T11:03:00.000Z",
-        });
+        };
+        await transaction.securityMigrations.insert(planned);
+        const active = transitionSecurityMigration(planned, "active", "2026-09-04T11:04:00.000Z");
+        await transaction.securityMigrations.saveProgressPreservingPlan(active.id, active, planned.version);
       });
       await assert.rejects(
         executeCreateNode(current.persistence, childCommand({

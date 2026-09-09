@@ -18,6 +18,7 @@ import {
 import { RestrictProjectMembershipHandler } from "../packages/application/src/security/restrict-project-membership.ts";
 import { principalId, tenantId } from "../packages/domain/src/identity.ts";
 import type { DomainEvent } from "../packages/domain/src/events.ts";
+import { transitionSecurityMigration, type SecurityDomainMigration } from "../packages/domain/src/security-migration.ts";
 import { grantProjectMembership } from "./support/project-membership.ts";
 
 const tenant = tenantId("tenant-security-grant");
@@ -510,7 +511,7 @@ test("TC-SEC-003A legacy, cross-project and migrating domains fail closed", asyn
     try {
       await prepare(persistence);
       if (scenario === "migration") await persistence.transaction(tenant, async (transaction) => {
-        await transaction.securityMigrations.insert({
+        const planned: SecurityDomainMigration = {
           tenantId: tenant,
           id: "grant-migration",
           projectId: "project-grant",
@@ -520,7 +521,7 @@ test("TC-SEC-003A legacy, cross-project and migrating domains fail closed", asyn
           hierarchyRevision: 1,
           sourceSecurityEpoch: 1,
           targetSecurityEpoch: 2,
-          state: "active",
+          state: "planned",
           cursor: null,
           totalItems: 1,
           migratedItems: 0,
@@ -530,7 +531,10 @@ test("TC-SEC-003A legacy, cross-project and migrating domains fail closed", asyn
           version: 1,
           createdAtUtc: "2026-09-05T01:02:00.000Z",
           updatedAtUtc: "2026-09-05T01:02:00.000Z",
-        });
+        };
+        await transaction.securityMigrations.insert(planned);
+        const active = transitionSecurityMigration(planned, "active", "2026-09-05T01:03:00.000Z");
+        await transaction.securityMigrations.saveProgressPreservingPlan(active.id, active, planned.version);
       });
       const input = scenario === "legacy"
         ? command({ securityDomainId: "legacy-domain" })

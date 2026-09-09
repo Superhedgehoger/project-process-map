@@ -24,6 +24,33 @@ export type SecurityDomainMigration = Readonly<{
   updatedAtUtc: string;
 }>;
 
+export function assertSecurityMigrationInitialPlan(migration: SecurityDomainMigration): void {
+  const validIdentifiers = [migration.id, migration.projectId, migration.rootNodeId]
+    .every((value) => value.trim().length > 0);
+  const validNumbers = Number.isSafeInteger(migration.hierarchyRevision) && migration.hierarchyRevision >= 0
+    && Number.isSafeInteger(migration.sourceSecurityEpoch) && migration.sourceSecurityEpoch > 0
+    && Number.isSafeInteger(migration.targetSecurityEpoch) && migration.targetSecurityEpoch > 0
+    && Number.isSafeInteger(migration.totalItems) && migration.totalItems >= 0;
+  const validInitialProgress = migration.state === "planned"
+    && migration.cursor === null
+    && migration.migratedItems === 0
+    && migration.failure === null
+    && migration.nextAttemptAtUtc === null
+    && migration.version === 1
+    && migration.createdAtUtc === migration.updatedAtUtc;
+  const changesOwnership = migration.sourceSecurityDomainId !== migration.targetSecurityDomainId
+    || migration.sourceSecurityEpoch !== migration.targetSecurityEpoch;
+  try {
+    assertUtc(migration.createdAtUtc);
+    assertUtc(migration.deadlineAtUtc);
+  } catch {
+    throw new Error("SECURITY_MIGRATION_PLAN_INVALID");
+  }
+  if (!validIdentifiers || !validNumbers || !validInitialProgress || !changesOwnership) {
+    throw new Error("SECURITY_MIGRATION_PLAN_INVALID");
+  }
+}
+
 export function effectiveSecurityDomains(migration: SecurityDomainMigration): ReadonlyArray<string | null> {
   if (["active", "verifying", "retryable", "recovery_required"].includes(migration.state)) {
     return migration.sourceSecurityDomainId === migration.targetSecurityDomainId

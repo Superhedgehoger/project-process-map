@@ -8,7 +8,11 @@ import type { IntegrationOperation, IntegrationStepAttempt } from "../../../doma
 import type { ProjectNode } from "../../../domain/src/project-structure.ts";
 import type { ProjectMembership, ProjectMembershipSecurityAuditEntry } from "../../../domain/src/project-access.ts";
 import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
-import { assertSecurityMigrationProgressChange, type SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
+import {
+  assertSecurityMigrationInitialPlan,
+  assertSecurityMigrationProgressChange,
+  type SecurityDomainMigration,
+} from "../../../domain/src/security-migration.ts";
 import { grantAllows, isCanonicalUtcTimestamp, isPermanentSecurityAdministrator, type SecurityDomain, type SecurityGrant, type SecurityGrantAuditEntry } from "../../../domain/src/security-access.ts";
 import type {
   ClaimOptions,
@@ -185,6 +189,31 @@ export class MemoryPersistence implements Persistence {
 
 function context(state: MemoryState, tenantId: TenantId): TransactionContext {
   const tenantPrefix = `${tenantId}\u0000`;
+  const migrationForObjectWrite = (migrationId: string): SecurityDomainMigration => {
+    const migration = state.securityMigrations.get(`${tenantPrefix}${migrationId}`);
+    if (migration === undefined || migration.state !== "active"
+      || migration.sourceSecurityEpoch <= 0 || migration.targetSecurityEpoch <= 0
+      || (migration.sourceSecurityDomainId === migration.targetSecurityDomainId
+        && migration.sourceSecurityEpoch === migration.targetSecurityEpoch)) {
+      throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+    }
+    return migration;
+  };
+  const assertMigrationScope = (migration: SecurityDomainMigration, ownerNodeId: string): void => {
+    const visited = new Set<string>();
+    let currentId: string | null = ownerNodeId;
+    while (currentId !== null) {
+      if (visited.has(currentId)) throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+      visited.add(currentId);
+      const current = state.nodes.get(`${tenantPrefix}${currentId}`);
+      if (current === undefined || current.projectId !== migration.projectId) {
+        throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+      }
+      if (current.id === migration.rootNodeId) return;
+      currentId = current.parentId;
+    }
+    throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+  };
   return {
     tenantId,
     nodes: {
@@ -232,6 +261,22 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
         state.nodes.set(key, structuredClone(updated));
         return structuredClone(updated);
       },
+      migrateSecurityOwnership: async (migrationId, nodeId, expectedVersion) => {
+        const migration = migrationForObjectWrite(migrationId);
+        const key = `${tenantPrefix}${nodeId}`;
+        const current = state.nodes.get(key);
+        if (current === undefined) throw new Error("NODE_NOT_FOUND");
+        if (current.version !== expectedVersion) throw new Error("NODE_VERSION_CONFLICT");
+        assertMigrationScope(migration, current.id);
+        if (current.securityDomainId !== migration.sourceSecurityDomainId
+          || current.securityEpoch !== migration.sourceSecurityEpoch) {
+          throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+        }
+        const updated = { ...current, securityDomainId: migration.targetSecurityDomainId,
+          securityEpoch: migration.targetSecurityEpoch, version: current.version + 1 };
+        state.nodes.set(key, structuredClone(updated));
+        return structuredClone(updated);
+      },
     },
     tasks: {
       get: async (taskId) => clone(state.tasks.get(`${tenantPrefix}${taskId}`)),
@@ -261,6 +306,22 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
           throw new Error("TASK_SECURITY_OWNERSHIP_IMMUTABLE");
         }
         state.tasks.set(key, structuredClone(task));
+      },
+      migrateSecurityOwnership: async (migrationId, taskId, expectedVersion) => {
+        const migration = migrationForObjectWrite(migrationId);
+        const key = `${tenantPrefix}${taskId}`;
+        const current = state.tasks.get(key);
+        if (current === undefined) throw new Error("TASK_NOT_FOUND");
+        if (current.version !== expectedVersion) throw new Error("TASK_VERSION_CONFLICT");
+        assertMigrationScope(migration, current.ownerNodeId);
+        if (current.projectId !== migration.projectId || current.securityDomainId !== migration.sourceSecurityDomainId
+          || current.securityEpoch !== migration.sourceSecurityEpoch) {
+          throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+        }
+        const updated = { ...current, securityDomainId: migration.targetSecurityDomainId,
+          securityEpoch: migration.targetSecurityEpoch, version: current.version + 1 };
+        state.tasks.set(key, structuredClone(updated));
+        return structuredClone(updated);
       },
       appendReviewAction: async (action) => {
         assertTenant(tenantId, action.tenantId);
@@ -302,6 +363,22 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
           throw new Error("ASSET_SECURITY_OWNERSHIP_IMMUTABLE");
         }
         state.assets.set(key, structuredClone(asset));
+      },
+      migrateSecurityOwnership: async (migrationId, assetId, expectedVersion) => {
+        const migration = migrationForObjectWrite(migrationId);
+        const key = `${tenantPrefix}${assetId}`;
+        const current = state.assets.get(key);
+        if (current === undefined) throw new Error("ASSET_NOT_FOUND");
+        if (current.version !== expectedVersion) throw new Error("ASSET_VERSION_CONFLICT");
+        assertMigrationScope(migration, current.ownerNodeId);
+        if (current.projectId !== migration.projectId || current.securityDomainId !== migration.sourceSecurityDomainId
+          || current.securityEpoch !== migration.sourceSecurityEpoch) {
+          throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+        }
+        const updated = { ...current, securityDomainId: migration.targetSecurityDomainId,
+          securityEpoch: migration.targetSecurityEpoch, version: current.version + 1 };
+        state.assets.set(key, structuredClone(updated));
+        return structuredClone(updated);
       },
       insertBinding: async (binding) => {
         assertTenant(tenantId, binding.tenantId);
@@ -562,6 +639,7 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
       get: async (migrationId) => clone(state.securityMigrations.get(`${tenantPrefix}${migrationId}`)),
       insert: async (migration) => {
         assertTenant(tenantId, migration.tenantId);
+        assertSecurityMigrationInitialPlan(migration);
         const key = `${tenantPrefix}${migration.id}`;
         if (state.securityMigrations.has(key)) throw new Error("SECURITY_MIGRATION_ALREADY_EXISTS");
         if ([...state.securityMigrations.values()].some((item) => item.tenantId === tenantId

@@ -35,6 +35,7 @@ export interface ProjectNodeRepository {
     securityDomainId: string,
     expectedVersion: number,
   ): Promise<ProjectNode>;
+  migrateSecurityOwnership(migrationId: string, nodeId: string, expectedVersion: number): Promise<ProjectNode>;
 }
 
 export interface CommandReceiptRepository {
@@ -49,6 +50,7 @@ export interface TaskRepository {
   hasSecurityDomainReference(securityDomainId: string): Promise<boolean>;
   insert(task: ProductTask): Promise<void>;
   savePreservingSecurityOwnership(taskId: string, task: ProductTask, expectedVersion: number): Promise<void>;
+  migrateSecurityOwnership(migrationId: string, taskId: string, expectedVersion: number): Promise<ProductTask>;
   appendReviewAction(action: TaskReviewActionRecord): Promise<void>;
   listReviewActions(taskId: string): Promise<TaskReviewActionRecord[]>;
 }
@@ -60,6 +62,7 @@ export interface AssetRepository {
   hasSecurityDomainReference(securityDomainId: string): Promise<boolean>;
   insert(asset: Asset): Promise<void>;
   savePreservingSecurityOwnership(assetId: string, asset: Asset, expectedVersion: number): Promise<void>;
+  migrateSecurityOwnership(migrationId: string, assetId: string, expectedVersion: number): Promise<Asset>;
   insertBinding(binding: AssetBinding): Promise<void>;
   listBindings(targetType: AssetBinding["targetType"], targetId: string): Promise<AssetBinding[]>;
 }

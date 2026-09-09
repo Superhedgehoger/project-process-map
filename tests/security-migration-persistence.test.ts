@@ -44,7 +44,8 @@ test("ARCH-GATE-SECURITY-002 migration cursor survives restart and stale workers
       occurredAtUtc: "2026-09-04T05:02:00.000Z",
     });
     await first.transaction(tenant, async (transaction) => {
-      await transaction.securityMigrations.insert(active);
+      await transaction.securityMigrations.insert(planned);
+      await transaction.securityMigrations.saveProgressPreservingPlan(active.id, active, planned.version);
       await transaction.securityMigrations.saveProgressPreservingPlan(checkpoint.id, checkpoint, active.version);
       await assert.rejects(transaction.securityMigrations.insert({ ...planned, id: "migration-2" }), /ROOT_ALREADY_OPEN|UNIQUE/);
     });
@@ -98,6 +99,42 @@ function migration(overrides: Partial<SecurityDomainMigration> = {}): SecurityDo
   };
 }
 
+test("TC-SEC-002E migration insert only accepts a valid initial planned record", async () => {
+  for (const name of ["memory", "sqlite"] as const) {
+    const directory = await mkdtemp(join(tmpdir(), "ppm-security-migration-initial-"));
+    const persistence: Persistence = name === "memory"
+      ? new MemoryPersistence()
+      : new SqlitePersistence({ path: join(directory, "security.sqlite") });
+    try {
+      const planned = migration();
+      const forgedActive = transitionSecurityMigration(planned, "active", "2026-09-04T05:01:00.000Z");
+      for (const invalid of [
+        forgedActive,
+        { ...planned, cursor: "forged-cursor" },
+        { ...planned, migratedItems: 1 },
+        { ...planned, version: 2 },
+        { ...planned, targetSecurityDomainId: planned.sourceSecurityDomainId, targetSecurityEpoch: planned.sourceSecurityEpoch },
+      ] satisfies SecurityDomainMigration[]) {
+        await assert.rejects(
+          persistence.transaction(tenant, async (transaction) => {
+            await transaction.securityMigrations.insert(invalid);
+          }),
+          /SECURITY_MIGRATION_PLAN_INVALID/,
+          `${name}:${invalid.state}:${invalid.version}:${invalid.cursor ?? "null"}`,
+        );
+      }
+      assert.equal(
+        await persistence.read(tenant, async (transaction) => await transaction.securityMigrations.get(planned.id)),
+        undefined,
+        name,
+      );
+    } finally {
+      await persistence.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
+
 async function prepareMigration(
   persistence: Persistence,
   planned: SecurityDomainMigration = migration(),
@@ -116,7 +153,8 @@ async function prepareMigration(
       version: 1,
       deletedAtUtc: null,
     });
-    await transaction.securityMigrations.insert(active);
+    await transaction.securityMigrations.insert(planned);
+    await transaction.securityMigrations.saveProgressPreservingPlan(active.id, active, planned.version);
   });
   return active;
 }

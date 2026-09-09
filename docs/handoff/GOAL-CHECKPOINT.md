@@ -5,16 +5,16 @@
 - 状态：GOAL_RUNNING
 - Goal threadId：`01a06f07-6235-7a43-b22d-fc042cf0f6aa`
 - Branch：`main`
-- 已验收实现提交：`e0ec423`（`feat: snapshot security migration inventory`）。
-- upstream：`origin/main` 当前为 `4879192`；本地待推送提交为 `e0ec423`，另有本 checkpoint/下一 Task Packet 待提交。
-- 工作区：TC-SEC-002D 实现、测试、Evidence 与 Phase 状态已提交；当前仅下一 Task Packet 与 checkpoint 更新未提交。
+- 已验收并推送基线：`bf15b7a`（`docs: checkpoint migration object write slice`）。
+- upstream：`origin/main` 与 `bf15b7a` 一致；TC-SEC-002E 实现、测试、Evidence、Phase 状态及下一 Task Packet 待提交。
+- 工作区：TC-SEC-002E 的源码、测试与文档修改完整保留；无无关修改。
 - 当前 Gate：P0-07 敏感 ACL（总项继续进行中）
-- 最近完成：P0-07 / TC-SEC-002D 非空子树迁移清单快照
-- 验收：独立安全 Review 首轮跨项目 parentId 入边漏项已修复，最终 PASS；定向复验 27/27；`pnpm check` 125/125；14 个 Huly 镜像锁；扩展边界；`git diff --check`；凭据/私钥特征扫描均通过。
-- 当前 Task：P0-07 / TC-SEC-002E 对象换域专用持久端口
-- Task Packet：`docs/agent-tasks/P0-07-TC-SEC-002E.md`
-- Blocker：本地提交尚未推送；GitHub push 需要当前 payload 的明确确认。
-- next_action：提交本 checkpoint 与 TC-SEC-002E Task Packet；获准后推送 `4879192..HEAD`。推送成功后实现 active Migration 约束下的 Node/Task/Asset 单对象条件换域端口，不执行批次/cursor/event 编排。
+- 最近完成：P0-07 / TC-SEC-002E 对象换域专用持久端口
+- 验收：独立安全 Review 首轮发现 generic `insert(active)` 可信度旁路，加入初始 planned validator 与双 adapter gate 后最终 PASS；定向复验 61/61、最终迁移测试 10/10；最终 `pnpm check` 130/130；14 个 Huly 镜像锁；扩展边界；`git diff --check` 与凭据/私钥特征扫描均通过。
+- 当前 Task：P0-07 / TC-SEC-002F 迁移批次与 checkpoint 原子编排
+- Task Packet：`docs/agent-tasks/P0-07-TC-SEC-002F.md`
+- Blocker：TC-SEC-002E 本地提交尚未创建/推送。
+- next_action：提交并推送 TC-SEC-002E；随后从新 Task Packet 实现有界批次的对象写与 checkpoint 同事务闭环，不推进 verifying/committed。
 
 旧会话 `e8e244ee-0c02-4769-8bd0-37f1ca8bd485` 仅是该 Git 工作树所在目录，不得作为聊天执行上下文恢复。原绑定的“project-process-map Goal 恢复”和“用量恢复后继续任务”自动任务已于 2026-09-05 暂停；后续不得把本 Goal 的恢复投递到该旧会话。
 

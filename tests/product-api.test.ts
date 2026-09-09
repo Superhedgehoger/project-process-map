@@ -10,6 +10,7 @@ import { resolveExternalIdentity } from "../packages/application/src/identity/re
 import { MemoryAssetContent } from "../packages/adapters/src/memory/asset-content.ts";
 import { MemoryPersistence } from "../packages/adapters/src/memory/persistence.ts";
 import { principalId, tenantId } from "../packages/domain/src/identity.ts";
+import { transitionSecurityMigration, type SecurityDomainMigration } from "../packages/domain/src/security-migration.ts";
 import { grantProjectMembership } from "./support/project-membership.ts";
 
 const phase0Tenant = tenantId("phase0-tenant");
@@ -193,7 +194,7 @@ test("ARCH-GATE-ACL-002 an open security migration freezes project API access", 
   const handler = createProductApi({ collaborationMode: "disabled", persistence, assetContent: new MemoryAssetContent() });
   await call(handler, "/api/nodes");
   await persistence.transaction(phase0Tenant, async (transaction) => {
-    await transaction.securityMigrations.insert({
+    const planned: SecurityDomainMigration = {
       tenantId: phase0Tenant,
       id: "migration-api",
       projectId: "phase0-project",
@@ -203,7 +204,7 @@ test("ARCH-GATE-ACL-002 an open security migration freezes project API access", 
       hierarchyRevision: 1,
       sourceSecurityEpoch: 1,
       targetSecurityEpoch: 2,
-      state: "active",
+      state: "planned",
       cursor: null,
       totalItems: 1,
       migratedItems: 0,
@@ -213,7 +214,10 @@ test("ARCH-GATE-ACL-002 an open security migration freezes project API access", 
       version: 1,
       createdAtUtc: "2026-09-04T10:00:00.000Z",
       updatedAtUtc: "2026-09-04T10:00:00.000Z",
-    });
+    };
+    await transaction.securityMigrations.insert(planned);
+    const active = transitionSecurityMigration(planned, "active", "2026-09-04T10:01:00.000Z");
+    await transaction.securityMigrations.saveProgressPreservingPlan(active.id, active, planned.version);
   });
   const response = await call(handler, "/api/nodes/N-03");
   assert.equal(response.status, 409);

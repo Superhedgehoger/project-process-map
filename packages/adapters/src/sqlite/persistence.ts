@@ -11,7 +11,11 @@ import type { IntegrationOperation, IntegrationStepAttempt } from "../../../doma
 import type { ProjectNode } from "../../../domain/src/project-structure.ts";
 import type { ProjectMembership, ProjectMembershipSecurityAuditEntry } from "../../../domain/src/project-access.ts";
 import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
-import { assertSecurityMigrationProgressChange, type SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
+import {
+  assertSecurityMigrationInitialPlan,
+  assertSecurityMigrationProgressChange,
+  type SecurityDomainMigration,
+} from "../../../domain/src/security-migration.ts";
 import {
   grantAllows,
   isCanonicalUtcTimestamp,
@@ -204,6 +208,35 @@ export class SqlitePersistence implements Persistence {
           if (row === undefined) throw new Error("NODE_NOT_FOUND");
           return nodeFromRow(row);
         },
+        migrateSecurityOwnership: async (migrationId, nodeId, expectedVersion) => {
+          const migration = this.migrationForObjectWrite(tenantId, migrationId);
+          const row = this.#database.prepare(
+            "SELECT * FROM project_nodes WHERE tenant_id = ? AND node_id = ?",
+          ).get(tenantId, nodeId);
+          if (row === undefined) throw new Error("NODE_NOT_FOUND");
+          const current = nodeFromRow(row);
+          if (current.version !== expectedVersion) throw new Error("NODE_VERSION_CONFLICT");
+          this.assertMigrationScope(tenantId, migration, current.id);
+          if (current.securityDomainId !== migration.sourceSecurityDomainId
+            || current.securityEpoch !== migration.sourceSecurityEpoch) {
+            throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+          }
+          const result = this.#database.prepare(`
+            UPDATE project_nodes
+            SET security_domain_id = ?, security_epoch = ?, version = version + 1
+            WHERE tenant_id = ? AND node_id = ? AND project_id = ? AND version = ?
+              AND security_domain_id IS ? AND security_epoch = ?
+          `).run(
+            migration.targetSecurityDomainId, migration.targetSecurityEpoch, tenantId, nodeId,
+            migration.projectId, expectedVersion, migration.sourceSecurityDomainId, migration.sourceSecurityEpoch,
+          );
+          if (result.changes !== 1) throw new Error("NODE_VERSION_CONFLICT");
+          const updated = this.#database.prepare(
+            "SELECT * FROM project_nodes WHERE tenant_id = ? AND node_id = ?",
+          ).get(tenantId, nodeId);
+          if (updated === undefined) throw new Error("NODE_NOT_FOUND");
+          return nodeFromRow(updated);
+        },
       },
       tasks: {
         get: async (taskId) => {
@@ -257,6 +290,31 @@ export class SqlitePersistence implements Persistence {
             WHERE tenant_id = ? AND task_id = ? AND version = ?
           `).run(task.executionState, task.version, JSON.stringify(task), tenantId, taskId, expectedVersion);
           if (result.changes !== 1) throw new Error("TASK_VERSION_CONFLICT");
+        },
+        migrateSecurityOwnership: async (migrationId, taskId, expectedVersion) => {
+          const migration = this.migrationForObjectWrite(tenantId, migrationId);
+          const row = this.#database.prepare(
+            "SELECT * FROM product_tasks WHERE tenant_id = ? AND task_id = ?",
+          ).get(tenantId, taskId);
+          if (row === undefined) throw new Error("TASK_NOT_FOUND");
+          const current = productTaskFromRow(row);
+          if (current.version !== expectedVersion) throw new Error("TASK_VERSION_CONFLICT");
+          this.assertMigrationScope(tenantId, migration, current.ownerNodeId);
+          if (current.projectId !== migration.projectId || current.securityDomainId !== migration.sourceSecurityDomainId
+            || current.securityEpoch !== migration.sourceSecurityEpoch) {
+            throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+          }
+          const updated = { ...current, securityDomainId: migration.targetSecurityDomainId,
+            securityEpoch: migration.targetSecurityEpoch, version: current.version + 1 };
+          const result = this.#database.prepare(`
+            UPDATE product_tasks SET version = ?, task_json = ?
+            WHERE tenant_id = ? AND task_id = ? AND project_id = ? AND owner_node_id = ? AND version = ?
+          `).run(
+            updated.version, JSON.stringify(updated), tenantId, taskId, migration.projectId,
+            current.ownerNodeId, expectedVersion,
+          );
+          if (result.changes !== 1) throw new Error("TASK_VERSION_CONFLICT");
+          return updated;
         },
         appendReviewAction: async (action) => {
           assertTenant(tenantId, action.tenantId);
@@ -322,6 +380,31 @@ export class SqlitePersistence implements Persistence {
             WHERE tenant_id = ? AND asset_id = ? AND version = ?
           `).run(asset.lifecycleState, asset.version, JSON.stringify(asset), tenantId, assetId, expectedVersion);
           if (result.changes !== 1) throw new Error("ASSET_VERSION_CONFLICT");
+        },
+        migrateSecurityOwnership: async (migrationId, assetId, expectedVersion) => {
+          const migration = this.migrationForObjectWrite(tenantId, migrationId);
+          const row = this.#database.prepare(
+            "SELECT * FROM assets WHERE tenant_id = ? AND asset_id = ?",
+          ).get(tenantId, assetId);
+          if (row === undefined) throw new Error("ASSET_NOT_FOUND");
+          const current = assetFromRow(row);
+          if (current.version !== expectedVersion) throw new Error("ASSET_VERSION_CONFLICT");
+          this.assertMigrationScope(tenantId, migration, current.ownerNodeId);
+          if (current.projectId !== migration.projectId || current.securityDomainId !== migration.sourceSecurityDomainId
+            || current.securityEpoch !== migration.sourceSecurityEpoch) {
+            throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+          }
+          const updated = { ...current, securityDomainId: migration.targetSecurityDomainId,
+            securityEpoch: migration.targetSecurityEpoch, version: current.version + 1 };
+          const result = this.#database.prepare(`
+            UPDATE assets SET version = ?, asset_json = ?
+            WHERE tenant_id = ? AND asset_id = ? AND project_id = ? AND owner_node_id = ? AND version = ?
+          `).run(
+            updated.version, JSON.stringify(updated), tenantId, assetId, migration.projectId,
+            current.ownerNodeId, expectedVersion,
+          );
+          if (result.changes !== 1) throw new Error("ASSET_VERSION_CONFLICT");
+          return updated;
         },
         insertBinding: async (binding) => {
           assertTenant(tenantId, binding.tenantId);
@@ -816,6 +899,7 @@ export class SqlitePersistence implements Persistence {
         },
         insert: async (migration) => {
           assertTenant(tenantId, migration.tenantId);
+          assertSecurityMigrationInitialPlan(migration);
           this.#database.prepare(`
             INSERT INTO security_domain_migrations (
               tenant_id, migration_id, project_id, root_node_id, state, hierarchy_revision,
@@ -1470,6 +1554,42 @@ export class SqlitePersistence implements Persistence {
       `).run(error, tenantId, jobId, leaseToken);
       return result.changes === 1;
     });
+  }
+
+  private migrationForObjectWrite(tenantId: TenantId, migrationId: string): SecurityDomainMigration {
+    const row = this.#database.prepare(
+      "SELECT * FROM security_domain_migrations WHERE tenant_id = ? AND migration_id = ?",
+    ).get(tenantId, migrationId);
+    if (row === undefined) throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+    const migration = securityMigrationFromRow(row);
+    if (migration.state !== "active" || migration.sourceSecurityEpoch <= 0 || migration.targetSecurityEpoch <= 0
+      || (migration.sourceSecurityDomainId === migration.targetSecurityDomainId
+        && migration.sourceSecurityEpoch === migration.targetSecurityEpoch)) {
+      throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+    }
+    return migration;
+  }
+
+  private assertMigrationScope(
+    tenantId: TenantId,
+    migration: SecurityDomainMigration,
+    ownerNodeId: string,
+  ): void {
+    const visited = new Set<string>();
+    let currentId: string | null = ownerNodeId;
+    while (currentId !== null) {
+      if (visited.has(currentId)) throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+      visited.add(currentId);
+      const row = this.#database.prepare(
+        "SELECT * FROM project_nodes WHERE tenant_id = ? AND node_id = ?",
+      ).get(tenantId, currentId);
+      if (row === undefined) throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+      const current = nodeFromRow(row);
+      if (current.projectId !== migration.projectId) throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+      if (current.id === migration.rootNodeId) return;
+      currentId = current.parentId;
+    }
+    throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
   }
 
   private ensureOpen(): void {
