@@ -1,20 +1,20 @@
 # Goal Handoff Checkpoint — project-process-map
 
-## 当前恢复状态（2026-09-05，优先于下方历史暂停记录）
+## 当前恢复状态（2026-09-09，优先于下方历史暂停记录）
 
 - 状态：GOAL_RUNNING
 - Goal threadId：`01a06f07-6235-7a43-b22d-fc042cf0f6aa`
 - Branch：`main`
-- 已验收实现提交：`a406124`（`feat: expose guarded security grant actions`）；checkpoint 提交 `849065a`。
-- upstream：`origin/main` 已包含 `849065a` 与全部 TC-SEC-003B 提交。
-- 工作区：TC-SEC-003B 已验收、提交并推送；当前仅下一 Task Packet 与 checkpoint 更新未提交。
+- 已验收实现提交：`5f79320`（`feat: guard project membership restrictions`）。
+- upstream：`origin/main` 当前停在 `849065a`；本地待推送提交为 `d1b104a` 与 `5f79320`，另有本 checkpoint/下一 Task Packet 待提交。
+- 工作区：TC-SEC-003C 实现、测试、Evidence 与 Phase 状态已提交；当前仅下一 Task Packet 与 checkpoint 更新未提交。
 - 当前 Gate：P0-07 敏感 ACL（总项继续进行中）
-- 最近完成：P0-07 / TC-SEC-003B Grant API 与固定身份无泄漏矩阵
-- 验收：独立安全复核最终 PASS；复审定向测试 29/29；`pnpm check` 98/98；14 个 Huly 镜像锁；薄宿主边界；`git diff --check`；凭据/私钥特征扫描均通过。
-- 当前 Task：P0-07 / TC-SEC-003C ProjectMembership 限权写模型与最后管理员原子守卫
-- Task Packet：`docs/agent-tasks/P0-07-TC-SEC-003C.md`
-- Blocker：无
-- next_action：移除通用 Membership update，建立 demote/revoke 专用命令、跨域权限版本与最后管理员原子守卫；完成 Memory/SQLite 多域、故障、并发、升级、独立 Review、Evidence、commit/push。
+- 最近完成：P0-07 / TC-SEC-003C ProjectMembership 限权写模型与最后管理员原子守卫
+- 验收：独立安全 Review 首轮四项阻断均修复，最终 PASS；定向复验 15/15；`pnpm check` 108/108；14 个 Huly 镜像锁；扩展边界；`git diff --check`；凭据/私钥特征扫描均通过。
+- 当前 Task：P0-07 / TC-SEC-002A 敏感父节点下新建后代的同域继承
+- Task Packet：`docs/agent-tasks/P0-07-TC-SEC-002A.md`
+- Blocker：本地提交尚未推送；GitHub push 需要当前 payload 的明确确认。
+- next_action：提交本 checkpoint 与 TC-SEC-002A Task Packet；获准后推送 `849065a..HEAD`。推送成功后按 Packet 修改 `create-node.ts`，补回放重新授权、无泄漏、继承域/纪元、Task/Asset、故障与重启并发验收。
 
 旧会话 `e8e244ee-0c02-4769-8bd0-37f1ca8bd485` 仅是该 Git 工作树所在目录，不得作为聊天执行上下文恢复。原绑定的“project-process-map Goal 恢复”和“用量恢复后继续任务”自动任务已于 2026-09-05 暂停；后续不得把本 Goal 的恢复投递到该旧会话。
 
