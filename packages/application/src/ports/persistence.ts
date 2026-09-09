@@ -26,6 +26,7 @@ export type CommandReceipt<TResult = unknown> = Readonly<{
 export interface ProjectNodeRepository {
   get(nodeId: string): Promise<ProjectNode | undefined>;
   listByProject(projectId: string): Promise<ProjectNode[]>;
+  listForSecurityMigration(): Promise<ProjectNode[]>;
   hasSecurityDomainReference(securityDomainId: string): Promise<boolean>;
   insert(node: ProjectNode): Promise<void>;
   assignSecurityDomain(
@@ -44,6 +45,7 @@ export interface CommandReceiptRepository {
 export interface TaskRepository {
   get(taskId: string): Promise<ProductTask | undefined>;
   listByNode(nodeId: string): Promise<ProductTask[]>;
+  listForSecurityMigration(): Promise<ProductTask[]>;
   hasSecurityDomainReference(securityDomainId: string): Promise<boolean>;
   insert(task: ProductTask): Promise<void>;
   savePreservingSecurityOwnership(taskId: string, task: ProductTask, expectedVersion: number): Promise<void>;
@@ -54,6 +56,7 @@ export interface TaskRepository {
 export interface AssetRepository {
   get(assetId: string): Promise<Asset | undefined>;
   hasForNode(nodeId: string): Promise<boolean>;
+  listForSecurityMigration(): Promise<Asset[]>;
   hasSecurityDomainReference(securityDomainId: string): Promise<boolean>;
   insert(asset: Asset): Promise<void>;
   savePreservingSecurityOwnership(assetId: string, asset: Asset, expectedVersion: number): Promise<void>;

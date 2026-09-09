@@ -192,6 +192,9 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
       listByProject: async (projectId) => [...state.nodes.values()]
         .filter((node) => node.tenantId === tenantId && node.projectId === projectId)
         .map((node) => structuredClone(node)),
+      listForSecurityMigration: async () => [...state.nodes.values()]
+        .filter((node) => node.tenantId === tenantId)
+        .map((node) => structuredClone(node)),
       hasSecurityDomainReference: async (securityDomainId) => [...state.nodes.values()].some(
         (node) => node.tenantId === tenantId && node.securityDomainId === securityDomainId,
       ),
@@ -235,6 +238,9 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
       listByNode: async (nodeId) => [...state.tasks.values()]
         .filter((task) => task.tenantId === tenantId && task.ownerNodeId === nodeId)
         .map((task) => structuredClone(task)),
+      listForSecurityMigration: async () => [...state.tasks.values()]
+        .filter((task) => task.tenantId === tenantId)
+        .map((task) => structuredClone(task)),
       hasSecurityDomainReference: async (securityDomainId) => [...state.tasks.values()].some(
         (task) => task.tenantId === tenantId && task.securityDomainId === securityDomainId,
       ),
@@ -272,6 +278,9 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
       hasForNode: async (nodeId) => [...state.assets.values()].some(
         (asset) => asset.tenantId === tenantId && asset.ownerNodeId === nodeId,
       ),
+      listForSecurityMigration: async () => [...state.assets.values()]
+        .filter((asset) => asset.tenantId === tenantId)
+        .map((asset) => structuredClone(asset)),
       hasSecurityDomainReference: async (securityDomainId) => [...state.assets.values()].some(
         (asset) => asset.tenantId === tenantId && asset.securityDomainId === securityDomainId,
       ),

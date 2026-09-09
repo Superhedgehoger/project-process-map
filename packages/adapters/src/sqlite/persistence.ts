@@ -153,6 +153,9 @@ export class SqlitePersistence implements Persistence {
         listByProject: async (projectId) => this.#database.prepare(
           "SELECT * FROM project_nodes WHERE tenant_id = ? AND project_id = ? ORDER BY node_id",
         ).all(tenantId, projectId).map(nodeFromRow),
+        listForSecurityMigration: async () => this.#database.prepare(
+          "SELECT * FROM project_nodes WHERE tenant_id = ? ORDER BY node_id",
+        ).all(tenantId).map(nodeFromRow),
         hasSecurityDomainReference: async (securityDomainId) => this.#database.prepare(`
           SELECT 1 FROM project_nodes
           WHERE tenant_id = ? AND security_domain_id = ?
@@ -212,6 +215,9 @@ export class SqlitePersistence implements Persistence {
           WHERE tenant_id = ? AND owner_node_id = ?
           ORDER BY task_id
         `).all(tenantId, nodeId).map((row) => productTaskFromJson(asString(row.task_json))),
+        listForSecurityMigration: async () => this.#database.prepare(`
+          SELECT * FROM product_tasks WHERE tenant_id = ? ORDER BY task_id
+        `).all(tenantId).map((row) => productTaskFromRow(row)),
         hasSecurityDomainReference: async (securityDomainId) => this.#database.prepare(`
           SELECT task_json FROM product_tasks WHERE tenant_id = ?
         `).all(tenantId).some((row) => {
@@ -273,6 +279,9 @@ export class SqlitePersistence implements Persistence {
         hasForNode: async (nodeId) => this.#database.prepare(`
           SELECT asset_json FROM assets WHERE tenant_id = ? AND owner_node_id = ?
         `).get(tenantId, nodeId) !== undefined,
+        listForSecurityMigration: async () => this.#database.prepare(`
+          SELECT * FROM assets WHERE tenant_id = ? ORDER BY asset_id
+        `).all(tenantId).map((row) => assetFromRow(row)),
         hasSecurityDomainReference: async (securityDomainId) => this.#database.prepare(`
           SELECT asset_json FROM assets WHERE tenant_id = ?
         `).all(tenantId).some((row) => {
@@ -1497,6 +1506,26 @@ function nodeFromRow(row: Record<string, unknown>): ProjectNode {
     version: asNumber(row.version),
     deletedAtUtc: nullableString(row.deleted_at_utc),
   };
+}
+
+function productTaskFromRow(row: Record<string, unknown>): ProductTask {
+  const task = productTaskFromJson(asString(row.task_json));
+  if (task.tenantId !== asString(row.tenant_id) || task.id !== asString(row.task_id)
+    || task.projectId !== asString(row.project_id) || task.ownerNodeId !== asString(row.owner_node_id)
+    || task.executionState !== asString(row.lifecycle_state) || task.version !== asNumber(row.version)) {
+    throw new Error("TASK_PERSISTENCE_INCONSISTENT");
+  }
+  return task;
+}
+
+function assetFromRow(row: Record<string, unknown>): Asset {
+  const asset = parseJson<Asset>(asString(row.asset_json));
+  if (asset.tenantId !== asString(row.tenant_id) || asset.id !== asString(row.asset_id)
+    || asset.projectId !== asString(row.project_id) || asset.ownerNodeId !== asString(row.owner_node_id)
+    || asset.lifecycleState !== asString(row.lifecycle_state) || asset.version !== asNumber(row.version)) {
+    throw new Error("ASSET_PERSISTENCE_INCONSISTENT");
+  }
+  return asset;
 }
 
 function securityMigrationFromRow(row: Record<string, unknown>): SecurityDomainMigration {
