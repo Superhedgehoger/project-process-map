@@ -9,10 +9,17 @@ import { tenantId as parseTenantId, type TenantId } from "../../../domain/src/id
 import type { ExternalIdentityMapping, Principal } from "../../../domain/src/identity.ts";
 import type { IntegrationOperation, IntegrationStepAttempt } from "../../../domain/src/integration-operations.ts";
 import type { ProjectNode } from "../../../domain/src/project-structure.ts";
-import type { ProjectMembership } from "../../../domain/src/project-access.ts";
+import type { ProjectMembership, ProjectMembershipSecurityAuditEntry } from "../../../domain/src/project-access.ts";
 import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import type { SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
-import type { SecurityDomain, SecurityGrant, SecurityGrantAuditEntry } from "../../../domain/src/security-access.ts";
+import {
+  grantAllows,
+  isCanonicalUtcTimestamp,
+  isPermanentSecurityAdministrator,
+  type SecurityDomain,
+  type SecurityGrant,
+  type SecurityGrantAuditEntry,
+} from "../../../domain/src/security-access.ts";
 import type {
   ClaimOptions,
   CommandReceipt,
@@ -29,7 +36,7 @@ export type SqlitePersistenceOptions = Readonly<{
 }>;
 
 const pathLocks = new Map<string, Promise<void>>();
-const currentSchemaVersion = 5;
+const currentSchemaVersion = 6;
 
 export class SqlitePersistence implements Persistence {
   readonly #database: DatabaseSync;
@@ -450,19 +457,126 @@ export class SqlitePersistence implements Persistence {
             membership.status, membership.version, JSON.stringify(membership),
           );
         },
-        update: async (membership, expectedVersion) => {
+        restrictWithSecurityDomains: async (membership, expectedVersion, evaluatedAtUtc) => {
           assertTenant(tenantId, membership.tenantId);
-          if (membership.version !== expectedVersion + 1) throw new Error("PROJECT_MEMBERSHIP_VERSION_CONFLICT");
-          const result = this.#database.prepare(`
-            UPDATE project_memberships
-            SET role = ?, status = ?, version = ?, membership_json = ?
-            WHERE tenant_id = ? AND project_id = ? AND principal_id = ? AND version = ?
-          `).run(
-            membership.role, membership.status, membership.version, JSON.stringify(membership),
-            tenantId, membership.projectId, membership.principalId, expectedVersion,
-          );
-          if (result.changes !== 1) throw new Error("PROJECT_MEMBERSHIP_VERSION_CONFLICT");
+          if (!isCanonicalUtcTimestamp(evaluatedAtUtc)) throw new Error("VALIDATION_FAILED");
+          const currentRow = this.#database.prepare(`
+            SELECT membership_json FROM project_memberships
+            WHERE tenant_id = ? AND project_id = ? AND principal_id = ?
+          `).get(tenantId, membership.projectId, membership.principalId);
+          const current = currentRow === undefined
+            ? undefined
+            : parseJson<ProjectMembership>(asString(currentRow.membership_json));
+          if (current === undefined || current.version !== expectedVersion || membership.version !== expectedVersion + 1
+            || membership.tenantId !== current.tenantId || membership.projectId !== current.projectId
+            || membership.principalId !== current.principalId || membership.createdAtUtc !== current.createdAtUtc
+            || JSON.stringify(membership.securityDomainIds) !== JSON.stringify(current.securityDomainIds)) {
+            throw new Error("PROJECT_MEMBERSHIP_VERSION_CONFLICT");
+          }
+          const demoted = current.status === "active" && current.role === "project_manager"
+            && membership.status === "active" && membership.role === "member";
+          const revoked = current.status === "active" && membership.status === "revoked"
+            && membership.role === current.role;
+          if (!demoted && !revoked) throw new Error("PROJECT_MEMBERSHIP_TRANSITION_INVALID");
+          if (current.securityDomainIds.length > 0) throw new Error("PROJECT_MEMBERSHIP_TRANSITION_INVALID");
+          const eligibleTarget = this.#database.prepare(`
+            SELECT 1 FROM principals
+            WHERE tenant_id = ? AND principal_id = ? AND state = 'active' AND kind = 'user'
+          `).get(tenantId, membership.principalId);
+          if (eligibleTarget === undefined) throw new Error("PROJECT_MEMBERSHIP_TARGET_INELIGIBLE");
+
+          const affected = this.#database.prepare(`
+            SELECT domain.domain_json, grant_row.grant_json
+            FROM security_domains AS domain
+            JOIN security_grants AS grant_row
+              ON grant_row.tenant_id = domain.tenant_id
+             AND grant_row.security_domain_id = domain.security_domain_id
+            WHERE domain.tenant_id = ? AND domain.project_id = ?
+              AND grant_row.principal_id = ?
+            ORDER BY domain.security_domain_id
+          `).all(tenantId, membership.projectId, membership.principalId)
+            .map((row) => ({
+              domain: parseJson<SecurityDomain>(asString(row.domain_json)),
+              grant: parseJson<SecurityGrant>(asString(row.grant_json)),
+            }))
+            .filter(({ domain, grant }) => domain.deletedAtUtc === null && grantAllows(grant, "view", evaluatedAtUtc));
+          if (affected.some(({ domain }) => domain.parentSecurityDomainId !== null)) {
+            throw new Error("PROJECT_MEMBERSHIP_TRANSITION_INVALID");
+          }
+          for (const { domain, grant } of affected) {
+            if (!isPermanentSecurityAdministrator(grant)) continue;
+            const replacement = this.#database.prepare(`
+              SELECT 1 FROM security_grants AS grant_row
+              JOIN project_memberships AS membership
+                ON membership.tenant_id = grant_row.tenant_id
+               AND membership.project_id = ?
+               AND membership.principal_id = grant_row.principal_id
+               AND membership.status = 'active' AND membership.role = 'project_manager'
+              JOIN principals AS principal
+                ON principal.tenant_id = grant_row.tenant_id
+               AND principal.principal_id = grant_row.principal_id
+               AND principal.state = 'active' AND principal.kind = 'user'
+              WHERE grant_row.tenant_id = ? AND grant_row.security_domain_id = ?
+                AND grant_row.principal_id <> ?
+                AND grant_row.capability = 'manage_access' AND grant_row.status = 'active'
+                AND grant_row.expires_at_utc IS NULL
+              LIMIT 1
+            `).get(membership.projectId, tenantId, domain.id, membership.principalId);
+            if (replacement === undefined) throw new Error("SECURITY_DOMAIN_LAST_ADMINISTRATOR");
+          }
+
+          const updatedDomains = affected.map(({ domain }) => ({
+            ...domain,
+            permissionVersion: domain.permissionVersion + 1,
+            version: domain.version + 1,
+          }));
+          this.#database.exec("SAVEPOINT project_membership_security_write");
+          try {
+            const membershipResult = this.#database.prepare(`
+              UPDATE project_memberships
+              SET role = ?, status = ?, version = ?, membership_json = ?
+              WHERE tenant_id = ? AND project_id = ? AND principal_id = ? AND version = ?
+            `).run(
+              membership.role, membership.status, membership.version, JSON.stringify(membership),
+              tenantId, membership.projectId, membership.principalId, expectedVersion,
+            );
+            if (membershipResult.changes !== 1) throw new Error("PROJECT_MEMBERSHIP_VERSION_CONFLICT");
+            for (const domain of updatedDomains) {
+              const domainResult = this.#database.prepare(`
+                UPDATE security_domains
+                SET permission_version = ?, version = ?, domain_json = ?
+                WHERE tenant_id = ? AND security_domain_id = ? AND version = ? AND permission_version = ?
+              `).run(
+                domain.permissionVersion, domain.version, JSON.stringify(domain), tenantId, domain.id,
+                domain.version - 1, domain.permissionVersion - 1,
+              );
+              if (domainResult.changes !== 1) throw new Error("SECURITY_DOMAIN_VERSION_CONFLICT");
+            }
+            this.#database.exec("RELEASE SAVEPOINT project_membership_security_write");
+          } catch (error) {
+            this.#database.exec("ROLLBACK TO SAVEPOINT project_membership_security_write");
+            this.#database.exec("RELEASE SAVEPOINT project_membership_security_write");
+            throw error;
+          }
+          return updatedDomains;
         },
+      },
+      membershipSecurityAudits: {
+        append: async (entry) => {
+          assertTenant(tenantId, entry.tenantId);
+          this.#database.prepare(`
+            INSERT INTO project_membership_security_audits (
+              tenant_id, audit_id, project_id, target_principal_id, occurred_at_utc, audit_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+          `).run(tenantId, entry.id, entry.projectId, entry.targetPrincipalId, entry.occurredAtUtc, JSON.stringify(entry));
+        },
+        listByProject: async (projectId) => this.#database.prepare(`
+          SELECT audit_json FROM project_membership_security_audits
+          WHERE tenant_id = ? AND project_id = ?
+          ORDER BY occurred_at_utc, audit_id
+        `).all(tenantId, projectId).map(
+          (row) => parseJson<ProjectMembershipSecurityAuditEntry>(asString(row.audit_json)),
+        ),
       },
       securityDomains: {
         get: async (securityDomainId) => {
@@ -851,6 +965,19 @@ export class SqlitePersistence implements Persistence {
       CREATE INDEX IF NOT EXISTS project_memberships_by_principal
         ON project_memberships (tenant_id, principal_id, status, project_id);
 
+      CREATE TABLE IF NOT EXISTS project_membership_security_audits (
+        tenant_id TEXT NOT NULL,
+        audit_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        target_principal_id TEXT NOT NULL,
+        occurred_at_utc TEXT NOT NULL,
+        audit_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, audit_id),
+        FOREIGN KEY (tenant_id, target_principal_id) REFERENCES principals (tenant_id, principal_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS project_membership_security_audits_by_project
+        ON project_membership_security_audits (tenant_id, project_id, occurred_at_utc, audit_id);
+
       CREATE TABLE IF NOT EXISTS security_domains (
         tenant_id TEXT NOT NULL,
         security_domain_id TEXT NOT NULL,
@@ -1128,6 +1255,9 @@ export class SqlitePersistence implements Persistence {
     `).run(new Date().toISOString());
     this.#database.prepare(`
       INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc) VALUES (5, ?)
+    `).run(new Date().toISOString());
+    this.#database.prepare(`
+      INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc) VALUES (6, ?)
     `).run(new Date().toISOString());
   }
 

@@ -6,6 +6,7 @@ import test from "node:test";
 import { executeCreateNode } from "../packages/application/src/create-node.ts";
 import { ApplicationError, type ApplicationErrorCode } from "../packages/application/src/errors.ts";
 import type { OutboxConsumer, Persistence } from "../packages/application/src/ports/persistence.ts";
+import { RestrictProjectMembershipHandler } from "../packages/application/src/security/restrict-project-membership.ts";
 import { ActOnTaskHandler, type TaskCommandAction } from "../packages/application/src/tasks/act-on-task.ts";
 import { CreateTaskHandler } from "../packages/application/src/tasks/create-task.ts";
 import { MemoryPersistence } from "../packages/adapters/src/memory/persistence.ts";
@@ -32,9 +33,9 @@ async function fixtures(): Promise<Fixture[]> {
 }
 
 async function prepare(persistence: Persistence, taskId = "task-1"): Promise<void> {
-  await grantProjectMembership(persistence, tenant, "project-1", assignee, { securityDomainIds: ["security-1"] });
-  await grantProjectMembership(persistence, tenant, "project-1", reviewer, { securityDomainIds: ["security-1"] });
-  await grantProjectMembership(persistence, tenant, "project-1", outsider, { securityDomainIds: ["security-1"] });
+  await grantProjectMembership(persistence, tenant, "project-1", assignee);
+  await grantProjectMembership(persistence, tenant, "project-1", reviewer);
+  await grantProjectMembership(persistence, tenant, "project-1", outsider);
   if (await persistence.read(tenant, async (transaction) => await transaction.nodes.get("node-1")) === undefined) {
     await executeCreateNode(persistence, {
       tenantId: tenant,
@@ -288,15 +289,19 @@ test("P0-05A-T1a current membership is checked before an idempotent replay", asy
       const handler = new ActOnTaskHandler(fixture.persistence);
       const start = command(assignee, "start", 1, 30, null, "task-revoke");
       await handler.execute(start);
-      await fixture.persistence.transaction(tenant, async (transaction) => {
-        const membership = await transaction.memberships.get("project-1", assignee);
-        assert.ok(membership);
-        await transaction.memberships.update({
-          ...membership,
-          status: "revoked",
-          version: membership.version + 1,
-          updatedAtUtc: "2026-09-04T09:00:00.000Z",
-        }, membership.version);
+      await grantProjectMembership(fixture.persistence, tenant, "project-1", manager, { role: "project_manager" });
+      await new RestrictProjectMembershipHandler(fixture.persistence).execute({
+        tenantId: tenant,
+        commandId: "revoke-task-assignee",
+        idempotencyKey: "revoke-task-assignee",
+        correlationId: "task-review",
+        principalId: manager,
+        projectId: "project-1",
+        targetPrincipalId: assignee,
+        action: "revoke",
+        expectedMembershipVersion: 1,
+        reason: "test replay authorization",
+        occurredAtUtc: "2026-09-04T09:00:00.000Z",
       });
       await assert.rejects(handler.execute({ ...start, commandId: "replay-after-revoke" }), errorCode("TASK_NOT_FOUND"), fixture.name);
     } finally {

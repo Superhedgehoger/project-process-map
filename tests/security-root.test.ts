@@ -25,6 +25,7 @@ import { grantProjectMembership } from "./support/project-membership.ts";
 const tenant = tenantId("tenant-security-root");
 const manager = principalId("security-manager");
 const member = principalId("security-member");
+const legacyMember = principalId("legacy-security-member");
 
 type Fixture = Readonly<{
   name: string;
@@ -135,14 +136,14 @@ test("TC-SEC-001 first sensitive root atomically creates its first manage_access
       assert.equal(JSON.stringify(securityEvents).includes(command().reason), false, name);
       assert.equal(await current.outbox.countReady("9999-12-31T23:59:59.999Z"), 2, name);
       await current.persistence.transaction(tenant, async (transaction) => {
-        const membership = await transaction.memberships.get("project-security", manager);
-        assert.ok(membership);
-        await transaction.memberships.update({
-          ...membership,
+        const principal = await transaction.principals.get(manager);
+        assert.ok(principal);
+        await transaction.principals.update({
+          ...principal,
           status: "revoked",
-          version: membership.version + 1,
+          version: principal.version + 1,
           updatedAtUtc: "2026-09-04T11:02:00.000Z",
-        }, membership.version);
+        }, principal.version);
       });
       await assert.rejects(
         handler.execute({ ...command(), commandId: "replay-after-revoke" }),
@@ -215,14 +216,14 @@ test("TC-SEC-001 missing, revoked-member and revoked-principal identities all fa
         await grantProjectMembership(persistence, tenant, "project-security", actor, { role: "project_manager" });
         await persistence.transaction(tenant, async (transaction) => {
           if (scenario === "revoked-membership") {
-            const membership = await transaction.memberships.get("project-security", actor);
-            assert.ok(membership);
-            await transaction.memberships.update({
-              ...membership,
+            const principal = await transaction.principals.get(actor);
+            assert.ok(principal);
+            await transaction.principals.update({
+              ...principal,
               status: "revoked",
-              version: membership.version + 1,
+              version: principal.version + 1,
               updatedAtUtc: "2026-09-04T11:00:30.000Z",
-            }, membership.version);
+            }, principal.version);
           } else {
             const principal = await transaction.principals.get(actor);
             assert.ok(principal);
@@ -348,20 +349,15 @@ test("TC-SEC-001 legacy visibility never grants write or access-management capab
   const persistence = new MemoryPersistence();
   try {
     await prepare(persistence);
-    await persistence.transaction(tenant, async (transaction) => {
-      const membership = await transaction.memberships.get("project-security", member);
-      assert.ok(membership);
-      await transaction.memberships.update({
-        ...membership, securityDomainIds: ["legacy-domain"], version: membership.version + 1,
-        updatedAtUtc: "2026-09-04T11:01:00.000Z",
-      }, membership.version);
+    await grantProjectMembership(persistence, tenant, "project-security", legacyMember, {
+      securityDomainIds: ["legacy-domain"],
     });
     const allowed = await persistence.read(tenant, async (transaction) => {
-      const membership = await transaction.memberships.get("project-security", member);
+      const membership = await transaction.memberships.get("project-security", legacyMember);
       return {
-        view: await canAccessProjectObject(transaction, membership, member, "project-security", "legacy-domain", "view", command().occurredAtUtc),
-        contribute: await canAccessProjectObject(transaction, membership, member, "project-security", "legacy-domain", "contribute", command().occurredAtUtc),
-        manage: await canAccessProjectObject(transaction, membership, member, "project-security", "legacy-domain", "manage_access", command().occurredAtUtc),
+        view: await canAccessProjectObject(transaction, membership, legacyMember, "project-security", "legacy-domain", "view", command().occurredAtUtc),
+        contribute: await canAccessProjectObject(transaction, membership, legacyMember, "project-security", "legacy-domain", "contribute", command().occurredAtUtc),
+        manage: await canAccessProjectObject(transaction, membership, legacyMember, "project-security", "legacy-domain", "manage_access", command().occurredAtUtc),
       };
     });
     assert.deepEqual(allowed, { view: true, contribute: false, manage: false });

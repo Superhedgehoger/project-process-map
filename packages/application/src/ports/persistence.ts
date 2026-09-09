@@ -5,7 +5,7 @@ import type { PrincipalId, TenantId } from "../../../domain/src/identity.ts";
 import type { ExternalIdentityMapping, Principal } from "../../../domain/src/identity.ts";
 import type { IntegrationOperation, IntegrationStepAttempt } from "../../../domain/src/integration-operations.ts";
 import type { ProjectNode } from "../../../domain/src/project-structure.ts";
-import type { ProjectMembership } from "../../../domain/src/project-access.ts";
+import type { ProjectMembership, ProjectMembershipSecurityAuditEntry } from "../../../domain/src/project-access.ts";
 import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import type { SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
 import type { SecurityDomain, SecurityGrant, SecurityGrantAuditEntry } from "../../../domain/src/security-access.ts";
@@ -96,7 +96,16 @@ export interface PrincipalRepository {
 export interface ProjectMembershipRepository {
   get(projectId: string, principalId: PrincipalId): Promise<ProjectMembership | undefined>;
   insert(membership: ProjectMembership): Promise<void>;
-  update(membership: ProjectMembership, expectedVersion: number): Promise<void>;
+  restrictWithSecurityDomains(
+    membership: ProjectMembership,
+    expectedVersion: number,
+    evaluatedAtUtc: string,
+  ): Promise<SecurityDomain[]>;
+}
+
+export interface ProjectMembershipSecurityAuditRepository {
+  append(entry: ProjectMembershipSecurityAuditEntry): Promise<void>;
+  listByProject(projectId: string): Promise<ProjectMembershipSecurityAuditEntry[]>;
 }
 
 export interface SecurityDomainRepository {
@@ -157,6 +166,7 @@ export type TransactionContext = Readonly<{
   identities: IdentityMappingRepository;
   principals: PrincipalRepository;
   memberships: ProjectMembershipRepository;
+  membershipSecurityAudits: ProjectMembershipSecurityAuditRepository;
   securityDomains: SecurityDomainRepository;
   securityGrants: SecurityGrantRepository;
   securityGrantAudits: SecurityGrantAuditRepository;

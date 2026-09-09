@@ -15,6 +15,7 @@ import {
   type ManageSecurityGrantCommand,
   type ManageSecurityGrantFailurePoint,
 } from "../packages/application/src/security/manage-security-grant.ts";
+import { RestrictProjectMembershipHandler } from "../packages/application/src/security/restrict-project-membership.ts";
 import { principalId, tenantId } from "../packages/domain/src/identity.ts";
 import type { DomainEvent } from "../packages/domain/src/events.ts";
 import { grantProjectMembership } from "./support/project-membership.ts";
@@ -332,14 +333,14 @@ test("TC-SEC-003A authorization and target eligibility are rechecked before repl
       const handler = new ManageSecurityGrantHandler(current.persistence);
       await handler.execute(command());
       await current.persistence.transaction(tenant, async (transaction) => {
-        const membership = await transaction.memberships.get("project-grant", creator);
-        assert.ok(membership);
-        await transaction.memberships.update({
-          ...membership,
+        const principal = await transaction.principals.get(creator);
+        assert.ok(principal);
+        await transaction.principals.update({
+          ...principal,
           status: "revoked",
-          version: membership.version + 1,
+          version: principal.version + 1,
           updatedAtUtc: "2026-09-05T01:03:00.000Z",
-        }, membership.version);
+        }, principal.version);
       });
       await assert.rejects(
         handler.execute({ ...command(), commandId: "replay-after-revoke" }),
@@ -355,15 +356,18 @@ test("TC-SEC-003A authorization and target eligibility are rechecked before repl
     const current = await fixture(name);
     try {
       await prepare(current.persistence);
-      await current.persistence.transaction(tenant, async (transaction) => {
-        const membership = await transaction.memberships.get("project-grant", member);
-        assert.ok(membership);
-        await transaction.memberships.update({
-          ...membership,
-          status: "revoked",
-          version: membership.version + 1,
-          updatedAtUtc: "2026-09-05T01:03:00.000Z",
-        }, membership.version);
+      await new RestrictProjectMembershipHandler(current.persistence).execute({
+        tenantId: tenant,
+        commandId: "revoke-target-membership",
+        idempotencyKey: "revoke-target-membership",
+        correlationId: "security-grant",
+        principalId: creator,
+        projectId: "project-grant",
+        targetPrincipalId: member,
+        action: "revoke",
+        expectedMembershipVersion: 1,
+        reason: "test target eligibility",
+        occurredAtUtc: "2026-09-05T01:03:00.000Z",
       });
       await assert.rejects(
         new ManageSecurityGrantHandler(current.persistence).execute(command()),
@@ -665,7 +669,7 @@ test("TC-SEC-003A SQLite restart and concurrent Grant commands preserve one doma
   }
 });
 
-test("TC-SEC-003A SQLite v4 to v5 upgrade preserves SecurityDomain and Grant", async () => {
+test("TC-SEC-003C SQLite v5 to v6 upgrade preserves SecurityDomain and Grant", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ppm-security-grant-upgrade-"));
   const path = join(directory, "grant-upgrade.sqlite");
   try {
@@ -674,7 +678,7 @@ test("TC-SEC-003A SQLite v4 to v5 upgrade preserves SecurityDomain and Grant", a
     await original.close();
 
     const legacy = new DatabaseSync(path);
-    legacy.exec("DROP TABLE security_grant_audits; DELETE FROM schema_migrations WHERE version = 5");
+    legacy.exec("DROP TABLE project_membership_security_audits; DELETE FROM schema_migrations WHERE version = 6");
     legacy.close();
 
     const upgraded = new SqlitePersistence({ path });
@@ -682,14 +686,16 @@ test("TC-SEC-003A SQLite v4 to v5 upgrade preserves SecurityDomain and Grant", a
       domain: await transaction.securityDomains.get("grant-domain"),
       grant: await transaction.securityGrants.get("grant-domain", creator),
       audits: await transaction.securityGrantAudits.listByDomain("grant-domain"),
+      membershipAudits: await transaction.membershipSecurityAudits.listByProject("project-grant"),
     }));
     assert.equal(state.domain?.version, 1);
     assert.equal(state.grant?.capability, "manage_access");
     assert.deepEqual(state.audits, []);
+    assert.deepEqual(state.membershipAudits, []);
     await upgraded.close();
 
     const evidence = new DatabaseSync(path, { readOnly: true });
-    assert.equal((evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version, 5);
+    assert.equal((evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version, 6);
     evidence.close();
   } finally {
     await rm(directory, { recursive: true, force: true });

@@ -1,0 +1,22 @@
+[
+  {
+    "eventType": "project-map.project-membership.demoted",
+    "schemaVersion": 1,
+    "payload": { "action": "demoted", "permissionVersion": 2 }
+  },
+  {
+    "eventType": "project-map.project-membership.demoted",
+    "schemaVersion": 1,
+    "payload": { "action": "demoted" }
+  },
+  {
+    "eventType": "project-map.project-membership.revoked",
+    "schemaVersion": 1,
+    "payload": { "action": "revoked", "permissionVersion": 2 }
+  },
+  {
+    "eventType": "project-map.project-membership.revoked",
+    "schemaVersion": 1,
+    "payload": { "action": "revoked" }
+  }
+]
