@@ -3,7 +3,7 @@ import { eventTopic, type DomainEvent, type OutboxMessage } from "../../domain/s
 import type { PrincipalId, TenantId } from "../../domain/src/identity.ts";
 import { isProjectManager } from "../../domain/src/project-access.ts";
 import type { ProjectNode } from "../../domain/src/project-structure.ts";
-import { canAccessProjectObject, assertProjectSecurityStable } from "./access/project-security.ts";
+import { canAccessProjectObjectDuringMigration, assertProjectSecurityStable } from "./access/project-security.ts";
 import { ApplicationError } from "./errors.ts";
 import type { CommandScope, Persistence, TransactionContext } from "./ports/persistence.ts";
 
@@ -142,12 +142,18 @@ async function resolveInheritance(
   command: CreateNodeCommand,
   authorizationAtUtc: string,
 ): Promise<Readonly<{ securityDomainId: string | null; securityEpoch: number }>> {
-  if (command.parentId === null) return { securityDomainId: null, securityEpoch: 1 };
+  if (command.parentId === null) {
+    await assertProjectSecurityStable(transaction, command.projectId);
+    return { securityDomainId: null, securityEpoch: 1 };
+  }
   const parent = await transaction.nodes.get(command.parentId);
   if (parent === undefined || parent.projectId !== command.projectId || parent.deletedAtUtc !== null) {
     throw new ApplicationError("PARENT_NODE_NOT_FOUND", "Parent node not found");
   }
-  if (parent.securityDomainId === null) return { securityDomainId: null, securityEpoch: 1 };
+  if (parent.securityDomainId === null) {
+    await assertProjectSecurityStable(transaction, command.projectId);
+    return { securityDomainId: null, securityEpoch: 1 };
+  }
 
   const principal = await transaction.principals.get(command.principalId);
   const membership = await transaction.memberships.get(command.projectId, command.principalId);
@@ -158,9 +164,13 @@ async function resolveInheritance(
     || domain.parentSecurityDomainId !== null || root === undefined || root.projectId !== command.projectId
     || root.deletedAtUtc !== null || root.securityDomainId !== domain.id
     || parent.securityEpoch !== root.securityEpoch
-    || !await canAccessProjectObject(
-      transaction, membership, command.principalId, command.projectId,
-      domain.id, "edit", authorizationAtUtc,
+    || !await canAccessProjectObjectDuringMigration(
+      transaction, membership, command.principalId, {
+        projectId: command.projectId,
+        ownerNodeId: parent.id,
+        securityDomainId: parent.securityDomainId,
+        securityEpoch: parent.securityEpoch,
+      }, "edit", authorizationAtUtc,
     )) {
     throw new ApplicationError("PARENT_NODE_NOT_FOUND", "Parent node not found");
   }

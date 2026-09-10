@@ -4,7 +4,7 @@ import { eventTopic, type BackgroundJob, type DomainEvent, type OutboxMessage } 
 import type { ExternalBinding } from "../../../domain/src/external-reference.ts";
 import type { PrincipalId, TenantId } from "../../../domain/src/identity.ts";
 import { advanceIntegrationOperation, type IntegrationOperation } from "../../../domain/src/integration-operations.ts";
-import { assertProjectSecurityStable, canAccessProjectObject } from "../access/project-security.ts";
+import { assertProjectSecurityStable, canAccessProjectObjectDuringMigration } from "../access/project-security.ts";
 import type { AssetContentPort, StoredAssetContent } from "../ports/integrations.ts";
 import type { CommandScope, Persistence, TransactionContext } from "../ports/persistence.ts";
 
@@ -364,9 +364,13 @@ async function authorizedTask(transaction: TransactionContext, command: AttachTa
   const task = await transaction.tasks.get(command.taskId);
   if (task === undefined || task.deletedAtUtc !== null) throw new Error("TASK_NOT_FOUND");
   const membership = await transaction.memberships.get(task.projectId, command.principalId);
-  if (!await canAccessProjectObject(
-    transaction, membership, command.principalId, task.projectId,
-    task.securityDomainId, "contribute", authorizationAtUtc,
+  if (!await canAccessProjectObjectDuringMigration(
+    transaction, membership, command.principalId, {
+      projectId: task.projectId,
+      ownerNodeId: task.ownerNodeId,
+      securityDomainId: task.securityDomainId,
+      securityEpoch: task.securityEpoch,
+    }, "contribute", authorizationAtUtc,
   )) throw new Error("TASK_NOT_FOUND");
   await assertProjectSecurityStable(transaction, task.projectId);
   return task;

@@ -5,7 +5,7 @@ import { isProjectManager } from "../../../domain/src/project-access.ts";
 import type { SecurityDomain, SecurityGrant } from "../../../domain/src/security-access.ts";
 import { ApplicationError } from "../errors.ts";
 import type { CommandScope, Persistence } from "../ports/persistence.ts";
-import { assertProjectSecurityStable, canAccessProjectObject } from "../access/project-security.ts";
+import { assertProjectSecurityStable, canAccessProjectObjectDuringMigration } from "../access/project-security.ts";
 
 export type CreateSecurityRootCommand = Readonly<{
   tenantId: TenantId;
@@ -69,9 +69,13 @@ export class CreateSecurityRootHandler {
         throw new ApplicationError("NODE_NOT_FOUND", "Node not found");
       }
       const authorizationAtUtc = new Date().toISOString();
-      if (node.securityDomainId !== null && !await canAccessProjectObject(
-        transaction, membership, command.principalId, command.projectId,
-        node.securityDomainId, "manage_access", authorizationAtUtc,
+      if (!await canAccessProjectObjectDuringMigration(
+        transaction, membership, command.principalId, {
+          projectId: command.projectId,
+          ownerNodeId: node.id,
+          securityDomainId: node.securityDomainId,
+          securityEpoch: node.securityEpoch,
+        }, "manage_access", authorizationAtUtc,
       )) throw new ApplicationError("NODE_NOT_FOUND", "Node not found");
       await assertProjectSecurityStable(transaction, command.projectId);
 

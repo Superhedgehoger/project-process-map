@@ -10,7 +10,7 @@ import type {
   SecurityGrantAuditEntry,
 } from "../../../domain/src/security-access.ts";
 import { isCanonicalUtcTimestamp } from "../../../domain/src/security-access.ts";
-import { assertProjectSecurityStable, canAccessProjectObject } from "../access/project-security.ts";
+import { assertProjectSecurityStable, canAccessProjectObjectDuringMigration } from "../access/project-security.ts";
 import { ApplicationError } from "../errors.ts";
 import type { CommandScope, Persistence, TransactionContext } from "../ports/persistence.ts";
 
@@ -146,9 +146,13 @@ async function authorizedDomain(
     || domain.deletedAtUtc !== null || domain.parentSecurityDomainId !== null
     || rootNode === undefined || rootNode.projectId !== command.projectId
     || rootNode.securityDomainId !== domain.id
-    || !await canAccessProjectObject(
-      transaction, membership, command.principalId, command.projectId,
-      command.securityDomainId, "manage_access", authorizationAtUtc,
+    || !await canAccessProjectObjectDuringMigration(
+      transaction, membership, command.principalId, {
+        projectId: command.projectId,
+        ownerNodeId: rootNode.id,
+        securityDomainId: rootNode.securityDomainId,
+        securityEpoch: rootNode.securityEpoch,
+      }, "manage_access", authorizationAtUtc,
     )) throw new ApplicationError("NODE_NOT_FOUND", "Security domain not found");
   return { domain, securityEpoch: rootNode.securityEpoch };
 }

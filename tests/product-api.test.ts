@@ -189,7 +189,7 @@ test("ARCH-GATE-ACL-001 an authenticated Huly principal without membership is fa
   assert.equal(detail.status, 404);
 });
 
-test("ARCH-GATE-ACL-002 an open security migration freezes project API access", async () => {
+test("ARCH-GATE-ACL-002 migration reads fail closed per object while writes remain frozen", async () => {
   const persistence = new MemoryPersistence();
   const handler = createProductApi({ collaborationMode: "disabled", persistence, assetContent: new MemoryAssetContent() });
   await call(handler, "/api/nodes");
@@ -220,8 +220,90 @@ test("ARCH-GATE-ACL-002 an open security migration freezes project API access", 
     await transaction.securityMigrations.saveProgressPreservingPlan(active.id, active, planned.version);
   });
   const response = await call(handler, "/api/nodes/N-03");
-  assert.equal(response.status, 409);
-  assert.equal((JSON.parse(response.body) as { code: string }).code, "SECURITY_MIGRATION_IN_PROGRESS");
+  assert.equal(response.status, 404);
+  assert.equal((JSON.parse(response.body) as { code: string }).code, "NODE_NOT_FOUND");
+  const nodes = await call(handler, "/api/nodes");
+  assert.equal(nodes.status, 200);
+  assert.equal((JSON.parse(nodes.body) as Array<{ id: string }>).some((node) => node.id === "N-03"), false);
+  const write = await call(handler, "/api/nodes/N-03/tasks", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "migration-write-frozen" },
+    body: JSON.stringify({ title: "must remain frozen" }),
+  });
+  assert.equal(write.status, 404);
+  assert.equal((JSON.parse(write.body) as { code: string }).code, "NODE_NOT_FOUND");
+});
+
+test("TC-SEC-002H Product API applies the same migration intersection to Node, Task and Asset", async () => {
+  const persistence = new MemoryPersistence();
+  const handler = createProductApi({ collaborationMode: "disabled", persistence, assetContent: new MemoryAssetContent() });
+  await call(handler, "/api/nodes");
+  const source = await createApiSecurityRoot(handler, "migration-read-source", "N-03");
+  const target = await createApiSecurityRoot(handler, "migration-read-target", "N-04");
+  const taskResponse = await call(handler, "/api/nodes/N-03/tasks", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "migration-read-task" },
+    body: JSON.stringify({ taskId: "migration-read-task", title: "migration task" }),
+  });
+  assert.equal(taskResponse.status, 201);
+  const assetResponse = await call(handler, "/api/tasks/migration-read-task/files", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "migration-read-asset" },
+    body: JSON.stringify({ fileId: "migration-read-asset", name: "migration.txt", contentType: "text/plain", contentBase64: "bWlncmF0aW9u" }),
+  });
+  assert.equal(assetResponse.status, 201);
+  const planned: SecurityDomainMigration = {
+    tenantId: phase0Tenant,
+    id: "migration-api-intersection",
+    projectId: "phase0-project",
+    rootNodeId: "N-03",
+    sourceSecurityDomainId: source,
+    targetSecurityDomainId: target,
+    hierarchyRevision: 1,
+    sourceSecurityEpoch: 2,
+    targetSecurityEpoch: 3,
+    state: "planned",
+    cursor: null,
+    totalItems: 3,
+    migratedItems: 0,
+    failure: null,
+    nextAttemptAtUtc: null,
+    deadlineAtUtc: "2026-09-11T00:00:00.000Z",
+    version: 1,
+    createdAtUtc: "2026-09-10T11:00:00.000Z",
+    updatedAtUtc: "2026-09-10T11:00:00.000Z",
+  };
+  const active = transitionSecurityMigration(planned, "active", "2026-09-10T11:01:00.000Z");
+  await persistence.transaction(phase0Tenant, async (transaction) => {
+    await transaction.securityMigrations.insert(planned);
+    await transaction.securityMigrations.saveProgressPreservingPlan(active.id, active, planned.version);
+  });
+  for (const currentState of ["source", "target"] as const) {
+    const detail = await call(handler, "/api/nodes/N-03");
+    assert.equal(detail.status, 200, currentState);
+    const body = JSON.parse(detail.body) as { tasks: Array<{ id: string; files: Array<{ id: string }> }> };
+    assert.deepEqual(body.tasks.map((task) => task.id), ["migration-read-task"], currentState);
+    assert.deepEqual(body.tasks[0]?.files.map((asset) => asset.id), ["migration-read-asset"], currentState);
+    const frozenWrite = await call(handler, "/api/nodes/N-03/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": `migration-read-frozen-${currentState}` },
+      body: JSON.stringify({ title: "must remain frozen" }),
+    });
+    assert.equal(frozenWrite.status, 409, currentState);
+    assert.equal(
+      (JSON.parse(frozenWrite.body) as { code: string }).code,
+      "SECURITY_MIGRATION_IN_PROGRESS",
+      currentState,
+    );
+    if (currentState === "source") await persistence.transaction(phase0Tenant, async (transaction) => {
+      const node = await transaction.nodes.get("N-03");
+      const task = await transaction.tasks.get("migration-read-task");
+      const asset = await transaction.assets.get("migration-read-asset");
+      await transaction.nodes.migrateSecurityOwnership(active.id, node?.id ?? "", node?.version ?? 0);
+      await transaction.tasks.migrateSecurityOwnership(active.id, task?.id ?? "", task?.version ?? 0);
+      await transaction.assets.migrateSecurityOwnership(active.id, asset?.id ?? "", asset?.version ?? 0);
+    });
+  }
 });
 
 test("TC-SEC-001 Product API creates one sensitive root while an ungranted member cannot infer it", async () => {
@@ -648,8 +730,8 @@ function createTestProductApi(options: Omit<ProductApiOptions, "persistence" | "
   return createProductApi({ ...options, persistence: new MemoryPersistence(), assetContent: new MemoryAssetContent() });
 }
 
-async function createApiSecurityRoot(handler: Handler, key: string): Promise<string> {
-  const response = await call(handler, "/api/nodes/N-03/security-domain", {
+async function createApiSecurityRoot(handler: Handler, key: string, nodeId = "N-03"): Promise<string> {
+  const response = await call(handler, `/api/nodes/${encodeURIComponent(nodeId)}/security-domain`, {
     method: "POST",
     headers: { "content-type": "application/json", "idempotency-key": key },
     body: JSON.stringify({ expectedNodeVersion: 1, reason: "grant API fixture" }),

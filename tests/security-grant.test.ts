@@ -543,9 +543,7 @@ test("TC-SEC-003A legacy, cross-project and migrating domains fail closed", asyn
           : command();
       await assert.rejects(
         new ManageSecurityGrantHandler(persistence).execute(input),
-        (error) => error instanceof ApplicationError && error.code === (
-          scenario === "migration" ? "SECURITY_MIGRATION_IN_PROGRESS" : "NODE_NOT_FOUND"
-        ),
+        (error) => error instanceof ApplicationError && error.code === "NODE_NOT_FOUND",
         scenario,
       );
     } finally {

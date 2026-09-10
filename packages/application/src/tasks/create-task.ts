@@ -3,7 +3,7 @@ import { eventTopic, type BackgroundJob, type DomainEvent, type OutboxMessage } 
 import type { PrincipalId, TenantId } from "../../../domain/src/identity.ts";
 import { taskLifecycle, type ProductTask, type TaskLifecycleState, type TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import { ApplicationError } from "../errors.ts";
-import { assertProjectSecurityStable, canAccessProjectObject } from "../access/project-security.ts";
+import { assertProjectSecurityStable, canAccessProjectObject, canAccessProjectObjectDuringMigration } from "../access/project-security.ts";
 import type { CommandScope, Persistence, TransactionContext } from "../ports/persistence.ts";
 
 export type CreateTaskCommand = Readonly<{
@@ -82,9 +82,13 @@ export class CreateTaskHandler {
       if (node === undefined) throw new Error("NODE_NOT_FOUND");
       if (node.projectId !== command.projectId) throw new Error("PROJECT_MISMATCH");
       const actorMembership = await transaction.memberships.get(command.projectId, command.principalId);
-      if (!await canAccessProjectObject(
-        transaction, actorMembership, command.principalId, command.projectId,
-        node.securityDomainId, "contribute", authorizationAtUtc,
+      if (!await canAccessProjectObjectDuringMigration(
+        transaction, actorMembership, command.principalId, {
+          projectId: command.projectId,
+          ownerNodeId: node.id,
+          securityDomainId: node.securityDomainId,
+          securityEpoch: node.securityEpoch,
+        }, "contribute", authorizationAtUtc,
       )) throw new ApplicationError("NODE_NOT_FOUND", "Node not found");
       await assertProjectSecurityStable(transaction, command.projectId);
       const previous = await transaction.receipts.get<unknown>(scope);

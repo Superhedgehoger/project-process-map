@@ -2,7 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { AttachTaskAssetHandler, listTaskAssetsInTransaction } from "../../../../packages/application/src/assets/attach-task-asset.ts";
 import { ApplicationError } from "../../../../packages/application/src/errors.ts";
-import { assertProjectSecurityStable, canAccessProjectObject } from "../../../../packages/application/src/access/project-security.ts";
+import {
+  assertProjectSecurityStable,
+  canAccessProjectObjectDuringMigration,
+  canViewProjectObjectDuringMigration,
+} from "../../../../packages/application/src/access/project-security.ts";
 import type { AssetContentPort } from "../../../../packages/application/src/ports/integrations.ts";
 import type { Persistence } from "../../../../packages/application/src/ports/persistence.ts";
 import { ActOnTaskHandler, type TaskCommandAction } from "../../../../packages/application/src/tasks/act-on-task.ts";
@@ -34,13 +38,16 @@ export async function routeProjectRequest(
     const nodes = await persistence.read(identity.tenantId, async (transaction) => {
       const membership = await transaction.memberships.get("phase0-project", identity.principalId);
       if (membership === undefined || membership.status !== "active") return [];
-      await assertProjectSecurityStable(transaction, "phase0-project");
       const visible: ProjectNode[] = [];
       const atUtc = new Date().toISOString();
       for (const node of await transaction.nodes.listByProject("phase0-project")) {
-        if (await canAccessProjectObject(
-          transaction, membership, identity.principalId, node.projectId,
-          node.securityDomainId, "view", atUtc,
+        if (await canViewProjectObjectDuringMigration(
+          transaction, membership, identity.principalId, {
+            projectId: node.projectId,
+            ownerNodeId: node.id,
+            securityDomainId: node.securityDomainId,
+            securityEpoch: node.securityEpoch,
+          }, atUtc,
         )) visible.push(node);
       }
       return visible;
@@ -56,17 +63,24 @@ export async function routeProjectRequest(
       if (node === undefined) throw new ApplicationError("NODE_NOT_FOUND", `Node not found: ${nodeId}`);
       const membership = await transaction.memberships.get(node.projectId, identity.principalId);
       const atUtc = new Date().toISOString();
-      if (!await canAccessProjectObject(
-        transaction, membership, identity.principalId, node.projectId,
-        node.securityDomainId, "view", atUtc,
+      if (!await canViewProjectObjectDuringMigration(
+        transaction, membership, identity.principalId, {
+          projectId: node.projectId,
+          ownerNodeId: node.id,
+          securityDomainId: node.securityDomainId,
+          securityEpoch: node.securityEpoch,
+        }, atUtc,
       )) throw new ApplicationError("NODE_NOT_FOUND", `Node not found: ${nodeId}`);
-      await assertProjectSecurityStable(transaction, node.projectId);
       const tasks = await listTasksForNodeInTransaction(
         transaction,
         nodeId,
-        async (task) => await canAccessProjectObject(
-          transaction, membership, identity.principalId, task.projectId,
-          task.securityDomainId, "view", atUtc,
+        async (task) => await canViewProjectObjectDuringMigration(
+          transaction, membership, identity.principalId, {
+            projectId: task.projectId,
+            ownerNodeId: task.ownerNodeId,
+            securityDomainId: task.securityDomainId,
+            securityEpoch: task.securityEpoch,
+          }, atUtc,
         ),
       );
       return {
@@ -76,9 +90,13 @@ export async function routeProjectRequest(
           files: await listTaskAssetsInTransaction(
             transaction,
             task.id,
-            async (asset) => await canAccessProjectObject(
-              transaction, membership, identity.principalId, asset.projectId,
-              asset.securityDomainId, "view", atUtc,
+            async (asset) => await canViewProjectObjectDuringMigration(
+              transaction, membership, identity.principalId, {
+                projectId: asset.projectId,
+                ownerNodeId: asset.ownerNodeId,
+                securityDomainId: asset.securityDomainId,
+                securityEpoch: asset.securityEpoch,
+              }, atUtc,
             ),
           ),
         }))),
@@ -153,9 +171,13 @@ export async function routeProjectRequest(
       const candidate = await transaction.nodes.get(nodeId);
       if (candidate === undefined) return undefined;
       const membership = await transaction.memberships.get(candidate.projectId, identity.principalId);
-      return await canAccessProjectObject(
-        transaction, membership, identity.principalId, candidate.projectId,
-        candidate.securityDomainId, "contribute", new Date().toISOString(),
+      return await canAccessProjectObjectDuringMigration(
+        transaction, membership, identity.principalId, {
+          projectId: candidate.projectId,
+          ownerNodeId: candidate.id,
+          securityDomainId: candidate.securityDomainId,
+          securityEpoch: candidate.securityEpoch,
+        }, "contribute", new Date().toISOString(),
       ) ? candidate : undefined;
     });
     if (node === undefined) throw new ApplicationError("NODE_NOT_FOUND", `Node not found: ${nodeId}`);
@@ -222,9 +244,13 @@ export async function routeProjectRequest(
       const candidate = await transaction.tasks.get(taskId);
       if (candidate === undefined) return undefined;
       const membership = await transaction.memberships.get(candidate.projectId, identity.principalId);
-      return await canAccessProjectObject(
-        transaction, membership, identity.principalId, candidate.projectId,
-        candidate.securityDomainId, "contribute", new Date().toISOString(),
+      return await canAccessProjectObjectDuringMigration(
+        transaction, membership, identity.principalId, {
+          projectId: candidate.projectId,
+          ownerNodeId: candidate.ownerNodeId,
+          securityDomainId: candidate.securityDomainId,
+          securityEpoch: candidate.securityEpoch,
+        }, "contribute", new Date().toISOString(),
       ) ? candidate : undefined;
     });
     if (task === undefined) throw new ApplicationError("TASK_NOT_FOUND", `Task not found: ${taskId}`);

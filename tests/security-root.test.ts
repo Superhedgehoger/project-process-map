@@ -656,6 +656,18 @@ test("TC-SEC-002A legacy, nested and migrating parent scopes fail closed", async
         );
       }
       await current.persistence.transaction(tenant, async (transaction) => {
+        await transaction.nodes.insert({
+          tenantId: tenant,
+          id: "public-parent-during-migration",
+          projectId: "project-security",
+          parentId: null,
+          title: "Public parent during migration",
+          kind: "work_package",
+          securityDomainId: null,
+          securityEpoch: 1,
+          version: 1,
+          deletedAtUtc: null,
+        });
         const planned: SecurityDomainMigration = {
           tenantId: tenant,
           id: `inheritance-migration-${name}`,
@@ -686,9 +698,21 @@ test("TC-SEC-002A legacy, nested and migrating parent scopes fail closed", async
           commandId: `reject-migration-${name}`,
           idempotencyKey: `reject-migration-${name}`,
         })),
-        (error) => error instanceof ApplicationError && error.code === "SECURITY_MIGRATION_IN_PROGRESS",
+        (error) => error instanceof ApplicationError && error.code === "PARENT_NODE_NOT_FOUND",
         `${name}:migration`,
       );
+      for (const [suffix, parentId] of [["top-level", null], ["public-child", "public-parent-during-migration"]] as const) {
+        await assert.rejects(
+          executeCreateNode(current.persistence, childCommand({
+            commandId: `reject-migration-${suffix}-${name}`,
+            idempotencyKey: `reject-migration-${suffix}-${name}`,
+            nodeId: `reject-migration-${suffix}-${name}`,
+            parentId,
+          })),
+          (error) => error instanceof ApplicationError && error.code === "SECURITY_MIGRATION_IN_PROGRESS",
+          `${name}:migration:${suffix}`,
+        );
+      }
     } finally {
       await current.cleanup();
     }
