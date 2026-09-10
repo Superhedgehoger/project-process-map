@@ -1,23 +1,21 @@
 # Goal Handoff Checkpoint — project-process-map
 
-## 当前恢复状态（2026-09-09，优先于下方历史暂停记录）
+## 当前恢复状态（2026-09-10，优先于下方历史暂停记录）
 
 - 状态：GOAL_RUNNING
 - Goal threadId：`01a06f07-6235-7a43-b22d-fc042cf0f6aa`
 - Branch：`main`
-- 已验收并推送基线：`bf15b7a`（`docs: checkpoint migration object write slice`）。
-- 已验收并推送基线：`a12a713`（`docs: checkpoint migration batch slice`）。
-- 已验收并推送基线：`4e7e661`（`docs: checkpoint migration verification slice`）。
-- 已验收实现提交：`7cf367e`（`feat: verify migrated security objects`）。
-- upstream：`origin/main` 当前为 `4e7e661`；本地待推送提交为 `7cf367e`，另有本 checkpoint 校正待提交。
-- 工作区：TC-SEC-002G 实现、测试、Evidence、Phase 状态与 TC-SEC-002H Task Packet 已提交；当前仅 checkpoint 校正未提交。
+- 已验收并推送基线：`4747943`（`docs: checkpoint migration read intersection slice` 的前置基线；包含 TC-SEC-002G 与 TC-SEC-002H Task Packet）。
+- 已验收实现提交：`3f0a83a`（`feat: enforce migration read intersection`）。
+- upstream：`origin/main` 为 `4747943`；本地 HEAD 为 `3f0a83a`。
+- 工作区：TC-SEC-002H 实现、修复、测试、Evidence、Phase 状态与 TC-SEC-002I Task Packet 已提交；当前仅本 checkpoint 校正待提交。
 - 当前 Gate：P0-07 敏感 ACL（总项继续进行中）
-- 最近完成：P0-07 / TC-SEC-002G 对象完成验证与进入 verifying
-- 验收：独立安全 Review PASS；定向迁移回归 23/23；最终 `pnpm check` 140/140；14 个 Huly 镜像锁；扩展边界；`git diff --check` 与凭据/私钥特征扫描均通过。
-- 当前 Task：P0-07 / TC-SEC-002H 核心读取 API 的迁移期权限交集
-- Task Packet：`docs/agent-tasks/P0-07-TC-SEC-002H.md`
+- 最近完成：P0-07 / TC-SEC-002H 核心读取 API 的迁移期权限交集
+- 验收：独立安全 Review 最终 PASS；两轮 BLOCKER 已修复；定向安全回归 57/57；最终 `pnpm check` 146/146；14 个 Huly 镜像锁；扩展边界、`git diff --check` 与凭据/私钥特征扫描均通过。
+- 当前 Task：P0-07 / TC-SEC-002I Asset/Blob 内容下载的迁移期权限交集
+- Task Packet：`docs/agent-tasks/P0-07-TC-SEC-002I.md`
 - Blocker：本地提交尚未推送。
-- next_action：提交本 checkpoint 并推送 `4e7e661..HEAD`；随后实现 Node/Task/Asset 读取的逐对象旧域∩新域，所有写路径继续冻结。
+- next_action：提交本 checkpoint，并在获得精确范围确认后推送 `4747943..HEAD`；随后原地实现 TC-SEC-002I。
 
 旧会话 `e8e244ee-0c02-4769-8bd0-37f1ca8bd485` 仅是该 Git 工作树所在目录，不得作为聊天执行上下文恢复。原绑定的“project-process-map Goal 恢复”和“用量恢复后继续任务”自动任务已于 2026-09-05 暂停；后续不得把本 Goal 的恢复投递到该旧会话。
 
