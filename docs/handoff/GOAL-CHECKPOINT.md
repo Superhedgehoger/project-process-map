@@ -2,20 +2,24 @@
 
 ## 当前恢复状态（2026-09-10，优先于下方历史暂停记录）
 
-- 状态：GOAL_RUNNING
+- 状态：PAUSED_WAITING_FOR_QUOTA（Goal 未结束）
 - Goal threadId：`01a06f07-6235-7a43-b22d-fc042cf0f6aa`
 - Branch：`main`
 - 已验收并推送基线：`4747943`（`docs: checkpoint migration read intersection slice` 的前置基线；包含 TC-SEC-002G 与 TC-SEC-002H Task Packet）。
 - 已验收实现提交：`3f0a83a`（`feat: enforce migration read intersection`）。
-- upstream：`origin/main` 为 `4747943`；本地 HEAD 为 `3f0a83a`。
-- 工作区：TC-SEC-002H 实现、修复、测试、Evidence、Phase 状态与 TC-SEC-002I Task Packet 已提交；当前仅本 checkpoint 校正待提交。
+- upstream：`origin/main` 与本地 HEAD 均为 `a9a6bcf93dc4022fc750497bf28e2602127ae0bf`。
+- 工作区：干净；TC-SEC-002H 实现、修复、测试、Evidence、Phase 状态与 TC-SEC-002I Task Packet 均已提交并推送。
 - 当前 Gate：P0-07 敏感 ACL（总项继续进行中）
 - 最近完成：P0-07 / TC-SEC-002H 核心读取 API 的迁移期权限交集
 - 验收：独立安全 Review 最终 PASS；两轮 BLOCKER 已修复；定向安全回归 57/57；最终 `pnpm check` 146/146；14 个 Huly 镜像锁；扩展边界、`git diff --check` 与凭据/私钥特征扫描均通过。
 - 当前 Task：P0-07 / TC-SEC-002I Asset/Blob 内容下载的迁移期权限交集
 - Task Packet：`docs/agent-tasks/P0-07-TC-SEC-002I.md`
-- Blocker：本地提交尚未推送。
-- next_action：提交本 checkpoint，并在获得精确范围确认后推送 `4747943..HEAD`；随后原地实现 TC-SEC-002I。
+- Blocker：Codex Coding Plan 实现 Worker 于 2026-09-10 10:14 CST 命中周期额度限制；provider 提示 2026-09-10 13:47 恢复。
+- 已完成：TC-SEC-002H 已由 `3f0a83a` 与 `a9a6bcf` 提交并推送；TC-SEC-002I Task Packet 已存在；TC-SEC-002I 尚未产生代码修改。
+- 最近测试：TC-SEC-002H 最终独立安全 Review PASS；定向 57/57；`pnpm check` 146/146；镜像锁、扩展边界、diff 与凭据扫描均通过。
+- provider：Codex Coding Plan（native implementation Worker）；未切换额外收费 API，未重试受限 Harness。
+- 建议恢复：2026-09-10 13:52 CST（额度恢复时间 + 5 分钟）。
+- next_action：在新的干净 Cindy 执行上下文中仅读取本 checkpoint、AGENTS.md、TC-SEC-002I Task Packet 与当前 Git 状态，从 `a9a6bcf` 原地实现 TC-SEC-002I；不得恢复旧会话历史。
 
 旧会话 `e8e244ee-0c02-4769-8bd0-37f1ca8bd485` 仅是该 Git 工作树所在目录，不得作为聊天执行上下文恢复。原绑定的“project-process-map Goal 恢复”和“用量恢复后继续任务”自动任务已于 2026-09-05 暂停；后续不得把本 Goal 的恢复投递到该旧会话。
 
