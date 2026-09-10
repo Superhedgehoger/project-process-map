@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { AttachTaskAssetHandler, listTaskAssetsInTransaction } from "../../../../packages/application/src/assets/attach-task-asset.ts";
+import { DownloadAssetContentHandler } from "../../../../packages/application/src/assets/download-asset-content.ts";
 import { ApplicationError } from "../../../../packages/application/src/errors.ts";
 import {
   assertProjectSecurityStable,
@@ -17,7 +18,7 @@ import type { ApiNode } from "../../../../packages/contracts/src/project-process
 import { principalId, type PrincipalId, type TenantId } from "../../../../packages/domain/src/identity.ts";
 import type { ProjectNode } from "../../../../packages/domain/src/project-structure.ts";
 import { isCanonicalUtcTimestamp } from "../../../../packages/domain/src/security-access.ts";
-import { deterministicPublicId, optionalBodyBoolean, optionalBodyString, readJson, requiredHeader, requiredPositiveInteger, requiredString, sendJson } from "../http.ts";
+import { deterministicPublicId, optionalBodyBoolean, optionalBodyString, readJson, requiredHeader, requiredPositiveInteger, requiredString, sendBytes, sendJson } from "../http.ts";
 
 export type ProductRequestIdentity = Readonly<{ tenantId: TenantId; principalId: PrincipalId }>;
 export type ProjectRouteDependencies = Readonly<{
@@ -34,6 +35,16 @@ export async function routeProjectRequest(
   dependencies: ProjectRouteDependencies,
 ): Promise<boolean> {
   const { persistence } = dependencies;
+  const assetContentMatch = url.pathname.match(/^\/api\/assets\/([^/]+)\/content$/);
+  if (request.method === "GET" && assetContentMatch?.[1] !== undefined) {
+    const result = await new DownloadAssetContentHandler(persistence, dependencies.assetContent).execute({
+      tenantId: identity.tenantId,
+      principalId: identity.principalId,
+      assetId: decodeAssetContentIdentifier(assetContentMatch[1]),
+    });
+    sendBytes(response, result.contentType, result.bytes);
+    return true;
+  }
   if (request.method === "GET" && url.pathname === "/api/nodes") {
     const nodes = await persistence.read(identity.tenantId, async (transaction) => {
       const membership = await transaction.memberships.get("phase0-project", identity.principalId);
@@ -297,6 +308,16 @@ function decodePathIdentifier(value: string): string {
     return decoded;
   } catch {
     throw new ApplicationError("VALIDATION_FAILED", "Path identifier is invalid");
+  }
+}
+
+function decodeAssetContentIdentifier(value: string): string {
+  try {
+    const decoded = decodeURIComponent(value);
+    if (decoded.trim().length === 0 || decoded.includes("\u0000") || decoded.includes("/")) throw new Error("invalid identifier");
+    return decoded;
+  } catch {
+    throw new ApplicationError("NOT_FOUND", "Asset content not found");
   }
 }
 

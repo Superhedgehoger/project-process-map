@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -131,7 +131,18 @@ test("ARCH-GATE-ASSET-005 filesystem content is idempotent across adapter restar
     const secondAdapter = new FilesystemAssetContent(directory);
     assert.deepEqual(await secondAdapter.put(input), first);
     assert.deepEqual(await secondAdapter.get(first.reference), first);
+    assert.equal(await secondAdapter.ownsReference(tenant, first.reference), true);
+    assert.equal(await secondAdapter.ownsReference(tenantId("different-tenant"), first.reference), false);
     await assert.rejects(secondAdapter.put({ ...input, bytes: new TextEncoder().encode("changed"), sha256: createHash("sha256").update("changed").digest("hex") }));
+
+    const legacyReference = { provider: "local-fs", kind: "asset-content", externalId: "a".repeat(64), schemaVersion: 1 } as const;
+    await writeFile(join(directory, `${legacyReference.externalId}.json`), JSON.stringify({
+      contentType: "text/plain",
+      size: bytes.byteLength,
+      sha256,
+      scanState: "available",
+    }));
+    assert.equal(await secondAdapter.ownsReference(tenant, legacyReference), false);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -145,6 +156,10 @@ class FailsOnceContent implements AssetContentPort {
     this.attempts += 1;
     if (this.attempts === 1) throw new Error("temporary storage failure");
     return await this.delegate.put(input);
+  }
+
+  async ownsReference(...input: Parameters<AssetContentPort["ownsReference"]>) {
+    return await this.delegate.ownsReference(...input);
   }
 
   async get(reference: Parameters<AssetContentPort["get"]>[0]) {

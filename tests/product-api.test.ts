@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 import { Script } from "node:vm";
@@ -7,8 +10,11 @@ import { createProductApi, type ProductApiOptions } from "../apps/product-api/sr
 import { startProductApiServer } from "../apps/product-api/src/server.ts";
 import { decodeCommandResult, decodeSecurityGrant, decodeSecurityRoot, decodeTaskSummary } from "../packages/contracts/src/project-process-map-api.ts";
 import { resolveExternalIdentity } from "../packages/application/src/identity/resolve-external-identity.ts";
+import type { AssetContentPort, PutAssetContent } from "../packages/application/src/ports/integrations.ts";
 import { MemoryAssetContent } from "../packages/adapters/src/memory/asset-content.ts";
+import { FilesystemAssetContent } from "../packages/adapters/src/filesystem/asset-content.ts";
 import { MemoryPersistence } from "../packages/adapters/src/memory/persistence.ts";
+import { SqlitePersistence } from "../packages/adapters/src/sqlite/persistence.ts";
 import { principalId, tenantId } from "../packages/domain/src/identity.ts";
 import { transitionSecurityMigration, type SecurityDomainMigration } from "../packages/domain/src/security-migration.ts";
 import { grantProjectMembership } from "./support/project-membership.ts";
@@ -51,6 +57,34 @@ test("P0-05-CT-009 Product API exposes the vertical path with stable HTTP semant
     }),
   });
   assert.equal(fileResponse.status, 201);
+
+  const downloaded = await call(handler, "/api/assets/api-file-1/content");
+  assert.equal(downloaded.status, 200);
+  assert.equal(downloaded.headers.get("content-type"), "text/plain");
+  assert.equal(downloaded.headers.get("cache-control"), "no-store");
+  assert.equal(downloaded.headers.get("content-disposition"), "attachment");
+  assert.equal(downloaded.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(downloaded.body, "api evidence");
+  assert.equal(downloaded.body.includes("asset-content"), false);
+
+  const htmlBytes = "<script>globalThis.compromised=true</script>";
+  assert.equal((await call(handler, "/api/tasks/api-task-1/files", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "api-html-file" },
+    body: JSON.stringify({
+      fileId: "api-html-file",
+      name: "unsafe.html",
+      contentType: "text/html",
+      contentBase64: Buffer.from(htmlBytes).toString("base64"),
+    }),
+  })).status, 201);
+  const htmlDownload = await call(handler, "/api/assets/api-html-file/content");
+  assert.equal(htmlDownload.status, 200);
+  assert.equal(htmlDownload.headers.get("content-type"), "text/html");
+  assert.equal(htmlDownload.headers.get("content-disposition"), "attachment");
+  assert.equal(htmlDownload.headers.get("cache-control"), "no-store");
+  assert.equal(htmlDownload.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(htmlDownload.body, htmlBytes);
 
   const detailResponse = await call(handler, "/api/nodes/N-03");
   assert.equal(detailResponse.status, 200);
@@ -240,6 +274,14 @@ test("TC-SEC-002H Product API applies the same migration intersection to Node, T
   await call(handler, "/api/nodes");
   const source = await createApiSecurityRoot(handler, "migration-read-source", "N-03");
   const target = await createApiSecurityRoot(handler, "migration-read-target", "N-04");
+  const sourceOnly = await apiIdentity(persistence, new MemoryAssetContent(), "download-source-only", "member");
+  assert.equal((await grantRequest(handler, source, sourceOnly.principalId, "set", "download-source-only", {
+    capability: "view",
+    expiresAtUtc: null,
+    expectedGrantVersion: null,
+    expectedDomainVersion: 1,
+    reason: "source-only migration fixture",
+  })).status, 200);
   const taskResponse = await call(handler, "/api/nodes/N-03/tasks", {
     method: "POST",
     headers: { "content-type": "application/json", "idempotency-key": "migration-read-task" },
@@ -284,6 +326,14 @@ test("TC-SEC-002H Product API applies the same migration intersection to Node, T
     const body = JSON.parse(detail.body) as { tasks: Array<{ id: string; files: Array<{ id: string }> }> };
     assert.deepEqual(body.tasks.map((task) => task.id), ["migration-read-task"], currentState);
     assert.deepEqual(body.tasks[0]?.files.map((asset) => asset.id), ["migration-read-asset"], currentState);
+    const downloaded = await call(handler, "/api/assets/migration-read-asset/content");
+    assert.equal(downloaded.status, 200, currentState);
+    assert.equal(downloaded.body, "migration", currentState);
+    const denied = await call(sourceOnly.api, "/api/assets/migration-read-asset/content", {
+      headers: { authorization: "Bearer download-source-only" },
+    });
+    assert.equal(denied.status, 404, currentState);
+    assert.deepEqual(JSON.parse(denied.body), { code: "NOT_FOUND", message: "Asset content not found" }, currentState);
     const frozenWrite = await call(handler, "/api/nodes/N-03/tasks", {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": `migration-read-frozen-${currentState}` },
@@ -303,6 +353,207 @@ test("TC-SEC-002H Product API applies the same migration intersection to Node, T
       await transaction.tasks.migrateSecurityOwnership(active.id, task?.id ?? "", task?.version ?? 0);
       await transaction.assets.migrateSecurityOwnership(active.id, asset?.id ?? "", asset?.version ?? 0);
     });
+  }
+});
+
+test("TC-SEC-002I content failures are uniform and a principal change during the read fails closed", async () => {
+  const persistence = new MemoryPersistence();
+  const content = new PrincipalRevokingAssetContent(persistence);
+  const handler = createProductApi({ collaborationMode: "disabled", persistence, assetContent: content });
+  await call(handler, "/api/nodes");
+  assert.equal((await call(handler, "/api/nodes/N-03/tasks", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "download-race-task" },
+    body: JSON.stringify({ taskId: "download-race-task", title: "download race" }),
+  })).status, 201);
+  assert.equal((await call(handler, "/api/tasks/download-race-task/files", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "download-race-asset" },
+    body: JSON.stringify({
+      fileId: "download-race-asset",
+      name: "secret.txt",
+      contentType: "text/plain",
+      contentBase64: Buffer.from("must not escape").toString("base64"),
+    }),
+  })).status, 201);
+
+  content.revokePrincipalOnRead = true;
+  const raced = await call(handler, "/api/assets/download-race-asset/content");
+  const missing = await call(handler, "/api/assets/missing-asset/content");
+  const malformed = await call(handler, "/api/assets/%/content");
+  assert.equal(raced.status, 404);
+  assert.equal(raced.body, missing.body);
+  assert.equal(malformed.status, 404);
+  assert.equal(malformed.body, missing.body);
+  assert.deepEqual(JSON.parse(raced.body), { code: "NOT_FOUND", message: "Asset content not found" });
+  assert.equal(raced.body.includes("secret.txt"), false);
+  assert.equal(raced.body.includes("must not escape"), false);
+  assert.equal(raced.body.includes("asset-content"), false);
+});
+
+test("TC-SEC-002I unavailable, drifted and racing Asset content states share one minimal failure", async () => {
+  const persistence = new MemoryPersistence();
+  const content = new PrincipalRevokingAssetContent(persistence);
+  const handler = createProductApi({ collaborationMode: "disabled", persistence, assetContent: content });
+  await call(handler, "/api/nodes");
+  assert.equal((await call(handler, "/api/nodes/N-03/tasks", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "adversarial-download-task" },
+    body: JSON.stringify({ taskId: "adversarial-download-task", title: "adversarial download" }),
+  })).status, 201);
+  const upload = async (assetId: string) => {
+    assert.equal((await call(handler, "/api/tasks/adversarial-download-task/files", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": assetId },
+      body: JSON.stringify({
+        fileId: assetId,
+        name: `${assetId}.txt`,
+        contentType: "text/plain",
+        contentBase64: Buffer.from(`bytes:${assetId}`).toString("base64"),
+      }),
+    })).status, 201);
+  };
+  const cases: Array<[string, () => Promise<void>]> = [];
+  for (const state of ["initiated", "uploading", "scanning", "quarantined", "failed", "deleted"] as const) {
+    const assetId = `unavailable-${state}`;
+    await upload(assetId);
+    await persistence.transaction(phase0Tenant, async (transaction) => {
+      const asset = await transaction.assets.get(assetId);
+      assert.ok(asset);
+      await transaction.assets.savePreservingSecurityOwnership(assetId, {
+        ...asset,
+        lifecycleState: state,
+        deletedAtUtc: state === "deleted" ? new Date().toISOString() : null,
+        failureCode: state === "failed" ? "TEST_FAILURE" : null,
+        version: asset.version + 1,
+      }, asset.version);
+    });
+    cases.push([assetId, async () => {}]);
+  }
+
+  await upload("metadata-drift");
+  cases.push(["metadata-drift", async () => { content.metadataFailure = "drift"; }]);
+  await upload("missing-content");
+  cases.push(["missing-content", async () => { content.metadataFailure = "missing"; }]);
+  await upload("byte-drift");
+  cases.push(["byte-drift", async () => { content.corruptBytes = true; }]);
+  await upload("binding-drift");
+  await persistence.transaction(phase0Tenant, async (transaction) => {
+    const binding = await transaction.externalBindings.getByOwner("asset", "binding-drift", "blob_replica");
+    assert.ok(binding);
+    await transaction.externalBindings.update({
+      ...binding,
+      syncState: "failed",
+      lastError: "test drift",
+      version: binding.version + 1,
+      updatedAtUtc: new Date().toISOString(),
+    }, binding.version);
+  });
+  cases.push(["binding-drift", async () => {}]);
+  await upload("asset-race");
+  cases.push(["asset-race", async () => { content.race = { kind: "asset", assetId: "asset-race" }; }]);
+  await upload("binding-race");
+  cases.push(["binding-race", async () => { content.race = { kind: "binding", assetId: "binding-race" }; }]);
+
+  const missing = await call(handler, "/api/assets/not-present/content");
+  for (const [assetId, prepare] of cases) {
+    await prepare();
+    const response = await call(handler, `/api/assets/${assetId}/content`);
+    assert.equal(response.status, 404, assetId);
+    assert.equal(response.body, missing.body, assetId);
+    content.metadataFailure = null;
+    content.corruptBytes = false;
+    content.race = null;
+  }
+});
+
+test("TC-SEC-002I a matching foreign-tenant replica reference cannot substitute local content", async () => {
+  const persistence = new MemoryPersistence();
+  const content = new MemoryAssetContent();
+  const tenantA = tenantId("asset-download-tenant-a");
+  const tenantB = tenantId("asset-download-tenant-b");
+  const apiA = createProductApi({ collaborationMode: "disabled", persistence, assetContent: content, tenantId: tenantA });
+  const apiB = createProductApi({ collaborationMode: "disabled", persistence, assetContent: content, tenantId: tenantB });
+  const bytes = Buffer.from("same metadata and bytes");
+  for (const [api, suffix] of [[apiA, "a"], [apiB, "b"]] as const) {
+    await call(api, "/api/nodes");
+    assert.equal((await call(api, "/api/nodes/N-03/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": `foreign-task-${suffix}` },
+      body: JSON.stringify({ taskId: "foreign-task", title: "foreign reference" }),
+    })).status, 201);
+    assert.equal((await call(api, "/api/tasks/foreign-task/files", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": `foreign-asset-${suffix}` },
+      body: JSON.stringify({
+        fileId: "foreign-asset",
+        name: "same.txt",
+        contentType: "text/plain",
+        contentBase64: bytes.toString("base64"),
+      }),
+    })).status, 201);
+  }
+  const foreignReference = await persistence.read(tenantA, async (transaction) => (
+    await transaction.externalBindings.getByOwner("asset", "foreign-asset", "blob_replica")
+  ));
+  assert.ok(foreignReference);
+  await persistence.transaction(tenantB, async (transaction) => {
+    const binding = await transaction.externalBindings.getByOwner("asset", "foreign-asset", "blob_replica");
+    assert.ok(binding);
+    await transaction.externalBindings.update({
+      ...binding,
+      reference: foreignReference.reference,
+      version: binding.version + 1,
+      updatedAtUtc: new Date().toISOString(),
+    }, binding.version);
+  });
+  const denied = await call(apiB, "/api/assets/foreign-asset/content");
+  const missing = await call(apiB, "/api/assets/missing/content");
+  assert.equal(denied.status, 404);
+  assert.equal(denied.body, missing.body);
+});
+
+test("TC-SEC-002I SQLite and filesystem restart preserves tenant-scoped download authority", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppm-asset-download-"));
+  const databasePath = join(directory, "product.sqlite");
+  const contentPath = join(directory, "content");
+  let persistence = new SqlitePersistence({ path: databasePath });
+  try {
+    let handler = createProductApi({
+      collaborationMode: "disabled",
+      persistence,
+      assetContent: new FilesystemAssetContent(contentPath),
+    });
+    await call(handler, "/api/nodes");
+    assert.equal((await call(handler, "/api/nodes/N-03/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "restart-download-task" },
+      body: JSON.stringify({ taskId: "restart-download-task", title: "restart download" }),
+    })).status, 201);
+    assert.equal((await call(handler, "/api/tasks/restart-download-task/files", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "restart-download-asset" },
+      body: JSON.stringify({
+        fileId: "restart-download-asset",
+        name: "restart.txt",
+        contentType: "text/plain",
+        contentBase64: Buffer.from("restart content").toString("base64"),
+      }),
+    })).status, 201);
+    await persistence.close();
+
+    persistence = new SqlitePersistence({ path: databasePath });
+    handler = createProductApi({
+      collaborationMode: "disabled",
+      persistence,
+      assetContent: new FilesystemAssetContent(contentPath),
+    });
+    const downloaded = await call(handler, "/api/assets/restart-download-asset/content");
+    assert.equal(downloaded.status, 200);
+    assert.equal(downloaded.body, "restart content");
+  } finally {
+    await persistence.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });
 
@@ -802,4 +1053,80 @@ async function call(
   } as unknown as ServerResponse;
   await handler(request, response);
   return { status, headers, body };
+}
+
+class PrincipalRevokingAssetContent implements AssetContentPort {
+  readonly delegate = new MemoryAssetContent();
+  readonly persistence: MemoryPersistence;
+  revokePrincipalOnRead = false;
+  metadataFailure: "missing" | "drift" | null = null;
+  corruptBytes = false;
+  race: { kind: "asset" | "binding"; assetId: string } | null = null;
+
+  constructor(persistence: MemoryPersistence) {
+    this.persistence = persistence;
+  }
+
+  async put(input: PutAssetContent) {
+    return await this.delegate.put(input);
+  }
+
+  async ownsReference(...input: Parameters<AssetContentPort["ownsReference"]>) {
+    return await this.delegate.ownsReference(...input);
+  }
+
+  async get(reference: Parameters<AssetContentPort["get"]>[0]) {
+    const metadata = await this.delegate.get(reference);
+    if (this.metadataFailure === "missing") return undefined;
+    return metadata === undefined || this.metadataFailure !== "drift" ? metadata : { ...metadata, size: metadata.size + 1 };
+  }
+
+  async read(reference: Parameters<AssetContentPort["read"]>[0]) {
+    let bytes = await this.delegate.read(reference);
+    if (this.corruptBytes && bytes.byteLength > 0) {
+      bytes = Uint8Array.from(bytes);
+      bytes[0] = (bytes[0] ?? 0) ^ 0xff;
+    }
+    if (this.revokePrincipalOnRead) {
+      this.revokePrincipalOnRead = false;
+      await this.persistence.transaction(phase0Tenant, async (transaction) => {
+        const principal = await transaction.principals.get(principalId("phase0-user"));
+        assert.ok(principal);
+        await transaction.principals.update({
+          ...principal,
+          status: "revoked",
+          version: principal.version + 1,
+          updatedAtUtc: new Date().toISOString(),
+        }, principal.version);
+      });
+    }
+    if (this.race !== null) {
+      const race = this.race;
+      this.race = null;
+      await this.persistence.transaction(phase0Tenant, async (transaction) => {
+        if (race.kind === "asset") {
+          const asset = await transaction.assets.get(race.assetId);
+          assert.ok(asset);
+          await transaction.assets.savePreservingSecurityOwnership(asset.id, {
+            ...asset,
+            contentType: "application/octet-stream",
+            version: asset.version + 1,
+          }, asset.version);
+          return;
+        }
+        const binding = await transaction.externalBindings.getByOwner("asset", race.assetId, "blob_replica");
+        assert.ok(binding);
+        await transaction.externalBindings.update({
+          ...binding,
+          version: binding.version + 1,
+          updatedAtUtc: new Date().toISOString(),
+        }, binding.version);
+      });
+    }
+    return bytes;
+  }
+
+  async remove(reference: Parameters<AssetContentPort["remove"]>[0]) {
+    await this.delegate.remove(reference);
+  }
 }

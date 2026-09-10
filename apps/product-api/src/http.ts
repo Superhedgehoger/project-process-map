@@ -86,3 +86,14 @@ export function sendHtml(response: ServerResponse, body: string): void {
   });
   response.end(body);
 }
+
+export function sendBytes(response: ServerResponse, contentType: string, bytes: Uint8Array): void {
+  response.writeHead(200, {
+    "content-type": contentType,
+    "content-length": bytes.byteLength,
+    "cache-control": "no-store",
+    "content-disposition": "attachment",
+    "x-content-type-options": "nosniff",
+  });
+  response.end(Buffer.from(bytes));
+}

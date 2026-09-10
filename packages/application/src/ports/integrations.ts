@@ -92,6 +92,7 @@ export type StoredAssetContent = Readonly<{
 
 export interface AssetContentPort {
   put(content: PutAssetContent): Promise<StoredAssetContent>;
+  ownsReference(tenantId: TenantId, reference: ExternalReference): Promise<boolean>;
   get(reference: ExternalReference): Promise<StoredAssetContent | undefined>;
   read(reference: ExternalReference): Promise<Uint8Array>;
   remove(reference: ExternalReference): Promise<void>;

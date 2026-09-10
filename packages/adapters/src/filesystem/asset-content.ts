@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { externalReferenceKey, type ExternalReference } from "../../../domain/src/external-reference.ts";
 import type { AssetContentPort, PutAssetContent, StoredAssetContent } from "../../../application/src/ports/integrations.ts";
 
-type Metadata = Omit<StoredAssetContent, "reference">;
+type Metadata = Omit<StoredAssetContent, "reference"> & Readonly<{ tenantId: PutAssetContent["tenantId"] }>;
 
 export class FilesystemAssetContent implements AssetContentPort {
   readonly rootDirectory: string;
@@ -19,7 +19,9 @@ export class FilesystemAssetContent implements AssetContentPort {
     await mkdir(this.rootDirectory, { recursive: true, mode: 0o700 });
     const externalId = createHash("sha256").update(`${input.tenantId}\u0000${input.requestId}`).digest("hex");
     const reference = { provider: "local-fs", kind: "asset-content", externalId, schemaVersion: 1 } as const;
-    const previous = await this.get(reference);
+    const owned = await this.ownsReference(input.tenantId, reference);
+    const previous = owned ? await this.get(reference) : undefined;
+    if (!owned && await fileExists(this.metadataPath(reference))) throw new Error("ASSET_CONTENT_REQUEST_CONFLICT");
     if (previous !== undefined) {
       if (previous.sha256 !== input.sha256 || previous.contentType !== input.contentType || previous.size !== input.bytes.byteLength) {
         throw new Error("ASSET_CONTENT_REQUEST_CONFLICT");
@@ -29,6 +31,7 @@ export class FilesystemAssetContent implements AssetContentPort {
     const blobPath = this.blobPath(reference);
     const metadataPath = this.metadataPath(reference);
     const metadata: Metadata = {
+      tenantId: input.tenantId,
       contentType: input.contentType,
       size: input.bytes.byteLength,
       sha256: input.sha256,
@@ -48,7 +51,17 @@ export class FilesystemAssetContent implements AssetContentPort {
       const previousMetadata = JSON.parse(await readFile(metadataPath, "utf8")) as Metadata;
       if (JSON.stringify(previousMetadata) !== JSON.stringify(metadata)) throw new Error("ASSET_CONTENT_REQUEST_CONFLICT");
     }
-    return { reference, ...metadata };
+    return publicMetadata(reference, metadata);
+  }
+
+  async ownsReference(tenantId: PutAssetContent["tenantId"], reference: ExternalReference): Promise<boolean> {
+    if (!validReference(reference)) return false;
+    try {
+      const metadata = JSON.parse(await readFile(this.metadataPath(reference), "utf8")) as Partial<Metadata>;
+      return metadata.tenantId === tenantId;
+    } catch {
+      return false;
+    }
   }
 
   async get(reference: ExternalReference): Promise<StoredAssetContent | undefined> {
@@ -58,7 +71,7 @@ export class FilesystemAssetContent implements AssetContentPort {
       const bytes = await readFile(this.blobPath(reference));
       verifyHash(bytes, metadata.sha256);
       if (bytes.byteLength !== metadata.size) throw new Error("ASSET_CONTENT_SIZE_MISMATCH");
-      return { reference, ...metadata };
+      return publicMetadata(reference, metadata);
     } catch (error) {
       if (isNotFound(error)) return undefined;
       throw error;
@@ -86,10 +99,34 @@ export class FilesystemAssetContent implements AssetContentPort {
   }
 
   private assertReference(reference: ExternalReference): void {
-    if (reference.provider !== "local-fs" || reference.kind !== "asset-content" || reference.schemaVersion !== 1) {
+    if (!validReference(reference)) {
       throw new Error(`ASSET_CONTENT_REFERENCE_INVALID:${externalReferenceKey(reference)}`);
     }
-    if (!/^[a-f0-9]{64}$/.test(reference.externalId)) throw new Error("ASSET_CONTENT_EXTERNAL_ID_INVALID");
+  }
+}
+
+function validReference(reference: ExternalReference): boolean {
+  return reference.provider === "local-fs" && reference.kind === "asset-content" && reference.schemaVersion === 1
+    && /^[a-f0-9]{64}$/.test(reference.externalId);
+}
+
+function publicMetadata(reference: ExternalReference, metadata: Metadata): StoredAssetContent {
+  return {
+    reference,
+    contentType: metadata.contentType,
+    size: metadata.size,
+    sha256: metadata.sha256,
+    scanState: metadata.scanState,
+  };
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await readFile(path);
+    return true;
+  } catch (error) {
+    if (isNotFound(error)) return false;
+    throw error;
   }
 }
 

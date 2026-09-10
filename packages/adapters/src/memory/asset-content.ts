@@ -3,7 +3,7 @@ import { externalReferenceKey } from "../../../domain/src/external-reference.ts"
 import type { AssetContentPort, PutAssetContent, StoredAssetContent } from "../../../application/src/ports/integrations.ts";
 
 export class MemoryAssetContent implements AssetContentPort {
-  readonly #content = new Map<string, StoredAssetContent & { bytes: Uint8Array }>();
+  readonly #content = new Map<string, StoredAssetContent & { tenantId: PutAssetContent["tenantId"]; bytes: Uint8Array }>();
 
   async put(input: PutAssetContent): Promise<StoredAssetContent> {
     verifyHash(input.bytes, input.sha256);
@@ -12,10 +12,12 @@ export class MemoryAssetContent implements AssetContentPort {
     const key = externalReferenceKey(reference);
     const previous = this.#content.get(key);
     if (previous !== undefined) {
-      if (previous.sha256 !== input.sha256 || previous.contentType !== input.contentType) throw new Error("ASSET_CONTENT_REQUEST_CONFLICT");
+      if (previous.tenantId !== input.tenantId || previous.sha256 !== input.sha256
+        || previous.contentType !== input.contentType) throw new Error("ASSET_CONTENT_REQUEST_CONFLICT");
       return publicRecord(previous);
     }
     const stored = {
+      tenantId: input.tenantId,
       reference,
       contentType: input.contentType,
       size: input.bytes.byteLength,
@@ -25,6 +27,11 @@ export class MemoryAssetContent implements AssetContentPort {
     };
     this.#content.set(key, stored);
     return publicRecord(stored);
+  }
+
+  async ownsReference(tenantId: PutAssetContent["tenantId"], reference: StoredAssetContent["reference"]): Promise<boolean> {
+    if (reference.provider !== "memory" || reference.kind !== "asset-content" || reference.schemaVersion !== 1) return false;
+    return this.#content.get(externalReferenceKey(reference))?.tenantId === tenantId;
   }
 
   async get(reference: StoredAssetContent["reference"]): Promise<StoredAssetContent | undefined> {
@@ -48,7 +55,7 @@ function verifyHash(bytes: Uint8Array, expected: string): void {
   if (actual !== expected) throw new Error("ASSET_CONTENT_HASH_MISMATCH");
 }
 
-function publicRecord(value: StoredAssetContent & { bytes: Uint8Array }): StoredAssetContent {
+function publicRecord(value: StoredAssetContent & { tenantId: PutAssetContent["tenantId"]; bytes: Uint8Array }): StoredAssetContent {
   return {
     reference: structuredClone(value.reference),
     contentType: value.contentType,
