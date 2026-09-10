@@ -1,7 +1,7 @@
 import type { TenantId } from "../../../domain/src/identity.ts";
 import type { ProjectNode } from "../../../domain/src/project-structure.ts";
 import { ApplicationError } from "../errors.ts";
-import type { Persistence } from "../ports/persistence.ts";
+import type { Persistence, TransactionContext } from "../ports/persistence.ts";
 
 export type SecurityMigrationInventoryQuery = Readonly<{
   tenantId: TenantId;
@@ -28,6 +28,13 @@ export type SecurityMigrationInventory = Readonly<{
   sourceSecurityEpoch: number;
   totalItems: number;
   items: readonly SecurityMigrationInventoryItem[];
+}>;
+
+export type SecurityMigrationInventoryProgress = Readonly<{
+  cursor: string | null;
+  migratedItems: number;
+  targetSecurityDomainId: string | null;
+  targetSecurityEpoch: number;
 }>;
 
 export class SecurityMigrationInventoryReader {
@@ -87,6 +94,65 @@ export class SecurityMigrationInventoryReader {
       if (error instanceof ApplicationError && error.code === "SECURITY_MIGRATION_INVENTORY_INVALID") throw error;
       throw new ApplicationError("SECURITY_MIGRATION_INVENTORY_INVALID", "Security migration inventory is invalid");
     }
+  }
+}
+
+export async function buildResumableSecurityMigrationInventory(
+  transaction: TransactionContext,
+  query: SecurityMigrationInventoryQuery,
+  progress: SecurityMigrationInventoryProgress,
+): Promise<SecurityMigrationInventory> {
+  validate(query);
+  try {
+    if (!Number.isSafeInteger(progress.migratedItems) || progress.migratedItems < 0
+      || !Number.isSafeInteger(progress.targetSecurityEpoch) || progress.targetSecurityEpoch <= 0) invalid();
+    const tenantNodes = await transaction.nodes.listForSecurityMigration();
+    const tenantNodesById = new Map(tenantNodes.map((node) => [node.id, node]));
+    assertProjectParentBoundary(tenantNodes, tenantNodesById, query.projectId);
+    const projectNodes = tenantNodes.filter((node) => node.projectId === query.projectId);
+    const nodesById = new Map(projectNodes.map((node) => [node.id, node]));
+    const root = nodesById.get(query.rootNodeId);
+    if (root === undefined) invalid();
+    assertTreeIntegrity(projectNodes, nodesById);
+
+    const subtreeIds = collectSubtree(root.id, projectNodes);
+    const subtreeNodes = projectNodes.filter((node) => subtreeIds.has(node.id));
+    for (const node of subtreeNodes) {
+      if (node.id !== root.id && await transaction.securityDomains.getByRoot(query.projectId, node.id) !== undefined) {
+        invalid();
+      }
+    }
+
+    const tasks = await transaction.tasks.listForSecurityMigration();
+    const assets = await transaction.assets.listForSecurityMigration();
+    for (const object of [...tasks, ...assets]) {
+      const owner = nodesById.get(object.ownerNodeId);
+      if ((object.projectId === query.projectId) !== (owner !== undefined)) invalid();
+      if (owner !== undefined && object.projectId !== owner.projectId) invalid();
+    }
+
+    const items = [
+      ...subtreeNodes.map((node) => item("node", node.id, node.id, node, root.id)),
+      ...tasks.filter((task) => subtreeIds.has(task.ownerNodeId))
+        .map((task) => item("task", task.id, task.ownerNodeId, task, root.id)),
+      ...assets.filter((asset) => subtreeIds.has(asset.ownerNodeId))
+        .map((asset) => item("asset", asset.id, asset.ownerNodeId, asset, root.id)),
+    ].sort(compareItems);
+    const completed = completedItemCount(items, progress);
+    for (const [index, current] of items.entries()) {
+      if (index < completed) assertTarget(current, progress);
+      else assertSource(current, query);
+    }
+    return {
+      rootNodeId: root.id,
+      sourceSecurityDomainId: query.sourceSecurityDomainId,
+      sourceSecurityEpoch: query.sourceSecurityEpoch,
+      totalItems: items.length,
+      items,
+    };
+  } catch (error) {
+    if (error instanceof ApplicationError && error.code === "SECURITY_MIGRATION_INVENTORY_INVALID") throw error;
+    throw new ApplicationError("SECURITY_MIGRATION_INVENTORY_INVALID", "Security migration inventory is invalid");
   }
 }
 
@@ -150,6 +216,23 @@ function collectSubtree(rootNodeId: string, nodes: readonly ProjectNode[]): Set<
 
 function assertSource(value: SecurityOwned, query: SecurityMigrationInventoryQuery): void {
   if (value.securityDomainId !== query.sourceSecurityDomainId || value.securityEpoch !== query.sourceSecurityEpoch) invalid();
+}
+
+function assertTarget(value: SecurityOwned, progress: SecurityMigrationInventoryProgress): void {
+  if (value.securityDomainId !== progress.targetSecurityDomainId || value.securityEpoch !== progress.targetSecurityEpoch) invalid();
+}
+
+function completedItemCount(
+  items: readonly SecurityMigrationInventoryItem[],
+  progress: SecurityMigrationInventoryProgress,
+): number {
+  if (progress.cursor === null) {
+    if (progress.migratedItems !== 0) invalid();
+    return 0;
+  }
+  const cursorIndex = items.findIndex((current) => current.cursor === progress.cursor);
+  if (cursorIndex < 0 || cursorIndex + 1 !== progress.migratedItems) invalid();
+  return cursorIndex + 1;
 }
 
 function item(
