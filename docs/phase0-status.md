@@ -10,7 +10,7 @@
 | P0-04 Huly Shell 与 Node 原型 | 完成 | 四个独立插件包、五处可审计 composition 接入；Front/Transactor/Workspace 三镜像真实运行；Shell 内入口、六节点页面和 N-04 详情切换通过浏览器验收 | P0-05 Node → Task → File 纵向链路 |
 | P0-05 Node → Product Task/Asset → Huly 投影 | 完成 | Product Task/Asset 为权威事实；Huly 作为异步投影；确定性请求、超时回查、部分成功续跑、死信恢复与真实 wire envelope 均有契约测试 | P0-05A 任务验收与交付物守卫；P0-07 敏感 ACL |
 | P0-06 事件与 Outbox 原子写 | 完成 | SQLite 在同一事务写领域状态、事件、Outbox、Job 与幂等回执；覆盖租户隔离、重启、并发领取、租约、重放、冲突及故障断点 | PostgreSQL 多副本实施前复用同一行为契约 |
-| P0-07 敏感 ACL | 进行中 | `TC-SEC-001` 首根链路；`TC-SEC-002A` 新敏感后代同域继承；`TC-SEC-002B/C/D/E/F` 对象归属、迁移计划、inventory、条件换域与原子批次/checkpoint；`TC-SEC-003A/B/C` Grant 与 Membership 原子守卫；137 项测试通过 | verifying/全通道 epoch 验证、真实 U2/U7/U8 模型、嵌套域及全通道 ACL |
+| P0-07 敏感 ACL | 进行中 | `TC-SEC-001` 首根链路；`TC-SEC-002A～G` 已覆盖继承、归属守卫、持久计划、inventory、条件换域、原子批次与对象完成后进入 verifying；`TC-SEC-003A/B/C` Grant 与 Membership 原子守卫；140 项测试通过 | 迁移期逐对象权限交集、全通道 epoch 验证、真实 U2/U7/U8、嵌套域 |
 | P0-ND-01 无 Docker 原生发行可行性 | 完成 | 自包含浏览器入口、Product API 与 Worker 原生启动；版本化 Node 24 tarball、SHA-256；临时目录冒烟确认未调用 Docker，并完成页面 → 节点 → 任务 → Asset → 重启回读 | P0-ND-02 干净 Linux、备份恢复与升级/回滚 |
 | ARCH-GATE-01 架构修正 | 完成 | CR-003、ADR-003～ADR-008；42 项行为/故障测试；无 Docker 原生发行与重启恢复冒烟通过 | 恢复按单条纵向切片开发，从 P0-05A 开始 |
 | P0-05A 任务验收与交付物守卫 | 进行中 | `T1a` 已完成显式验收人快照、两轮验收、最小持久成员/安全域授权、负责人/验收人改派、旧库回放兼容、事件/Outbox 和 SQLite 重启恢复；57 项测试通过 | 补 P0-07 成员配置与角色槽位解析，再进入 Deliverable 与节点完成守卫 |
@@ -51,5 +51,7 @@ P0-07 的 `TC-SEC-001` 子切片已经建立正式 SecurityDomain/SecurityGrant 
 `TC-SEC-002E` 已新增仅限 active Migration 的 Node/Task/Asset 条件换域端口，目标安全域与纪元只能来自受保护的持久计划，三类对象只改变安全归属、纪元与版本。Migration generic insert 同时收紧为合法初始 planned，禁止伪造 active 绕过状态机；Memory/SQLite 的 source→target/public、负面矩阵、并发、重启、回调回滚与独立安全复核均已通过。详见 `docs/reports/P0-07-TC-SEC-002E-migration-object-write.md`。
 
 `TC-SEC-002F` 已将稳定 inventory、对象条件换域与 Migration checkpoint 组合为同一有界事务。续跑严格要求 cursor/migratedItems 对应完整 target 前缀与 source 后缀；任一对象写或真实 checkpoint CAS 失败整批回滚。Memory/SQLite 的多批续跑、source→public、乱序/伪造进度拒绝、双连接竞争、重启与独立安全复核均已通过。详见 `docs/reports/P0-07-TC-SEC-002F-migration-batch.md`。
+
+`TC-SEC-002G` 已新增对象完成验证闸门：只有当前完整 inventory 的每一项均为 target，且 cursor/count/total 精确一致时，active Migration 才能经领域状态机与 CAS 进入 verifying。verifying 继续保持旧域∩新域权限交集，本片没有 committed 或投影完成声明。Memory/SQLite、source→public、并发、重启与独立安全复核均已通过。详见 `docs/reports/P0-07-TC-SEC-002G-migration-verifying.md`。
 
 P0-01 风险详见 `docs/reports/P0-01-source-audit.md`；Docker 开发环境复跑见 `docs/reports/P0-02-selfhost-replay.md`；Shell 验收见 `docs/reports/P0-04-huly-shell.md`；纵向链路见 `docs/reports/P0-05-node-task-file.md`；任务验收见 `docs/reports/P0-05A-T1a-task-review.md`；敏感根见 `docs/reports/P0-07-TC-SEC-001-first-security-root.md`；Grant 写守卫见 `docs/reports/P0-07-TC-SEC-003A-grant-write.md`；事件原子性见 `docs/reports/P0-06a-local-event-outbox.md`；架构修正验收见 `docs/reports/ARCH-GATE-01-architecture-correction.md`；无 Docker 交付边界见 `docs/change-records/CR-002-docker-free-saas.md` 与 `docs/adr/ADR-002-docker-free-runtime.md`。
