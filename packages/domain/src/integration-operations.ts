@@ -23,6 +23,7 @@ export type IntegrationOperation = Readonly<{
   version: number;
   createdAtUtc: string;
   updatedAtUtc: string;
+  leaseToken?: string | null;
 }>;
 
 export type IntegrationStepAttempt = Readonly<{
@@ -48,6 +49,7 @@ export function advanceIntegrationOperation(
     nextAttemptAtUtc?: string | null;
     lastError?: string | null;
     incrementAttempt?: boolean;
+    leaseToken?: string | null;
   }>,
 ): IntegrationOperation {
   if (operation.state === "completed" || operation.state === "compensated") throw new Error("INTEGRATION_OPERATION_IS_TERMINAL");
@@ -74,6 +76,7 @@ export function advanceIntegrationOperation(
     expectedSyncWatermark: change.expectedSyncWatermark === undefined ? operation.expectedSyncWatermark : change.expectedSyncWatermark,
     nextAttemptAtUtc: change.nextAttemptAtUtc === undefined ? operation.nextAttemptAtUtc : change.nextAttemptAtUtc,
     lastError: change.lastError === undefined ? null : change.lastError,
+    leaseToken: change.leaseToken !== undefined ? change.leaseToken : (operation.leaseToken ?? null),
     version: operation.version + 1,
     updatedAtUtc: change.occurredAtUtc,
   };

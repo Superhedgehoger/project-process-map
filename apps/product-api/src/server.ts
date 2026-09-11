@@ -49,7 +49,7 @@ export function createNativeDependencies(environment: NodeJS.ProcessEnv = proces
 export function createNativeJobProcessor(
   environment: NodeJS.ProcessEnv,
   dependencies: NativeProductApiDependencies,
-): ((job: BackgroundJob) => Promise<void>) | undefined {
+): ((job: BackgroundJob) => ReturnType<CollaborationProjectionProcessor["process"]>) | undefined {
   if (configuredCollaborationMode(environment) !== "huly") return undefined;
   const config = hulyWorkerConfig(environment);
   if (config === undefined) return undefined;

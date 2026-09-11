@@ -6,8 +6,10 @@ export type WorkerDependencies = Readonly<{
   outbox: OutboxConsumer;
   jobs: JobConsumer;
   publish?: (message: OutboxMessage) => Promise<void>;
-  processJob?: (job: BackgroundJob) => Promise<void>;
+  processJob?: (job: BackgroundJob) => Promise<void | JobProcessingResult>;
 }>;
+
+export type JobProcessingResult = Readonly<{ outcome: "deferred"; availableAtUtc: string }>;
 
 export type WorkerOptions = Readonly<{
   workerId?: string;
@@ -74,7 +76,11 @@ export async function runWorkerCycle(
   for (const job of jobs) {
     try {
       if (dependencies.processJob === undefined) throw new Error(`NO_JOB_PROCESSOR:${job.jobType}`);
-      await dependencies.processJob(job);
+      const result = await dependencies.processJob(job);
+      if (result?.outcome === "deferred") {
+        if (job.leaseToken !== null) await dependencies.jobs.defer(job.tenantId, job.id, job.leaseToken, result.availableAtUtc);
+        continue;
+      }
       if (job.leaseToken !== null && await dependencies.jobs.markCompleted(job.tenantId, job.id, job.leaseToken, nowUtc)) jobsProcessed += 1;
     } catch (error) {
       if (job.leaseToken !== null) {

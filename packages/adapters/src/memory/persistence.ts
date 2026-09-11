@@ -6,6 +6,7 @@ import type { TenantId } from "../../../domain/src/identity.ts";
 import type { ExternalIdentityMapping, Principal } from "../../../domain/src/identity.ts";
 import type { IntegrationOperation, IntegrationStepAttempt } from "../../../domain/src/integration-operations.ts";
 import type { ProjectNode } from "../../../domain/src/project-structure.ts";
+import type { OutboundProjectionFence } from "../../../domain/src/outbound-projection-fence.ts";
 import type { ProjectMembership, ProjectMembershipSecurityAuditEntry } from "../../../domain/src/project-access.ts";
 import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import {
@@ -32,6 +33,7 @@ type MemoryState = {
   assetBindings: Map<string, AssetBinding>;
   externalBindings: Map<string, ExternalBinding>;
   operations: Map<string, IntegrationOperation>;
+  outboundProjectionFences: Map<string, OutboundProjectionFence>;
   operationSteps: Map<string, IntegrationStepAttempt>;
   identityMappings: Map<string, ExternalIdentityMapping>;
   principals: Map<string, Principal>;
@@ -60,6 +62,7 @@ function emptyState(): MemoryState {
     assetBindings: new Map(),
     externalBindings: new Map(),
     operations: new Map(),
+    outboundProjectionFences: new Map(),
     operationSteps: new Map(),
     identityMappings: new Map(),
     principals: new Map(),
@@ -89,6 +92,7 @@ function cloneState(state: MemoryState): MemoryState {
     assetBindings: new Map(structuredClone([...state.assetBindings])),
     externalBindings: new Map(structuredClone([...state.externalBindings])),
     operations: new Map(structuredClone([...state.operations])),
+    outboundProjectionFences: new Map(structuredClone([...state.outboundProjectionFences])),
     operationSteps: new Map(structuredClone([...state.operationSteps])),
     identityMappings: new Map(structuredClone([...state.identityMappings])),
     principals: new Map(structuredClone([...state.principals])),
@@ -114,6 +118,15 @@ export type MemoryPersistenceSnapshot = Readonly<MemoryState>;
 export class MemoryPersistence implements Persistence {
   #state = emptyState();
   #tail: Promise<void> = Promise.resolve();
+  readonly #now: () => Date;
+
+  constructor(options?: { now?: () => Date }) {
+    this.#now = options?.now ?? (() => new Date());
+  }
+
+  private nowUtc(): string {
+    return this.#now().toISOString();
+  }
 
   readonly outboxConsumer: OutboxConsumer = {
     countReady: async (nowUtc) => {
@@ -147,6 +160,9 @@ export class MemoryPersistence implements Persistence {
     release: async (tenantId, id, leaseToken, nextAttemptAtUtc, error) => await this.exclusive(
       async () => release(this.#state.jobs, tenantId, id, leaseToken, nextAttemptAtUtc, error),
     ),
+    defer: async (tenantId, id, leaseToken, availableAtUtc) => await this.exclusive(
+      async () => deferJob(this.#state.jobs, tenantId, id, leaseToken, availableAtUtc),
+    ),
     markDeadLetter: async (tenantId, id, leaseToken, error) => await this.exclusive(
       async () => deadLetter(this.#state.jobs, tenantId, id, leaseToken, error),
     ),
@@ -155,7 +171,7 @@ export class MemoryPersistence implements Persistence {
   async transaction<T>(tenantId: TenantId, work: (transaction: TransactionContext) => Promise<T>): Promise<T> {
     return await this.exclusive(async () => {
       const draft = cloneState(this.#state);
-      const result = await work(context(draft, tenantId));
+      const result = await work(context(draft, tenantId, () => this.nowUtc()));
       this.#state = draft;
       return result;
     });
@@ -163,7 +179,7 @@ export class MemoryPersistence implements Persistence {
 
   async read<T>(tenantId: TenantId, work: (transaction: TransactionContext) => Promise<T>): Promise<T> {
     await this.#tail;
-    return await work(context(cloneState(this.#state), tenantId));
+    return await work(context(cloneState(this.#state), tenantId, () => this.nowUtc()));
   }
 
   async close(): Promise<void> {
@@ -187,7 +203,11 @@ export class MemoryPersistence implements Persistence {
   }
 }
 
-function context(state: MemoryState, tenantId: TenantId): TransactionContext {
+function context(
+  state: MemoryState,
+  tenantId: TenantId,
+  nowUtc: () => string = () => new Date().toISOString(),
+): TransactionContext {
   const tenantPrefix = `${tenantId}\u0000`;
   const migrationForObjectWrite = (migrationId: string): SecurityDomainMigration => {
     const migration = state.securityMigrations.get(`${tenantPrefix}${migrationId}`);
@@ -441,6 +461,30 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
         .filter((operation) => operation.tenantId === tenantId && (operation.state === "retryable" || operation.state === "recovery_required"))
         .map((operation) => structuredClone(operation)),
     },
+    outboundProjectionFences: {
+      acquire: async (fence) => {
+        assertTenant(tenantId, fence.tenantId);
+        const key = `${tenantPrefix}${fence.id}`;
+        const current = state.outboundProjectionFences.get(key);
+        if (current !== undefined && current.expiresAtUtc > fence.createdAtUtc) return false;
+        state.outboundProjectionFences.set(key, structuredClone(fence));
+        return true;
+      },
+      renew: async (fenceId, token, expiresAtUtc) => {
+        const key = `${tenantPrefix}${fenceId}`;
+        const current = state.outboundProjectionFences.get(key);
+        if (current === undefined || current.token !== token) return false;
+        state.outboundProjectionFences.set(key, { ...current, expiresAtUtc });
+        return true;
+      },
+      release: async (fenceId, token) => {
+        const key = `${tenantPrefix}${fenceId}`;
+        const current = state.outboundProjectionFences.get(key);
+        if (current === undefined || current.token !== token) return false;
+        state.outboundProjectionFences.delete(key);
+        return true;
+      },
+    },
     identities: {
       findExternal: async (provider, connectionId, externalTenantRef, externalSubjectRef) => clone(state.identityMappings.get(
         identityKey(tenantId, provider, connectionId, externalTenantRef, externalSubjectRef),
@@ -665,6 +709,10 @@ function context(state: MemoryState, tenantId: TenantId): TransactionContext {
           throw new Error("SECURITY_MIGRATION_PLAN_IMMUTABLE");
         }
         assertSecurityMigrationProgressChange(current, migration);
+        if (current.state === "planned" && migration.state === "active"
+          && hasActiveFenceOrUnresolvedOperationInMigrationScope(state, tenantId, migration, nowUtc())) {
+          throw new Error("SECURITY_MIGRATION_OUTBOUND_FENCE_ACTIVE");
+        }
         state.securityMigrations.set(key, structuredClone(migration));
       },
       listRecoverable: async () => [...state.securityMigrations.values()]
@@ -875,4 +923,111 @@ function deadLetter<T extends BackgroundJob>(
     lastError: error,
   });
   return true;
+}
+
+function deferJob<T extends BackgroundJob>(
+  store: Map<string, T>,
+  tenantId: TenantId,
+  id: string,
+  leaseToken: string,
+  availableAtUtc: string,
+): boolean {
+  const key = `${tenantId}\u0000${id}`;
+  const item = store.get(key);
+  if (item === undefined || item.state !== "leased" || item.leaseToken !== leaseToken) return false;
+  store.set(key, {
+    ...item,
+    state: "pending",
+    availableAtUtc,
+    attempts: Math.max(0, item.attempts - 1),
+    leaseOwner: null,
+    leaseToken: null,
+    leaseExpiresAtUtc: null,
+  });
+  return true;
+}
+
+function hasActiveFenceOrUnresolvedOperationInMigrationScope(
+  state: MemoryState,
+  tenantId: TenantId,
+  migration: SecurityDomainMigration,
+  trustedNowUtc: string,
+): boolean {
+  const tenantPrefix = `${tenantId}\u0000`;
+
+  const activeFences = [...state.outboundProjectionFences.values()]
+    .filter((f) => f.tenantId === tenantId && f.projectId === migration.projectId && f.expiresAtUtc > trustedNowUtc);
+
+  const unresolvedOps = [...state.operations.values()]
+    .filter((op) => op.tenantId === tenantId
+      && !["completed", "compensated"].includes(op.state)
+      && (op.operationType === "collaboration.task.project" || op.operationType === "collaboration.asset.project"));
+
+  if (activeFences.length === 0 && unresolvedOps.length === 0) {
+    return false;
+  }
+
+  const migrationRoot = state.nodes.get(`${tenantPrefix}${migration.rootNodeId}`);
+  if (migrationRoot === undefined || migrationRoot.projectId !== migration.projectId || migrationRoot.deletedAtUtc !== null) {
+    return true;
+  }
+
+  for (const fence of activeFences) {
+    const visited = new Set<string>();
+    let currentId: string | null = fence.ownerNodeId;
+    while (currentId !== null) {
+      if (visited.has(currentId)) return true;
+      visited.add(currentId);
+      const node = state.nodes.get(`${tenantPrefix}${currentId}`);
+      if (node === undefined || node.projectId !== migration.projectId || node.deletedAtUtc !== null) return true;
+      if (node.id === migration.rootNodeId) return true;
+      currentId = node.parentId;
+    }
+  }
+
+  for (const op of state.operations.values()) {
+    if (op.tenantId !== tenantId) continue;
+    if (op.state === "completed" || op.state === "compensated") continue;
+    if (op.operationType !== "collaboration.task.project" && op.operationType !== "collaboration.asset.project") {
+      if (op.operationType === "asset.ingest" || op.operationType === "blob.delete") {
+        continue;
+      }
+      return true;
+    }
+
+    let ownerNodeId: string | null = null;
+    const subjectType = (op as { subjectType?: unknown }).subjectType;
+    if (subjectType === "task") {
+      const task = state.tasks.get(`${tenantPrefix}${op.subjectId}`);
+      if (task === undefined) return true;
+      if (task.projectId !== migration.projectId) continue;
+      if (task.deletedAtUtc !== null) return true;
+      ownerNodeId = task.ownerNodeId;
+    } else if (subjectType === "asset") {
+      const asset = state.assets.get(`${tenantPrefix}${op.subjectId}`);
+      if (asset === undefined) return true;
+      if (asset.projectId !== migration.projectId) continue;
+      if (asset.deletedAtUtc !== null) return true;
+      ownerNodeId = asset.ownerNodeId;
+    } else {
+      return true;
+    }
+
+    if (!ownerNodeId || typeof ownerNodeId !== "string") {
+      return true;
+    }
+
+    const visited = new Set<string>();
+    let currentId: string | null = ownerNodeId;
+    while (currentId !== null) {
+      if (visited.has(currentId)) return true;
+      visited.add(currentId);
+      const node = state.nodes.get(`${tenantPrefix}${currentId}`);
+      if (node === undefined || node.projectId !== migration.projectId || node.deletedAtUtc !== null) return true;
+      if (node.id === migration.rootNodeId) return true;
+      currentId = node.parentId;
+    }
+  }
+
+  return false;
 }

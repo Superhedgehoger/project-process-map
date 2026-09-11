@@ -1,8 +1,9 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Asset } from "../../../domain/src/assets.ts";
 import type { BackgroundJob } from "../../../domain/src/events.ts";
 import type { ExternalBinding, ExternalReference } from "../../../domain/src/external-reference.ts";
 import { advanceIntegrationOperation, type IntegrationOperation } from "../../../domain/src/integration-operations.ts";
+import type { SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
 import { taskLifecycle, type ProductTask } from "../../../domain/src/tasks.ts";
 import type {
   AssetContentPort,
@@ -21,12 +22,18 @@ export type CollaborationProjectionDependencies = Readonly<{
   blobs: ExternalBlobProjectionPort;
   taskFiles: TaskFileProjectionPort;
   now?: () => Date;
+  freezeDeferMilliseconds?: number;
+  fenceDurationMilliseconds?: number;
 }>;
+
+export type CollaborationProjectionResult = Readonly<{ outcome: "deferred"; availableAtUtc: string }>;
 
 type OperationContext = Readonly<{
   operation: IntegrationOperation;
   attempt: number;
 }>;
+
+type FenceLease = Readonly<{ id: string; token: string }>;
 
 /**
  * Projects product-owned facts into an optional collaboration provider.
@@ -41,33 +48,47 @@ export class CollaborationProjectionProcessor {
     this.#dependencies = dependencies;
   }
 
-  async process(job: BackgroundJob): Promise<void> {
+  async process(job: BackgroundJob): Promise<void | CollaborationProjectionResult> {
     if (job.jobType === "collaboration.task.project") {
-      await this.projectTask(job);
-      return;
+      return await this.projectTask(job);
     }
     if (job.jobType === "collaboration.asset.project") {
-      await this.projectAsset(job);
-      return;
+      return await this.projectAsset(job);
     }
     throw new Error(`UNSUPPORTED_JOB_TYPE:${job.jobType}`);
   }
 
-  private async projectTask(job: BackgroundJob): Promise<void> {
+  private async projectTask(job: BackgroundJob): Promise<void | CollaborationProjectionResult> {
     const taskId = requiredPayloadString(job, "taskId");
     const desiredVersion = requiredPayloadVersion(job);
     const operationId = `op:${job.id}`;
-    const nowUtc = this.nowUtc();
+
     const prepared = await this.#dependencies.persistence.transaction(job.tenantId, async (transaction) => {
       const task = await transaction.tasks.get(taskId);
       if (task === undefined) throw new Error("TASK_NOT_FOUND");
+      if (!await collaborationProjectionAllowed(transaction, task)) return { deferred: true as const };
       const binding = await transaction.externalBindings.getByOwner("task", taskId, "collaboration_projection");
       if (binding?.syncState === "synced" && binding.desiredVersion >= desiredVersion) return { done: true as const };
-      const operation = await prepareOperation(transaction, job, operationId, "task", taskId, "create_task", nowUtc);
-      if (operation === undefined) return { done: true as const };
-      return { done: false as const, task, operation, binding };
+      const lease = await this.acquireFence(transaction, job, task.projectId, task.ownerNodeId, "task", taskId, operationId);
+      if (lease === undefined) return { deferred: true as const };
+      const operation = await prepareOperation(transaction, job, operationId, "task", taskId, "create_task", this.nowUtc(), lease.token);
+      if (operation === undefined) {
+        await transaction.outboundProjectionFences.release(lease.id, lease.token);
+        return { done: true as const };
+      }
+      return { done: false as const, task, operation, binding, lease };
     });
+    if ("deferred" in prepared) return this.deferredResult();
     if (prepared.done) return;
+
+    const scopeValid = await this.#dependencies.persistence.transaction(job.tenantId, async (transaction) => {
+      const task = await transaction.tasks.get(taskId);
+      if (task === undefined || !await collaborationProjectionAllowed(transaction, task)) return false;
+      const durationMs = this.#dependencies.fenceDurationMilliseconds ?? 30_000;
+      const expiresAtUtc = new Date(Date.parse(this.nowUtc()) + durationMs).toISOString();
+      return await transaction.outboundProjectionFences.renew(prepared.lease.id, prepared.lease.token, expiresAtUtc);
+    });
+    if (!scopeValid) return this.deferredResult();
 
     try {
       const record = await this.#dependencies.tasks.create({
@@ -76,6 +97,16 @@ export class CollaborationProjectionProcessor {
         status: collaborationStatus(prepared.task),
       });
       await this.#dependencies.persistence.transaction(job.tenantId, async (transaction) => {
+        const completed = await completeOperation(
+          transaction,
+          operationId,
+          "task_created",
+          record.reference,
+          record.syncWatermark,
+          this.nowUtc(),
+          prepared.lease.token,
+        );
+        if (!completed) return;
         await saveProjectionBinding(transaction, {
           tenantId: job.tenantId,
           id: `binding:collaboration:task:${taskId}`,
@@ -91,15 +122,15 @@ export class CollaborationProjectionProcessor {
           version: 1,
           updatedAtUtc: this.nowUtc(),
         }, prepared.binding);
-        await completeOperation(transaction, operationId, "task_created", record.reference, record.syncWatermark, this.nowUtc());
+        await transaction.outboundProjectionFences.release(prepared.lease.id, prepared.lease.token);
       });
     } catch (error) {
-      await this.recordFailure(job, operationId, "create_task", error);
+      await this.recordFailure(job, operationId, "create_task", error, prepared.lease);
       throw error;
     }
   }
 
-  private async projectAsset(job: BackgroundJob): Promise<void> {
+  private async projectAsset(job: BackgroundJob): Promise<void | CollaborationProjectionResult> {
     const assetId = requiredPayloadString(job, "assetId");
     const taskId = requiredPayloadString(job, "taskId");
     const desiredVersion = requiredPayloadVersion(job);
@@ -108,25 +139,46 @@ export class CollaborationProjectionProcessor {
       const asset = await transaction.assets.get(assetId);
       if (asset === undefined) throw new Error("ASSET_NOT_FOUND");
       if (asset.lifecycleState !== "available" || asset.deletedAtUtc !== null) throw new Error("ASSET_NOT_AVAILABLE");
+      if (!await assetProjectionAllowed(transaction, asset, taskId)) return { deferred: true as const };
       const projection = await transaction.externalBindings.getByOwner("asset", assetId, "collaboration_projection");
       if (projection?.syncState === "synced" && projection.desiredVersion >= desiredVersion) return { done: true as const };
       const localContent = await transaction.externalBindings.getByOwner("asset", assetId, "blob_replica");
       if (localContent === undefined || localContent.syncState !== "synced") throw new Error("ASSET_CONTENT_BINDING_NOT_READY");
       const taskProjection = await transaction.externalBindings.getByOwner("task", taskId, "collaboration_projection");
       if (taskProjection === undefined || taskProjection.syncState !== "synced") throw new Error("TASK_PROJECTION_NOT_READY");
-      const operation = await prepareOperation(transaction, job, operationId, "asset", assetId, "upload_blob", this.nowUtc());
-      if (operation === undefined) return { done: true as const };
-      return { done: false as const, asset, localContent, taskProjection, projection, operation };
+      const lease = await this.acquireFence(transaction, job, asset.projectId, asset.ownerNodeId, "asset", assetId, operationId);
+      if (lease === undefined) return { deferred: true as const };
+      const operation = await prepareOperation(transaction, job, operationId, "asset", assetId, "upload_blob", this.nowUtc(), lease.token);
+      if (operation === undefined) {
+        await transaction.outboundProjectionFences.release(lease.id, lease.token);
+        return { done: true as const };
+      }
+      return { done: false as const, asset, localContent, taskProjection, projection, operation, lease };
     });
+    if ("deferred" in prepared) return this.deferredResult();
     if (prepared.done) return;
 
     let blobReference = prepared.operation.operation.externalReference;
     let blobCheckpointNeeded = blobReference === null;
     try {
-      if (blobReference === null || !await this.#dependencies.blobs.exists(blobReference)) {
+      let exists = false;
+      if (blobReference !== null) {
+        exists = await this.#dependencies.blobs.exists(blobReference as ExternalReference);
+      }
+      if (blobReference === null || !exists) {
         blobCheckpointNeeded = true;
         const bytes = await this.#dependencies.assetContent.read(prepared.localContent.reference);
         verifyContent(prepared.asset, bytes);
+
+        const putValid = await this.#dependencies.persistence.transaction(job.tenantId, async (transaction) => {
+          const asset = await transaction.assets.get(assetId);
+          if (asset === undefined || !await assetProjectionAllowed(transaction, asset, taskId)) return false;
+          const durationMs = this.#dependencies.fenceDurationMilliseconds ?? 30_000;
+          const expiresAtUtc = new Date(Date.parse(this.nowUtc()) + durationMs).toISOString();
+          return await transaction.outboundProjectionFences.renew(prepared.lease.id, prepared.lease.token, expiresAtUtc);
+        });
+        if (!putValid) return this.deferredResult();
+
         const stored = await this.#dependencies.blobs.put({
           requestId: `${prepared.operation.operation.externalRequestId}:blob`,
           contentType: prepared.asset.contentType,
@@ -136,14 +188,31 @@ export class CollaborationProjectionProcessor {
         blobReference = stored.reference;
       }
       if (blobCheckpointNeeded) {
-        await this.#dependencies.persistence.transaction(job.tenantId, async (transaction) => {
-          await checkpointOperation(transaction, operationId, "attach_file", blobReference as ExternalReference, this.nowUtc());
+        const checkpointed = await this.#dependencies.persistence.transaction(job.tenantId, async (transaction) => {
+          return await checkpointOperation(
+            transaction,
+            operationId,
+            "attach_file",
+            blobReference as ExternalReference,
+            this.nowUtc(),
+            prepared.lease.token,
+          );
         });
+        if (!checkpointed) return this.deferredResult();
       }
     } catch (error) {
-      await this.recordFailure(job, operationId, "upload_blob", error);
+      await this.recordFailure(job, operationId, "upload_blob", error, prepared.lease);
       throw error;
     }
+
+    const attachValid = await this.#dependencies.persistence.transaction(job.tenantId, async (transaction) => {
+      const asset = await transaction.assets.get(assetId);
+      if (asset === undefined || !await assetProjectionAllowed(transaction, asset, taskId)) return false;
+      const durationMs = this.#dependencies.fenceDurationMilliseconds ?? 30_000;
+      const expiresAtUtc = new Date(Date.parse(this.nowUtc()) + durationMs).toISOString();
+      return await transaction.outboundProjectionFences.renew(prepared.lease.id, prepared.lease.token, expiresAtUtc);
+    });
+    if (!attachValid) return this.deferredResult();
 
     try {
       const attachment = await this.#dependencies.taskFiles.attach({
@@ -155,6 +224,16 @@ export class CollaborationProjectionProcessor {
         size: prepared.asset.size,
       });
       await this.#dependencies.persistence.transaction(job.tenantId, async (transaction) => {
+        const completed = await completeOperation(
+          transaction,
+          operationId,
+          "file_attached",
+          attachment.reference,
+          attachment.syncWatermark,
+          this.nowUtc(),
+          prepared.lease.token,
+        );
+        if (!completed) return;
         await saveProjectionBinding(transaction, {
           tenantId: job.tenantId,
           id: `binding:collaboration:asset:${assetId}`,
@@ -170,18 +249,54 @@ export class CollaborationProjectionProcessor {
           version: 1,
           updatedAtUtc: this.nowUtc(),
         }, prepared.projection);
-        await completeOperation(transaction, operationId, "file_attached", attachment.reference, attachment.syncWatermark, this.nowUtc());
+        await transaction.outboundProjectionFences.release(prepared.lease.id, prepared.lease.token);
       });
     } catch (error) {
-      await this.recordFailure(job, operationId, "attach_file", error);
+      await this.recordFailure(job, operationId, "attach_file", error, prepared.lease);
       throw error;
     }
   }
 
-  private async recordFailure(job: BackgroundJob, operationId: string, step: string, cause: unknown): Promise<void> {
+  private async acquireFence(
+    transaction: TransactionContext,
+    job: BackgroundJob,
+    projectId: string,
+    ownerNodeId: string,
+    subjectType: "task" | "asset",
+    subjectId: string,
+    _operationId: string,
+  ): Promise<FenceLease | undefined> {
+    const fenceId = `fence:${subjectType}:${subjectId}`;
+    const token = randomUUID();
+    const createdAtUtc = this.nowUtc();
+    const durationMs = this.#dependencies.fenceDurationMilliseconds ?? 30_000;
+    const expiresAtUtc = new Date(Date.parse(createdAtUtc) + durationMs).toISOString();
+    const acquired = await transaction.outboundProjectionFences.acquire({
+      tenantId: job.tenantId,
+      id: fenceId,
+      projectId,
+      ownerNodeId,
+      token,
+      expiresAtUtc,
+      createdAtUtc,
+    });
+    if (!acquired) return undefined;
+    return { id: fenceId, token };
+  }
+
+  private async recordFailure(
+    job: BackgroundJob,
+    operationId: string,
+    step: string,
+    cause: unknown,
+    lease?: FenceLease,
+  ): Promise<void> {
     await this.#dependencies.persistence.transaction(job.tenantId, async (transaction) => {
       const operation = await transaction.integrationOperations.get(operationId);
       if (operation === undefined || operation.state === "completed" || operation.state === "compensated") return;
+      if (lease !== undefined && operation.leaseToken !== undefined && operation.leaseToken !== null && operation.leaseToken !== lease.token) {
+        return;
+      }
       const retryable = isRetryable(cause);
       const updated = advanceIntegrationOperation(operation, {
         state: retryable ? "retryable" : "recovery_required",
@@ -189,16 +304,164 @@ export class CollaborationProjectionProcessor {
         occurredAtUtc: this.nowUtc(),
         nextAttemptAtUtc: retryable ? this.nowUtc() : null,
         lastError: errorMessage(cause),
+        leaseToken: lease?.token ?? null,
       });
       await transaction.integrationOperations.update(updated, operation.version);
       await appendStep(transaction, updated, step, "failed", errorCode(cause), this.nowUtc());
+      if (lease !== undefined) {
+        if (retryable) {
+          const durationMs = this.#dependencies.fenceDurationMilliseconds ?? 30_000;
+          const expiresAtUtc = new Date(Date.parse(this.nowUtc()) + durationMs).toISOString();
+          await transaction.outboundProjectionFences.renew(lease.id, lease.token, expiresAtUtc);
+        } else {
+          await transaction.outboundProjectionFences.release(lease.id, lease.token);
+        }
+      }
     });
   }
 
   private nowUtc(): string {
     return (this.#dependencies.now ?? (() => new Date()))().toISOString();
   }
+
+  private deferredResult(): CollaborationProjectionResult {
+    return {
+      outcome: "deferred",
+      availableAtUtc: new Date(Date.parse(this.nowUtc()) + (this.#dependencies.freezeDeferMilliseconds ?? 30_000)).toISOString(),
+    };
+  }
 }
+
+async function assetProjectionAllowed(transaction: TransactionContext, asset: Asset, taskId: string): Promise<boolean> {
+  const task = await transaction.tasks.get(taskId);
+  if (task === undefined || task.deletedAtUtc !== null || task.projectId !== asset.projectId
+    || task.ownerNodeId !== asset.ownerNodeId || task.securityDomainId !== asset.securityDomainId
+    || task.securityEpoch !== asset.securityEpoch) return false;
+  const bindings = await transaction.assets.listBindings("task", task.id);
+  if (!bindings.some((binding) => binding.assetId === asset.id && binding.invalidatedAtUtc === null)) return false;
+  return await collaborationProjectionAllowed(transaction, asset);
+}
+
+async function collaborationProjectionAllowed(
+  transaction: TransactionContext,
+  object: Pick<ProductTask | Asset, "projectId" | "ownerNodeId" | "securityDomainId" | "securityEpoch" | "deletedAtUtc">,
+): Promise<boolean> {
+  if (object.deletedAtUtc !== null || !Number.isSafeInteger(object.securityEpoch) || object.securityEpoch <= 0) return false;
+
+  const ownerPath = await authoritativePath(transaction, object.projectId, object.ownerNodeId);
+  if (ownerPath === undefined) return false;
+
+  const ownerNode = await transaction.nodes.get(object.ownerNodeId);
+  if (ownerNode === undefined || ownerNode.projectId !== object.projectId || ownerNode.deletedAtUtc !== null) return false;
+  if (ownerNode.securityDomainId !== object.securityDomainId) return false;
+
+  if (object.securityDomainId !== null) {
+    const domain = await transaction.securityDomains.get(object.securityDomainId);
+    if (domain === undefined || domain.projectId !== object.projectId || domain.deletedAtUtc !== null
+      || domain.parentSecurityDomainId !== null) return false;
+
+    const formalRoot = await transaction.nodes.get(domain.rootNodeId);
+    if (formalRoot === undefined || formalRoot.projectId !== object.projectId || formalRoot.deletedAtUtc !== null) return false;
+    if (!ownerPath.has(formalRoot.id)) return false;
+    if (formalRoot.securityDomainId !== domain.id) return false;
+    if (!Number.isSafeInteger(formalRoot.securityEpoch) || formalRoot.securityEpoch <= 0) return false;
+    if (object.securityEpoch !== formalRoot.securityEpoch || ownerNode.securityEpoch !== formalRoot.securityEpoch) return false;
+
+    let currentNodeId: string | null = object.ownerNodeId;
+    let reachedFormalRoot = false;
+    const visited = new Set<string>();
+    while (currentNodeId !== null) {
+      if (visited.has(currentNodeId)) return false;
+      visited.add(currentNodeId);
+      const node = await transaction.nodes.get(currentNodeId);
+      if (node === undefined || node.projectId !== object.projectId || node.deletedAtUtc !== null) return false;
+      if (node.securityDomainId !== domain.id) return false;
+      if (node.securityEpoch !== formalRoot.securityEpoch) return false;
+      if (currentNodeId === formalRoot.id) {
+        reachedFormalRoot = true;
+        break;
+      }
+      currentNodeId = node.parentId;
+    }
+    if (!reachedFormalRoot) return false;
+  } else {
+    if (ownerNode.securityEpoch !== object.securityEpoch) return false;
+    for (const nodeId of ownerPath) {
+      const node = await transaction.nodes.get(nodeId);
+      if (node === undefined || node.securityDomainId !== null) return false;
+    }
+  }
+
+  const open = (await transaction.securityMigrations.listRecoverable())
+    .filter((migration) => migration.projectId === object.projectId
+      && ["active", "verifying", "retryable", "recovery_required"].includes(migration.state));
+  let relevant = 0;
+  for (const migration of open) {
+    const root = await transaction.nodes.get(migration.rootNodeId);
+    if (root === undefined || root.projectId !== object.projectId || root.deletedAtUtc !== null) return false;
+    if (!await validMigrationDomain(transaction, migration.sourceSecurityDomainId, object.projectId, migration.sourceSecurityEpoch, migration)
+      || !await validMigrationDomain(transaction, migration.targetSecurityDomainId, object.projectId, migration.targetSecurityEpoch, migration)) return false;
+    if (!Number.isSafeInteger(migration.sourceSecurityEpoch) || migration.sourceSecurityEpoch <= 0
+      || !Number.isSafeInteger(migration.targetSecurityEpoch) || migration.targetSecurityEpoch <= 0) return false;
+    if (!ownerPath.has(root.id)) continue;
+    relevant += 1;
+    const source = object.securityDomainId === migration.sourceSecurityDomainId
+      && object.securityEpoch === migration.sourceSecurityEpoch;
+    const target = object.securityDomainId === migration.targetSecurityDomainId
+      && object.securityEpoch === migration.targetSecurityEpoch;
+    if (!source && !target) return false;
+  }
+  if (relevant > 0) return false;
+
+  return true;
+}
+
+async function validMigrationDomain(
+  transaction: TransactionContext,
+  securityDomainId: string | null,
+  projectId: string,
+  expectedEpoch: number,
+  migration?: SecurityDomainMigration,
+): Promise<boolean> {
+  if (securityDomainId === null) return true;
+  const domain = await transaction.securityDomains.get(securityDomainId);
+  if (domain === undefined || domain.projectId !== projectId || domain.deletedAtUtc !== null
+    || domain.parentSecurityDomainId !== null) return false;
+  const root = await transaction.nodes.get(domain.rootNodeId);
+  if (root === undefined || root.projectId !== projectId || root.deletedAtUtc !== null) return false;
+  if (migration !== undefined && domain.rootNodeId === migration.rootNodeId) {
+    const isSource = root.securityDomainId === migration.sourceSecurityDomainId && root.securityEpoch === migration.sourceSecurityEpoch;
+    const isTarget = root.securityDomainId === migration.targetSecurityDomainId && root.securityEpoch === migration.targetSecurityEpoch;
+    if (!isSource && !isTarget) return false;
+    return true;
+  }
+  if (root.securityDomainId !== domain.id || root.securityEpoch !== expectedEpoch) return false;
+  return true;
+}
+
+async function authoritativePath(
+  transaction: TransactionContext,
+  projectId: string,
+  ownerNodeId: string,
+): Promise<Set<string> | undefined> {
+  const path = new Set<string>();
+  let currentId: string | null = ownerNodeId;
+  while (currentId !== null) {
+    if (path.has(currentId)) return undefined;
+    path.add(currentId);
+    const current = await transaction.nodes.get(currentId);
+    if (current === undefined || current.projectId !== projectId || current.deletedAtUtc !== null) return undefined;
+    if (!Number.isSafeInteger(current.securityEpoch) || current.securityEpoch <= 0) return undefined;
+    if (current.securityDomainId !== null) {
+      const domain = await transaction.securityDomains.get(current.securityDomainId);
+      if (domain === undefined || domain.projectId !== projectId || domain.deletedAtUtc !== null
+        || domain.parentSecurityDomainId !== null) return undefined;
+    }
+    currentId = current.parentId;
+  }
+  return path;
+}
+
 
 async function prepareOperation(
   transaction: TransactionContext,
@@ -208,6 +471,7 @@ async function prepareOperation(
   subjectId: string,
   firstStep: string,
   nowUtc: string,
+  leaseToken: string,
 ): Promise<OperationContext | undefined> {
   let operation = await transaction.integrationOperations.get(operationId);
   if (operation?.state === "completed" || operation?.state === "compensated") return undefined;
@@ -228,6 +492,7 @@ async function prepareOperation(
       nextAttemptAtUtc: null,
       deadlineAtUtc: new Date(Date.parse(job.createdAtUtc) + 24 * 60 * 60_000).toISOString(),
       lastError: null,
+      leaseToken,
       version: 1,
       createdAtUtc: nowUtc,
       updatedAtUtc: nowUtc,
@@ -240,6 +505,7 @@ async function prepareOperation(
     currentStep,
     occurredAtUtc: nowUtc,
     incrementAttempt: true,
+    leaseToken,
   });
   await transaction.integrationOperations.update(running, operation.version);
   await appendStep(transaction, running, currentStep, "started", null, nowUtc);
@@ -252,16 +518,22 @@ async function checkpointOperation(
   nextStep: string,
   reference: ExternalReference,
   nowUtc: string,
-): Promise<void> {
+  leaseToken: string,
+): Promise<boolean> {
   const operation = await requiredOperation(transaction, operationId);
+  if (operation.leaseToken !== undefined && operation.leaseToken !== null && operation.leaseToken !== leaseToken) {
+    return false;
+  }
   const updated = advanceIntegrationOperation(operation, {
     state: "running",
     currentStep: nextStep,
     occurredAtUtc: nowUtc,
     externalReference: reference,
+    leaseToken,
   });
   await transaction.integrationOperations.update(updated, operation.version);
   await appendStep(transaction, updated, "upload_blob", "succeeded", null, nowUtc);
+  return true;
 }
 
 async function completeOperation(
@@ -271,18 +543,24 @@ async function completeOperation(
   reference: ExternalReference,
   syncWatermark: string,
   nowUtc: string,
-): Promise<void> {
+  leaseToken: string,
+): Promise<boolean> {
   const operation = await requiredOperation(transaction, operationId);
-  if (operation.state === "completed") return;
+  if (operation.state === "completed") return true;
+  if (operation.leaseToken !== undefined && operation.leaseToken !== null && operation.leaseToken !== leaseToken) {
+    return false;
+  }
   const completed = advanceIntegrationOperation(operation, {
     state: "completed",
     currentStep: step,
     occurredAtUtc: nowUtc,
     externalReference: reference,
     expectedSyncWatermark: syncWatermark,
+    leaseToken,
   });
   await transaction.integrationOperations.update(completed, operation.version);
   await appendStep(transaction, completed, step === "task_created" ? "create_task" : "attach_file", "succeeded", null, nowUtc);
+  return true;
 }
 
 async function appendStep(

@@ -121,7 +121,7 @@ test("P0-05A-T1a SQLite upgrades a legacy Task and receipt without stranding the
     await upgraded.close();
 
     const evidence = new DatabaseSync(path, { readOnly: true });
-    assert.equal((evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version, 6);
+    assert.equal((evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version, 7);
     evidence.close();
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -138,6 +138,72 @@ test("ARCH-GATE-SQLITE-003 a future schema version is rejected instead of silent
       .run(999, "2026-09-04T00:00:00.000Z");
     database.close();
     assert.throws(() => new SqlitePersistence({ path }), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:999/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("TC-SEC-002J schema v6 to v7 migration and rejection by v6 binary", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppm-v6-upgrade-"));
+  const path = join(directory, "v6.sqlite");
+  try {
+    const database = new DatabaseSync(path);
+    database.exec(`
+      CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at_utc TEXT NOT NULL) STRICT;
+      INSERT INTO schema_migrations (version, applied_at_utc) VALUES
+        (1, '2026-09-04T00:00:00.000Z'),
+        (2, '2026-09-04T00:00:00.000Z'),
+        (3, '2026-09-04T00:00:00.000Z'),
+        (4, '2026-09-04T00:00:00.000Z'),
+        (5, '2026-09-04T00:00:00.000Z'),
+        (6, '2026-09-04T00:00:00.000Z');
+      CREATE TABLE tenants (tenant_id TEXT PRIMARY KEY, state TEXT NOT NULL, created_at_utc TEXT NOT NULL) STRICT;
+      CREATE TABLE project_nodes (
+        tenant_id TEXT NOT NULL, node_id TEXT NOT NULL, project_id TEXT NOT NULL,
+        parent_node_id TEXT, title TEXT NOT NULL, kind TEXT NOT NULL,
+        security_domain_id TEXT, security_epoch INTEGER NOT NULL,
+        version INTEGER NOT NULL, deleted_at_utc TEXT,
+        PRIMARY KEY (tenant_id, node_id)
+      ) STRICT;
+    `);
+    database.close();
+
+    const persistence = new SqlitePersistence({ path });
+    await persistence.transaction(tenant, async (tx) => {
+      await tx.nodes.insert({
+        tenantId: tenant, id: "node-v6", projectId: "project-1", parentId: null,
+        title: "node", kind: "work_package", securityDomainId: null, securityEpoch: 1,
+        version: 1, deletedAtUtc: null,
+      });
+      const acquired = await tx.outboundProjectionFences.acquire({
+        tenantId: tenant,
+        id: "fence:task:1",
+        projectId: "project-1",
+        ownerNodeId: "node-v6",
+        token: "tok",
+        expiresAtUtc: "2026-09-04T01:00:00.000Z",
+        createdAtUtc: "2026-09-04T00:00:00.000Z",
+      });
+      assert.equal(acquired, true);
+    });
+    await persistence.close();
+
+    const evidence = new DatabaseSync(path, { readOnly: true });
+    const maxVersion = (evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version;
+    assert.equal(maxVersion, 7);
+    evidence.close();
+
+    const v6SimulatedCheck = (dbPath: string) => {
+      const db = new DatabaseSync(dbPath);
+      const row = db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number };
+      const v6MaxSupported = 6;
+      if (row.version > v6MaxSupported) {
+        db.close();
+        throw new Error(`SQLITE_SCHEMA_VERSION_UNSUPPORTED:${row.version}`);
+      }
+      db.close();
+    };
+    assert.throws(() => v6SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:7/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

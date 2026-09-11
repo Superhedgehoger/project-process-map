@@ -1,22 +1,20 @@
 # Goal Handoff Checkpoint — project-process-map
 
-## 当前恢复状态（2026-09-10，优先于下方历史暂停记录）
+## 当前恢复状态（2026-09-11，优先于下方历史暂停记录）
 
 - 状态：GOAL_RUNNING
 - Goal threadId：`01a06f07-6235-7a43-b22d-fc042cf0f6aa`
 - Branch：`main`
-- 已验收并推送基线：`4747943`（`docs: checkpoint migration read intersection slice` 的前置基线；包含 TC-SEC-002G 与 TC-SEC-002H Task Packet）。
-- 已验收实现提交：`3f0a83a`（`feat: enforce migration read intersection`）。
-- 已验收实现提交：`f1cf052`（`feat: secure asset content downloads`）。
-- upstream：`origin/main` 为 `9623d55d0135b12790f9273202fcfb2229788fc5`；本地 HEAD 为 `f1cf052`。
-- 工作区：TC-SEC-002I 实现、测试、Evidence、Phase 状态与 TC-SEC-002J Task Packet 已提交；当前仅本 checkpoint 校正待提交。
+- 已验收并推送基线：`8e24eb4`（`docs: checkpoint collaboration projection slice`）。
+- 已验收实现提交：`f1cf052`（`feat: secure asset content downloads`；TC-SEC-002I）。
+- 工作区：TC-SEC-002J 实现、测试、Evidence、Phase 状态与 TC-SEC-002K Task Packet 已就绪，最终独立安全 Review PASS，本切片待提交并推送。
 - 当前 Gate：P0-07 敏感 ACL（总项继续进行中）
-- 最近完成：P0-07 / TC-SEC-002I Asset/Blob 内容下载的迁移期权限交集
-- 验收：独立安全 Review 首轮 BLOCKER 修复后最终 PASS；Lead 定向 26/26；最终 `pnpm check` 150/150；14 个 Huly 镜像锁；扩展边界、`git diff --check` 与凭据/私钥特征扫描均通过。
-- 当前 Task：P0-07 / TC-SEC-002J 外部协作投影的迁移期出站冻结
-- Task Packet：`docs/agent-tasks/P0-07-TC-SEC-002J.md`
-- Blocker：本地提交尚未推送。
-- next_action：提交本 checkpoint 并推送 `9623d55..HEAD`；随后实现 TC-SEC-002J。
+- 最近完成：P0-07 / TC-SEC-002J 外部协作投影的迁移期出站冻结
+- 验收：独立安全 Review 最终 PASS，无残留严重性发现；SQLite state-prefilter 绕过彻底修复（租户全量操作在跳过前先完成解析与 7 复制列交叉比对，枚举与字段漂移一致 fail-closed）；定向协作测试 19/19；全量 `pnpm check` 169/169（0 fail, 0 skipped）；14 个 Huly 镜像锁；扩展边界、`git diff --check` 与凭据/私钥特征扫描均通过。
+- 当前 Task：P0-07 / TC-SEC-002K 安全域迁移的外部可见性收敛与全通道纪元就绪守卫
+- Task Packet：`docs/agent-tasks/P0-07-TC-SEC-002K.md`
+- Blocker：无（准备就绪）。
+- next_action：在新的执行上下文中仅读取本 checkpoint、AGENTS.md、TC-SEC-002K Task Packet 与当前 Git 状态，推进 P0-07 / TC-SEC-002K 外部协作历史副本收敛与纪元就绪验证守卫；不得恢复旧会话历史。
 
 旧会话 `e8e244ee-0c02-4769-8bd0-37f1ca8bd485` 仅是该 Git 工作树所在目录，不得作为聊天执行上下文恢复。原绑定的“project-process-map Goal 恢复”和“用量恢复后继续任务”自动任务已于 2026-09-05 暂停；后续不得把本 Goal 的恢复投递到该旧会话。
 

@@ -5,6 +5,7 @@ import type { PrincipalId, TenantId } from "../../../domain/src/identity.ts";
 import type { ExternalIdentityMapping, Principal } from "../../../domain/src/identity.ts";
 import type { IntegrationOperation, IntegrationStepAttempt } from "../../../domain/src/integration-operations.ts";
 import type { ProjectNode } from "../../../domain/src/project-structure.ts";
+import type { OutboundProjectionFence } from "../../../domain/src/outbound-projection-fence.ts";
 import type { ProjectMembership, ProjectMembershipSecurityAuditEntry } from "../../../domain/src/project-access.ts";
 import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import type { SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
@@ -80,6 +81,12 @@ export interface IntegrationOperationRepository {
   appendStep(attempt: IntegrationStepAttempt): Promise<void>;
   listSteps(operationId: string): Promise<IntegrationStepAttempt[]>;
   listRecoverable(): Promise<IntegrationOperation[]>;
+}
+
+export interface OutboundProjectionFenceRepository {
+  acquire(fence: OutboundProjectionFence): Promise<boolean>;
+  renew(fenceId: string, token: string, expiresAtUtc: string): Promise<boolean>;
+  release(fenceId: string, token: string): Promise<boolean>;
 }
 
 export interface IdentityMappingRepository {
@@ -173,6 +180,7 @@ export type TransactionContext = Readonly<{
   assets: AssetRepository;
   externalBindings: ExternalBindingRepository;
   integrationOperations: IntegrationOperationRepository;
+  outboundProjectionFences: OutboundProjectionFenceRepository;
   identities: IdentityMappingRepository;
   principals: PrincipalRepository;
   memberships: ProjectMembershipRepository;
@@ -225,6 +233,12 @@ export interface JobConsumer {
     nextAttemptAtUtc: string,
     error: string,
   ): Promise<"retry" | "dead_letter" | "lease_lost">;
+  defer(
+    tenantId: TenantId,
+    jobId: string,
+    leaseToken: string,
+    availableAtUtc: string,
+  ): Promise<boolean>;
   markDeadLetter(
     tenantId: TenantId,
     jobId: string,

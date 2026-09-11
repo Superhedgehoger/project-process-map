@@ -1,6 +1,6 @@
 # Phase 0 状态
 
-更新日期：2026-09-10
+更新日期：2026-09-11
 
 | 任务 | 状态 | 当前证据 | 下一闸门 |
 |---|---|---|---|
@@ -10,7 +10,7 @@
 | P0-04 Huly Shell 与 Node 原型 | 完成 | 四个独立插件包、五处可审计 composition 接入；Front/Transactor/Workspace 三镜像真实运行；Shell 内入口、六节点页面和 N-04 详情切换通过浏览器验收 | P0-05 Node → Task → File 纵向链路 |
 | P0-05 Node → Product Task/Asset → Huly 投影 | 完成 | Product Task/Asset 为权威事实；Huly 作为异步投影；确定性请求、超时回查、部分成功续跑、死信恢复与真实 wire envelope 均有契约测试 | P0-05A 任务验收与交付物守卫；P0-07 敏感 ACL |
 | P0-06 事件与 Outbox 原子写 | 完成 | SQLite 在同一事务写领域状态、事件、Outbox、Job 与幂等回执；覆盖租户隔离、重启、并发领取、租约、重放、冲突及故障断点 | PostgreSQL 多副本实施前复用同一行为契约 |
-| P0-07 敏感 ACL | 进行中 | `TC-SEC-001` 首根链路；`TC-SEC-002A～I` 已覆盖继承、归属守卫、持久计划、inventory、条件换域、原子批次、进入 verifying、核心 API 与单 Asset 下载交集；`TC-SEC-003A/B/C` Grant 与 Membership 原子守卫；150 项测试通过 | 外部投影等剩余通道交集、全通道 epoch 验证、真实 U2/U7/U8、嵌套域 |
+| P0-07 敏感 ACL | 进行中 | `TC-SEC-001` 首根链路；`TC-SEC-002A～J` 已覆盖继承、归属守卫、持久计划、inventory、条件换域、原子批次、进入 verifying、核心 API、单 Asset 下载交集与外部协作投影迁移期出站冻结；`TC-SEC-003A/B/C` Grant 与 Membership 原子守卫；169 项测试通过 | 外部可见性收敛或全通道纪元验证、真实 U2/U7/U8、嵌套域 |
 | P0-ND-01 无 Docker 原生发行可行性 | 完成 | 自包含浏览器入口、Product API 与 Worker 原生启动；版本化 Node 24 tarball、SHA-256；临时目录冒烟确认未调用 Docker，并完成页面 → 节点 → 任务 → Asset → 重启回读 | P0-ND-02 干净 Linux、备份恢复与升级/回滚 |
 | ARCH-GATE-01 架构修正 | 完成 | CR-003、ADR-003～ADR-008；42 项行为/故障测试；无 Docker 原生发行与重启恢复冒烟通过 | 恢复按单条纵向切片开发，从 P0-05A 开始 |
 | P0-05A 任务验收与交付物守卫 | 进行中 | `T1a` 已完成显式验收人快照、两轮验收、最小持久成员/安全域授权、负责人/验收人改派、旧库回放兼容、事件/Outbox 和 SQLite 重启恢复；57 项测试通过 | 补 P0-07 成员配置与角色槽位解析，再进入 Deliverable 与节点完成守卫 |
@@ -58,4 +58,6 @@ P0-07 的 `TC-SEC-001` 子切片已经建立正式 SecurityDomain/SecurityGrant 
 
 `TC-SEC-002I` 已建立单 Asset 本地内容下载通道：available/未删除、迁移期逐对象交集、tenant-aware 本地 reference ownership、binding/metadata/bytes 完整性及读取后二次授权/快照检查缺一不可。所有失败统一最小 404；主动内容强制 attachment，foreign-tenant reference、tenantless sidecar、生命周期/内容漂移与读取竞态均 fail-closed。150 项全量测试与独立安全复核通过。详见 `docs/reports/P0-07-TC-SEC-002I-asset-download-intersection.md`。
 
-P0-01 风险详见 `docs/reports/P0-01-source-audit.md`；Docker 开发环境复跑见 `docs/reports/P0-02-selfhost-replay.md`；Shell 验收见 `docs/reports/P0-04-huly-shell.md`；纵向链路见 `docs/reports/P0-05-node-task-file.md`；任务验收见 `docs/reports/P0-05A-T1a-task-review.md`；敏感根见 `docs/reports/P0-07-TC-SEC-001-first-security-root.md`；Grant 写守卫见 `docs/reports/P0-07-TC-SEC-003A-grant-write.md`；事件原子性见 `docs/reports/P0-06a-local-event-outbox.md`；架构修正验收见 `docs/reports/ARCH-GATE-01-architecture-correction.md`；无 Docker 交付边界见 `docs/change-records/CR-002-docker-free-saas.md` 与 `docs/adr/ADR-002-docker-free-runtime.md`。
+`TC-SEC-002J` 已建立外部协作投影在安全域迁移期间的出站冻结与持久 fence 保护：权威判定祖先链正式域/纪元连续性，active/verifying/retryable/recovery_required 范围内的 Task/Asset 零外部 Huly 调用、零部分操作且不消耗失败预算；有界租约出站 fence 采用强随机 generation token 与 CAS 取代；SQLite 全量操作解析并在跳过前完成关系列与 JSON 副本一致性校验，任何漂移 fail-closed。169 项全量测试与独立安全复核通过。详见 `docs/reports/P0-07-TC-SEC-002J-collaboration-projection-freeze.md`。
+
+P0-01 风险详见 `docs/reports/P0-01-source-audit.md`；Docker 开发环境复跑见 `docs/reports/P0-02-selfhost-replay.md`；Shell 验收见 `docs/reports/P0-04-huly-shell.md`；纵向链路见 `docs/reports/P0-05-node-task-file.md`；任务验收见 `docs/reports/P0-05A-T1a-task-review.md`；敏感根见 `docs/reports/P0-07-TC-SEC-001-first-security-root.md`；Grant 写守卫见 `docs/reports/P0-07-TC-SEC-003A-grant-write.md`；事件原子性见 `docs/reports/P0-06a-local-event-outbox.md`；架构修正验收见 `docs/reports/ARCH-GATE-01-architecture-correction.md`；无 Docker 交付边界见 `docs/change-records/CR-002-docker-free-saas.md` 与 `docs/adr/ADR-002-docker-free-runtime.md`；出站投影冻结见 `docs/reports/P0-07-TC-SEC-002J-collaboration-projection-freeze.md`。

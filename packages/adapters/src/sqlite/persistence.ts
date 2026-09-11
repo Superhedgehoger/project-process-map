@@ -9,6 +9,7 @@ import { tenantId as parseTenantId, type TenantId } from "../../../domain/src/id
 import type { ExternalIdentityMapping, Principal } from "../../../domain/src/identity.ts";
 import type { IntegrationOperation, IntegrationStepAttempt } from "../../../domain/src/integration-operations.ts";
 import type { ProjectNode } from "../../../domain/src/project-structure.ts";
+import type { OutboundProjectionFence } from "../../../domain/src/outbound-projection-fence.ts";
 import type { ProjectMembership, ProjectMembershipSecurityAuditEntry } from "../../../domain/src/project-access.ts";
 import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import {
@@ -37,19 +38,22 @@ import type {
 export type SqlitePersistenceOptions = Readonly<{
   path: string;
   busyTimeoutMilliseconds?: number;
+  now?: () => Date;
 }>;
 
 const pathLocks = new Map<string, Promise<void>>();
-const currentSchemaVersion = 6;
+const currentSchemaVersion = 7;
 
 export class SqlitePersistence implements Persistence {
   readonly #database: DatabaseSync;
   readonly #lockKey: string;
+  readonly #now: () => Date;
   #closed = false;
 
   constructor(options: SqlitePersistenceOptions) {
     if (options.path.trim().length === 0) throw new Error("SQLite path is required");
     if (options.path !== ":memory:") mkdirSync(dirname(options.path), { recursive: true });
+    this.#now = options.now ?? (() => new Date());
     this.#lockKey = options.path === ":memory:" ? `:memory:${randomUUID()}` : resolve(options.path);
     this.#database = new DatabaseSync(options.path, {
       timeout: options.busyTimeoutMilliseconds ?? 5_000,
@@ -61,6 +65,10 @@ export class SqlitePersistence implements Persistence {
     this.#database.exec("PRAGMA foreign_keys=ON");
     this.assertSupportedSchema();
     this.migrate();
+  }
+
+  private nowUtc(): string {
+    return (this.#now ?? (() => new Date()))().toISOString();
   }
 
   readonly outboxConsumer: OutboxConsumer = {
@@ -82,6 +90,9 @@ export class SqlitePersistence implements Persistence {
     ),
     release: async (tenantId, jobId, leaseToken, nextAttemptAtUtc, error) => await this.releaseQueue(
       "background_jobs", tenantId, jobId, leaseToken, nextAttemptAtUtc, error,
+    ),
+    defer: async (tenantId, jobId, leaseToken, availableAtUtc) => await this.deferJob(
+      tenantId, jobId, leaseToken, availableAtUtc,
     ),
     markDeadLetter: async (tenantId, jobId, leaseToken, error) => await this.markJobDeadLetter(
       tenantId, jobId, leaseToken, error,
@@ -456,9 +467,10 @@ export class SqlitePersistence implements Persistence {
       integrationOperations: {
         get: async (operationId) => {
           const row = this.#database.prepare(`
-            SELECT operation_json FROM integration_operations WHERE tenant_id = ? AND operation_id = ?
+            SELECT tenant_id, operation_id, operation_type, subject_type, subject_id, state, version, operation_json
+            FROM integration_operations WHERE tenant_id = ? AND operation_id = ?
           `).get(tenantId, operationId);
-          return row === undefined ? undefined : parseJson<IntegrationOperation>(asString(row.operation_json));
+          return row === undefined ? undefined : integrationOperationFromRow(row as Record<string, unknown>);
         },
         insert: async (operation) => {
           assertTenant(tenantId, operation.tenantId);
@@ -493,10 +505,57 @@ export class SqlitePersistence implements Persistence {
           WHERE tenant_id = ? AND operation_id = ? ORDER BY sequence
         `).all(tenantId, operationId).map((row) => parseJson<IntegrationStepAttempt>(asString(row.attempt_json))),
         listRecoverable: async () => this.#database.prepare(`
-          SELECT operation_json FROM integration_operations
+          SELECT tenant_id, operation_id, operation_type, subject_type, subject_id, state, version, operation_json
+          FROM integration_operations
           WHERE tenant_id = ? AND state IN ('retryable', 'recovery_required')
           ORDER BY operation_id
-        `).all(tenantId).map((row) => parseJson<IntegrationOperation>(asString(row.operation_json))),
+        `).all(tenantId).map((row) => integrationOperationFromRow(row as Record<string, unknown>)),
+      },
+      outboundProjectionFences: {
+        acquire: async (fence) => {
+          assertTenant(tenantId, fence.tenantId);
+          const current = this.#database.prepare(`
+            SELECT token, expires_at_utc FROM outbound_projection_fences
+            WHERE tenant_id = ? AND fence_id = ?
+          `).get(tenantId, fence.id);
+          if (current !== undefined) {
+            if (asString(current.expires_at_utc) > fence.createdAtUtc) {
+              return false;
+            }
+            const result = this.#database.prepare(`
+              UPDATE outbound_projection_fences
+              SET project_id = ?, owner_node_id = ?, token = ?, expires_at_utc = ?, created_at_utc = ?, fence_json = ?
+              WHERE tenant_id = ? AND fence_id = ? AND expires_at_utc <= ?
+            `).run(
+              fence.projectId, fence.ownerNodeId, fence.token,
+              fence.expiresAtUtc, fence.createdAtUtc, JSON.stringify(fence),
+              tenantId, fence.id, fence.createdAtUtc,
+            );
+            return result.changes === 1;
+          }
+          try {
+            this.#database.prepare(`
+              INSERT INTO outbound_projection_fences (
+                tenant_id, fence_id, project_id, owner_node_id, token, expires_at_utc, created_at_utc, fence_json
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              tenantId, fence.id, fence.projectId, fence.ownerNodeId, fence.token,
+              fence.expiresAtUtc, fence.createdAtUtc, JSON.stringify(fence),
+            );
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        renew: async (fenceId, token, expiresAtUtc) => this.#database.prepare(`
+          UPDATE outbound_projection_fences
+          SET expires_at_utc = ?
+          WHERE tenant_id = ? AND fence_id = ? AND token = ?
+        `).run(expiresAtUtc, tenantId, fenceId, token).changes === 1,
+        release: async (fenceId, token) => this.#database.prepare(`
+          DELETE FROM outbound_projection_fences
+          WHERE tenant_id = ? AND fence_id = ? AND token = ?
+        `).run(tenantId, fenceId, token).changes === 1,
       },
       identities: {
         findExternal: async (provider, connectionId, externalTenantRef, externalSubjectRef) => {
@@ -935,6 +994,10 @@ export class SqlitePersistence implements Persistence {
             throw new Error("SECURITY_MIGRATION_PLAN_IMMUTABLE");
           }
           assertSecurityMigrationProgressChange(current, migration);
+          if (current.state === "planned" && migration.state === "active"
+            && this.hasActiveFenceOrUnresolvedOperationInMigrationScope(tenantId, migration, this.nowUtc())) {
+            throw new Error("SECURITY_MIGRATION_OUTBOUND_FENCE_ACTIVE");
+          }
           const result = this.#database.prepare(`
             UPDATE security_domain_migrations
             SET state = ?, cursor = ?, migrated_items = ?,
@@ -1283,6 +1346,21 @@ export class SqlitePersistence implements Persistence {
         FOREIGN KEY (tenant_id, operation_id) REFERENCES integration_operations (tenant_id, operation_id)
       ) STRICT;
 
+      CREATE TABLE IF NOT EXISTS outbound_projection_fences (
+        tenant_id TEXT NOT NULL,
+        fence_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        owner_node_id TEXT NOT NULL,
+        token TEXT NOT NULL,
+        expires_at_utc TEXT NOT NULL,
+        created_at_utc TEXT NOT NULL,
+        fence_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, fence_id),
+        FOREIGN KEY (tenant_id, owner_node_id) REFERENCES project_nodes (tenant_id, node_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS outbound_projection_fences_active
+        ON outbound_projection_fences (tenant_id, project_id, expires_at_utc);
+
       CREATE TABLE IF NOT EXISTS security_domain_migrations (
         tenant_id TEXT NOT NULL,
         migration_id TEXT NOT NULL,
@@ -1409,6 +1487,9 @@ export class SqlitePersistence implements Persistence {
     `).run(new Date().toISOString());
     this.#database.prepare(`
       INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc) VALUES (6, ?)
+    `).run(new Date().toISOString());
+    this.#database.prepare(`
+      INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc) VALUES (7, ?)
     `).run(new Date().toISOString());
   }
 
@@ -1556,6 +1637,165 @@ export class SqlitePersistence implements Persistence {
     });
   }
 
+  private async deferJob(tenantId: TenantId, jobId: string, leaseToken: string, availableAtUtc: string): Promise<boolean> {
+    return await this.exclusive(async () => {
+      const result = this.#database.prepare(`
+        UPDATE background_jobs
+        SET state = 'pending', available_at_utc = ?, attempts = MAX(0, attempts - 1),
+            lease_owner = NULL, lease_token = NULL, lease_expires_at_utc = NULL
+        WHERE tenant_id = ? AND job_id = ? AND state = 'leased' AND lease_token = ?
+      `).run(availableAtUtc, tenantId, jobId, leaseToken);
+      return result.changes === 1;
+    });
+  }
+
+  private hasActiveFenceOrUnresolvedOperationInMigrationScope(
+    tenantId: TenantId,
+    migration: SecurityDomainMigration,
+    trustedNowUtc: string,
+  ): boolean {
+    const activeFences = this.#database.prepare(`
+      SELECT fence_id, owner_node_id FROM outbound_projection_fences
+      WHERE tenant_id = ? AND project_id = ? AND expires_at_utc > ?
+    `).all(tenantId, migration.projectId, trustedNowUtc);
+
+    const allOps = this.#database.prepare(`
+      SELECT tenant_id, operation_id, operation_type, subject_type, subject_id, state, version, operation_json
+      FROM integration_operations
+      WHERE tenant_id = ?
+    `).all(tenantId) as Array<Record<string, unknown>>;
+
+    if (activeFences.length === 0 && allOps.length === 0) {
+      return false;
+    }
+
+    const migrationRoot = this.#database.prepare(`
+      SELECT node_id, project_id, deleted_at_utc
+      FROM project_nodes
+      WHERE tenant_id = ? AND node_id = ?
+    `).get(tenantId, migration.rootNodeId);
+    if (migrationRoot === undefined || asString(migrationRoot.project_id) !== migration.projectId
+      || migrationRoot.deleted_at_utc !== null) {
+      return true;
+    }
+
+    for (const fence of activeFences) {
+      const visited = new Set<string>();
+      let currentId: string | null = asString(fence.owner_node_id);
+      while (currentId !== null) {
+        if (visited.has(currentId)) return true;
+        visited.add(currentId);
+        const ancestorNode = this.#database.prepare(`
+          SELECT node_id, project_id, parent_node_id, deleted_at_utc
+          FROM project_nodes
+          WHERE tenant_id = ? AND node_id = ?
+        `).get(tenantId, currentId) as Record<string, unknown> | undefined;
+        if (ancestorNode === undefined || asString(ancestorNode.project_id) !== migration.projectId || ancestorNode.deleted_at_utc !== null) {
+          return true;
+        }
+        if (asString(ancestorNode.node_id) === migration.rootNodeId) return true;
+        currentId = ancestorNode.parent_node_id === null ? null : asString(ancestorNode.parent_node_id);
+      }
+    }
+
+    for (const rawOp of allOps) {
+      let op: IntegrationOperation;
+      try {
+        op = integrationOperationFromRow(rawOp);
+      } catch {
+        return true;
+      }
+
+      if (op.tenantId !== tenantId) return true;
+
+      // Only after successful validation may consistently terminal completed/compensated operations be skipped
+      if (op.state === "completed" || op.state === "compensated") {
+        continue;
+      }
+
+      // Only after successful validation may known non-collaboration operations be skipped
+      if (op.operationType !== "collaboration.task.project" && op.operationType !== "collaboration.asset.project") {
+        if (op.operationType === "asset.ingest" || op.operationType === "blob.delete") {
+          continue;
+        }
+        return true;
+      }
+
+      const subjectType = (op as { subjectType?: unknown }).subjectType;
+      if (subjectType !== "task" && subjectType !== "asset") {
+        return true;
+      }
+
+      if (!op.subjectId || typeof op.subjectId !== "string") {
+        return true;
+      }
+
+      let ownerNodeId: string | null = null;
+      if (subjectType === "task") {
+        const row = this.#database.prepare(`
+          SELECT tenant_id, task_id, project_id, owner_node_id, lifecycle_state, version, task_json
+          FROM product_tasks
+          WHERE tenant_id = ? AND task_id = ?
+        `).get(tenantId, op.subjectId);
+        if (row === undefined) return true;
+        let task: ProductTask;
+        try {
+          task = productTaskFromRow(row as Record<string, unknown>);
+        } catch {
+          return true;
+        }
+        if (task.projectId !== migration.projectId) continue;
+        if (task.deletedAtUtc !== null) {
+          return true;
+        }
+        ownerNodeId = task.ownerNodeId;
+      } else if (subjectType === "asset") {
+        const row = this.#database.prepare(`
+          SELECT tenant_id, asset_id, project_id, owner_node_id, lifecycle_state, version, asset_json
+          FROM assets
+          WHERE tenant_id = ? AND asset_id = ?
+        `).get(tenantId, op.subjectId);
+        if (row === undefined) return true;
+        let asset: Asset;
+        try {
+          asset = assetFromRow(row as Record<string, unknown>);
+        } catch {
+          return true;
+        }
+        if (asset.projectId !== migration.projectId) continue;
+        if (asset.deletedAtUtc !== null) {
+          return true;
+        }
+        ownerNodeId = asset.ownerNodeId;
+      } else {
+        return true;
+      }
+
+      if (!ownerNodeId || typeof ownerNodeId !== "string") {
+        return true;
+      }
+
+      const visited = new Set<string>();
+      let currentId: string | null = ownerNodeId;
+      while (currentId !== null) {
+        if (visited.has(currentId)) return true;
+        visited.add(currentId);
+        const ancestorNode = this.#database.prepare(`
+          SELECT node_id, project_id, parent_node_id, deleted_at_utc
+          FROM project_nodes
+          WHERE tenant_id = ? AND node_id = ?
+        `).get(tenantId, currentId) as Record<string, unknown> | undefined;
+        if (ancestorNode === undefined || asString(ancestorNode.project_id) !== migration.projectId || ancestorNode.deleted_at_utc !== null) {
+          return true;
+        }
+        if (asString(ancestorNode.node_id) === migration.rootNodeId) return true;
+        currentId = ancestorNode.parent_node_id === null ? null : asString(ancestorNode.parent_node_id);
+      }
+    }
+
+    return false;
+  }
+
   private migrationForObjectWrite(tenantId: TenantId, migrationId: string): SecurityDomainMigration {
     const row = this.#database.prepare(
       "SELECT * FROM security_domain_migrations WHERE tenant_id = ? AND migration_id = ?",
@@ -1660,6 +1900,65 @@ function securityMigrationFromRow(row: Record<string, unknown>): SecurityDomainM
     throw new Error("SECURITY_MIGRATION_PERSISTENCE_INCONSISTENT");
   }
   return migration;
+}
+
+const ALLOWED_INTEGRATION_OPERATION_TYPES = new Set<string>([
+  "asset.ingest",
+  "collaboration.task.project",
+  "collaboration.asset.project",
+  "blob.delete",
+]);
+
+const ALLOWED_INTEGRATION_SUBJECT_TYPES = new Set<string>([
+  "task",
+  "asset",
+]);
+
+const ALLOWED_INTEGRATION_OPERATION_STATES = new Set<string>([
+  "planned",
+  "running",
+  "retryable",
+  "completed",
+  "compensated",
+  "recovery_required",
+]);
+
+function integrationOperationFromRow(row: Record<string, unknown>): IntegrationOperation {
+  const relationalTenantId = asString(row.tenant_id);
+  const relationalOperationId = asString(row.operation_id);
+  const relationalOperationType = asString(row.operation_type);
+  const relationalSubjectType = asString(row.subject_type);
+  const relationalSubjectId = asString(row.subject_id);
+  const relationalState = asString(row.state);
+  const relationalVersion = asNumber(row.version);
+
+  if (!ALLOWED_INTEGRATION_OPERATION_TYPES.has(relationalOperationType)
+    || !ALLOWED_INTEGRATION_SUBJECT_TYPES.has(relationalSubjectType)
+    || !ALLOWED_INTEGRATION_OPERATION_STATES.has(relationalState)) {
+    throw new Error("INTEGRATION_OPERATION_ENUM_INVALID");
+  }
+
+  const op = parseJson<IntegrationOperation>(asString(row.operation_json));
+  if (typeof op !== "object" || op === null || Array.isArray(op)) {
+    throw new Error("INTEGRATION_OPERATION_PERSISTENCE_INCONSISTENT");
+  }
+
+  if (!ALLOWED_INTEGRATION_OPERATION_TYPES.has(op.operationType as string)
+    || !ALLOWED_INTEGRATION_SUBJECT_TYPES.has(op.subjectType as string)
+    || !ALLOWED_INTEGRATION_OPERATION_STATES.has(op.state as string)) {
+    throw new Error("INTEGRATION_OPERATION_ENUM_INVALID");
+  }
+
+  if (op.tenantId !== relationalTenantId
+    || op.id !== relationalOperationId
+    || op.operationType !== relationalOperationType
+    || op.subjectType !== relationalSubjectType
+    || op.subjectId !== relationalSubjectId
+    || op.state !== relationalState
+    || op.version !== relationalVersion) {
+    throw new Error("INTEGRATION_OPERATION_PERSISTENCE_INCONSISTENT");
+  }
+  return op;
 }
 
 function principalFromRow(row: Record<string, unknown>): Principal {
