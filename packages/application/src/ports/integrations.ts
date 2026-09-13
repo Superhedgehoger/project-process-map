@@ -136,3 +136,60 @@ export type VerifiedExternalIdentity = Readonly<{
 export interface ExternalIdentityVerifier {
   authenticate(credential: string): Promise<VerifiedExternalIdentity>;
 }
+
+export type EpochReadinessScope = Readonly<{
+  tenantId: TenantId;
+  projectId: string;
+  migrationId: string;
+  evidenceId: string;
+  purpose: "commit" | "rollback";
+  manifestDigest: string;
+  sourceSecurityDomainId: string | null;
+  targetSecurityDomainId: string | null;
+  sourceSecurityEpoch: number;
+  targetSecurityEpoch: number;
+  nonce: string;
+  issuedAtUtc?: string | undefined;
+  expiresAtUtc: string;
+  itemCount: number;
+  tasks: ReadonlyArray<Readonly<{
+    taskId: string;
+    externalReference: ExternalReference | null;
+  }>>;
+  assets: ReadonlyArray<Readonly<{
+    assetId: string;
+    externalIssueId?: string | null | undefined;
+    externalAttachmentReference: ExternalReference | null;
+    externalBlobReference: ExternalReference | null;
+  }>>;
+}>;
+
+export type SecurityMigrationReadinessEvidence = Readonly<{
+  evidenceId: string;
+  nonce: string;
+  tenantId: TenantId;
+  migrationId: string;
+  purpose: "commit" | "rollback";
+  projectId: string;
+  manifestDigest: string;
+  sourceSecurityDomainId: string | null;
+  targetSecurityDomainId: string | null;
+  sourceSecurityEpoch: number;
+  targetSecurityEpoch: number;
+  provider: string;
+  converged: boolean;
+  channels: Readonly<{
+    issue: "converged" | "not_converged";
+    attachment: "converged" | "not_converged";
+    blob: "converged" | "not_converged";
+  }>;
+  verifiedAtUtc: string;
+  expiresAtUtc: string;
+  consumedAtUtc: string | null;
+  itemCount: number;
+  reason?: string;
+}>;
+
+export interface ExternalCollaborationEpochReadinessPort {
+  checkEpochReadiness(scope: EpochReadinessScope): Promise<SecurityMigrationReadinessEvidence>;
+}

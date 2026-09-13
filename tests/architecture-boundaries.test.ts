@@ -8,8 +8,11 @@ test("ARCH-GATE-BOUNDARY-001 domain and application do not depend on adapter imp
   for (const root of ["packages/domain/src", "packages/application/src", "apps/product-api/src/app.ts", "apps/product-api/src/routes"]) {
     for (const path of await sourceFiles(root)) {
       const source = await readFile(path, "utf8");
-      assert.equal(source.includes("adapters/src"), false, `${path} imports an adapter implementation`);
+      assert.equal(/\badapters\b/i.test(source), false, `${path} references adapters implementation or package`);
+      assert.equal(source.includes("packages/adapters"), false, `${path} references packages/adapters path`);
+      assert.equal(source.includes("adapters/"), false, `${path} references adapters/ path`);
       assert.equal(source.includes("@hcengineering/"), false, `${path} imports a Huly SDK package`);
+      assert.equal(/import\s*\([^)]*adapter/i.test(source), false, `${path} dynamically imports an adapter`);
     }
   }
 });

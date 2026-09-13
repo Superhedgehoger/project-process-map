@@ -697,7 +697,7 @@ test("TC-SEC-003C SQLite v5 to v6 upgrade preserves SecurityDomain and Grant", a
     await upgraded.close();
 
     const evidence = new DatabaseSync(path, { readOnly: true });
-    assert.equal((evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version, 7);
+    assert.equal((evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version, 9);
     evidence.close();
   } finally {
     await rm(directory, { recursive: true, force: true });

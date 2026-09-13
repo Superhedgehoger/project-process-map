@@ -5,6 +5,7 @@ import { resolveExternalIdentity } from "../../../packages/application/src/ident
 import { IntegrationRecoveryService } from "../../../packages/application/src/integrations/recover-integration.ts";
 import type { AssetContentPort, ExternalIdentityVerifier } from "../../../packages/application/src/ports/integrations.ts";
 import type { Persistence } from "../../../packages/application/src/ports/persistence.ts";
+import type { VerifyMigrationReadiness } from "../../../packages/application/src/security/security-migration-coordinator.ts";
 import { principalId, tenantId, type PrincipalId, type TenantId } from "../../../packages/domain/src/identity.ts";
 import type { ProjectNode } from "../../../packages/domain/src/project-structure.ts";
 import { buildHulyConfigurationReport } from "./health.ts";
@@ -20,6 +21,7 @@ export type ProductApiOptions = {
   tenantId?: TenantId;
   externalIdentityVerifier?: ExternalIdentityVerifier | undefined;
   collaborationProjectionConfigured?: boolean | undefined;
+  verifyMigrationReadiness?: VerifyMigrationReadiness | undefined;
   allowedOrigin?: string | undefined;
   recoveryOperatorPrincipalIds?: readonly PrincipalId[] | undefined;
 };
@@ -62,6 +64,7 @@ export function createProductApi(options: ProductApiOptions) {
         persistence,
         assetContent,
         scheduleCollaborationProjection: collaborationConfigured,
+        verifyMigrationReadiness: options.verifyMigrationReadiness,
       })) return;
       sendJson(response, 404, { code: "NOT_FOUND", message: "Route not found" });
     } catch (cause) {
@@ -189,6 +192,19 @@ function httpStatus(error: ApplicationError): number {
     REVIEWER_NOT_ELIGIBLE: 403,
     ASSIGNEE_NOT_ELIGIBLE: 403,
     SECURITY_MIGRATION_IN_PROGRESS: 409,
+    SECURITY_MIGRATION_NOT_FOUND: 404,
+    SECURITY_MIGRATION_VERSION_CONFLICT: 409,
+    SECURITY_MIGRATION_COMMIT_INVALID: 409,
+    SECURITY_MIGRATION_ROLLBACK_INVALID: 409,
+    SECURITY_MIGRATION_ROLLBACK_INCOMPLETE: 409,
+    SECURITY_MIGRATION_CONVERGENCE_NOT_READY: 409,
+    SECURITY_MIGRATION_OUTBOUND_FENCE_ACTIVE: 409,
+    SECURITY_MIGRATION_INVENTORY_INCOMPLETE: 409,
+    SECURITY_MIGRATION_TERMINAL_BYPASS_FORBIDDEN: 409,
+    SECURITY_MIGRATION_EVIDENCE_EXPIRED: 409,
+    SECURITY_MIGRATION_EVIDENCE_REPLAYED: 409,
+    SECURITY_MIGRATION_EVIDENCE_INVALID: 409,
+    SECURITY_MIGRATION_MANIFEST_MISMATCH: 409,
     HULY_ADAPTER_NOT_CONFIGURED: 503,
     UPSTREAM_FAILURE: 502,
   };

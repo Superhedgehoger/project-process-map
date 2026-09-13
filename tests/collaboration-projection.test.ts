@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,25 +13,159 @@ import {
   IntegrationCallError,
   type AttachFileProjection,
   type ExternalBlobProjectionPort,
+  type ExternalCollaborationEpochReadinessPort,
+  type SecurityMigrationReadinessEvidence,
   type StoredAssetContent,
   type TaskFileProjectionPort,
   type TaskProjectionPort,
   type TaskProjectionRecord,
 } from "../packages/application/src/ports/integrations.ts";
+import {
+  collectSecurityMigrationManifest,
+  computeSecurityMigrationManifestDigest,
+} from "../packages/application/src/security/security-migration-manifest.ts";
 import { CreateTaskHandler } from "../packages/application/src/tasks/create-task.ts";
 import { MemoryAssetContent } from "../packages/adapters/src/memory/asset-content.ts";
 import { MemoryPersistence } from "../packages/adapters/src/memory/persistence.ts";
 import { SqlitePersistence } from "../packages/adapters/src/sqlite/persistence.ts";
-import type { Persistence, TransactionContext } from "../packages/application/src/ports/persistence.ts";
+import { CommitSecurityMigrationHandler } from "../packages/application/src/security/commit-security-migration.ts";
+import { RollbackSecurityMigrationHandler } from "../packages/application/src/security/rollback-security-migration.ts";
+import {
+  type Persistence,
+  type TransactionContext,
+} from "../packages/application/src/ports/persistence.ts";
 import { externalReference, externalReferenceKey, type ExternalReference } from "../packages/domain/src/external-reference.ts";
 import type { BackgroundJob } from "../packages/domain/src/events.ts";
-import { principalId, tenantId, type TenantId } from "../packages/domain/src/identity.ts";
-import { transitionSecurityMigration, type SecurityDomainMigration } from "../packages/domain/src/security-migration.ts";
-import { grantProjectMembership } from "./support/project-membership.ts";
+import { principalId, tenantId, type PrincipalId, type TenantId } from "../packages/domain/src/identity.ts";
+import { checkpointSecurityMigration, transitionSecurityMigration, type SecurityDomainMigration } from "../packages/domain/src/security-migration.ts";
+import { grantProjectMembership as grantProjectMembershipBase } from "./support/project-membership.ts";
+
+async function grantProjectMembership(
+  persistence: Persistence,
+  tenantId: TenantId,
+  projectId: string,
+  principalId: PrincipalId,
+  options: Parameters<typeof grantProjectMembershipBase>[4] = {},
+): Promise<void> {
+  return await grantProjectMembershipBase(persistence, tenantId, projectId, principalId, {
+    role: "project_manager",
+    ...options,
+  });
+}
 
 const tenant = tenantId("tenant-collaboration-projection");
 const principal = principalId("principal-collaboration-projection");
 const now = new Date("2026-09-04T03:00:00.000Z");
+
+const testReadinessAdapter: ExternalCollaborationEpochReadinessPort = {
+  async checkEpochReadiness(scope) {
+    return {
+      evidenceId: scope.evidenceId,
+      nonce: scope.nonce,
+      tenantId: scope.tenantId,
+      projectId: scope.projectId,
+      migrationId: scope.migrationId,
+      purpose: scope.purpose,
+      sourceSecurityDomainId: scope.sourceSecurityDomainId,
+      targetSecurityDomainId: scope.targetSecurityDomainId,
+      sourceSecurityEpoch: scope.sourceSecurityEpoch,
+      targetSecurityEpoch: scope.targetSecurityEpoch,
+      manifestDigest: scope.manifestDigest,
+      itemCount: scope.itemCount,
+      expiresAtUtc: scope.expiresAtUtc,
+      consumedAtUtc: null,
+      verifiedAtUtc: scope.issuedAtUtc ?? new Date().toISOString(),
+      provider: "huly",
+      converged: true,
+      channels: { issue: "converged", attachment: "converged", blob: "converged" },
+    };
+  },
+};
+
+async function commitMigrationForTest(
+  persistence: Persistence,
+  tenantId: TenantId,
+  migrationId: string,
+  occurredAtUtc: string = now.toISOString(),
+): Promise<void> {
+  await persistence.transaction(tenantId, async (tx) => {
+    const existing = await tx.securityMigrations.getManifestSnapshot(migrationId);
+    if (!existing) {
+      const migration = await tx.securityMigrations.get(migrationId);
+      assert.ok(migration);
+      const manifest = await collectSecurityMigrationManifest(tx, migration);
+      const digest = computeSecurityMigrationManifestDigest(manifest);
+      await tx.securityMigrations.saveManifestSnapshot({
+        tenantId: migration.tenantId,
+        projectId: migration.projectId,
+        migrationId: migration.id,
+        sourceSecurityDomainId: migration.sourceSecurityDomainId,
+        targetSecurityDomainId: migration.targetSecurityDomainId,
+        sourceSecurityEpoch: migration.sourceSecurityEpoch,
+        targetSecurityEpoch: migration.targetSecurityEpoch,
+        manifestDigest: digest,
+        itemCount: manifest.items.length,
+        items: manifest.items,
+        createdAtUtc: occurredAtUtc,
+      });
+    }
+  });
+
+  const verifyMigrationReadiness = (persistence as any).verifyMigrationReadiness;
+  const handler = new CommitSecurityMigrationHandler(persistence, verifyMigrationReadiness);
+  const migration = await persistence.read(tenantId, async (tx) => await tx.securityMigrations.get(migrationId));
+  assert.ok(migration, `Migration ${migrationId} not found`);
+  await handler.execute({
+    tenantId,
+    migrationId,
+    expectedMigrationVersion: migration.version,
+    actorPrincipalId: principal,
+    occurredAtUtc,
+  });
+}
+
+async function rollbackMigrationForTest(
+  persistence: Persistence,
+  tenantId: TenantId,
+  migrationId: string,
+  occurredAtUtc: string = now.toISOString(),
+): Promise<void> {
+  const migration = await persistence.read(tenantId, async (tx) => await tx.securityMigrations.get(migrationId));
+  assert.ok(migration, `Migration ${migrationId} not found`);
+  if (migration.migratedItems > 0) {
+    await persistence.transaction(tenantId, async (tx) => {
+      const existing = await tx.securityMigrations.getManifestSnapshot(migrationId);
+      if (!existing) {
+        const manifest = await collectSecurityMigrationManifest(tx, migration);
+        const digest = computeSecurityMigrationManifestDigest(manifest);
+        await tx.securityMigrations.saveManifestSnapshot({
+          tenantId: migration.tenantId,
+          projectId: migration.projectId,
+          migrationId: migration.id,
+          sourceSecurityDomainId: migration.sourceSecurityDomainId,
+          targetSecurityDomainId: migration.targetSecurityDomainId,
+          sourceSecurityEpoch: migration.sourceSecurityEpoch,
+          targetSecurityEpoch: migration.targetSecurityEpoch,
+          manifestDigest: digest,
+          itemCount: manifest.items.length,
+          items: manifest.items,
+          createdAtUtc: occurredAtUtc,
+        });
+      }
+    });
+  }
+
+  const verifyMigrationReadiness = (persistence as any).verifyMigrationReadiness;
+  const handler = new RollbackSecurityMigrationHandler(persistence, verifyMigrationReadiness);
+  await handler.execute({
+    tenantId,
+    migrationId,
+    expectedMigrationVersion: migration.version,
+    actorPrincipalId: principal,
+    reason: "test rollback",
+    occurredAtUtc,
+  });
+}
 
 async function createTestPersistence(
   type: "memory" | "sqlite",
@@ -42,7 +176,7 @@ async function createTestPersistence(
   sqlitePath?: string;
 }> {
   if (type === "memory") {
-    const persistence = new MemoryPersistence({ now: clock });
+    const persistence = new MemoryPersistence({ now: clock, verifier: testReadinessAdapter });
     return {
       persistence,
       cleanup: async () => { await persistence.close(); },
@@ -50,7 +184,7 @@ async function createTestPersistence(
   }
   const dir = await mkdtemp(join(tmpdir(), "ppm-projection-test-"));
   const sqlitePath = join(dir, "projection.sqlite");
-  const persistence = new SqlitePersistence({ path: sqlitePath, now: clock });
+  const persistence = new SqlitePersistence({ path: sqlitePath, now: clock, verifier: testReadinessAdapter });
   return {
     persistence,
     sqlitePath,
@@ -89,6 +223,22 @@ async function insertDomain(
     createdAtUtc: now.toISOString(),
     deletedAtUtc: null,
   });
+  if (await transaction.securityGrants.get(domainId, principal) === undefined) {
+    await transaction.securityGrants.insert({
+      tenantId: tenant,
+      id: `grant:${domainId}:${principal}`,
+      securityDomainId: domainId,
+      principalId: principal,
+      capability: "manage_access",
+      status: "active",
+      expiresAtUtc: null,
+      grantedByPrincipalId: principal,
+      reason: "test manager grant",
+      version: 1,
+      createdAtUtc: now.toISOString(),
+      updatedAtUtc: now.toISOString(),
+    });
+  }
 }
 
 async function insertTargetDomain(
@@ -122,6 +272,22 @@ async function insertTargetDomain(
     createdAtUtc: now.toISOString(),
     deletedAtUtc: null,
   });
+  if (await transaction.securityGrants.get(domainId, principal) === undefined) {
+    await transaction.securityGrants.insert({
+      tenantId: tenant,
+      id: `grant:${domainId}:${principal}`,
+      securityDomainId: domainId,
+      principalId: principal,
+      capability: "manage_access",
+      status: "active",
+      expiresAtUtc: null,
+      grantedByPrincipalId: principal,
+      reason: "test manager grant",
+      version: 1,
+      createdAtUtc: now.toISOString(),
+      updatedAtUtc: now.toISOString(),
+    });
+  }
 }
 
 function migrationPlan(
@@ -131,6 +297,7 @@ function migrationPlan(
   targetSecurityDomainId: string | null = "domain-target",
   sourceSecurityEpoch = 1,
   targetSecurityEpoch = 2,
+  totalItems = 1,
 ): SecurityDomainMigration {
   return {
     tenantId: tenant,
@@ -144,7 +311,7 @@ function migrationPlan(
     targetSecurityEpoch,
     state: "planned",
     cursor: null,
-    totalItems: 1,
+    totalItems,
     migratedItems: 0,
     failure: null,
     nextAttemptAtUtc: null,
@@ -336,22 +503,29 @@ test("TC-SEC-002J planned and terminal migration states allow projection in Memo
 
         await fixture.persistence.transaction(tenant, async (transaction) => {
           await insertDomain(transaction, "domain-target", "node-1");
-          const planned = migrationPlan(testState, "node-1", null, "domain-target", 1, 2);
+          const planned = migrationPlan(testState, "node-1", null, "domain-target", 1, 2, 2);
           await transaction.securityMigrations.insert(planned);
           if (testState === "committed") {
             const active = transitionSecurityMigration(planned, "active", now.toISOString());
             await transaction.securityMigrations.saveProgressPreservingPlan(planned.id, active, planned.version);
             await transaction.nodes.migrateSecurityOwnership(planned.id, "node-1", 1);
             await transaction.tasks.migrateSecurityOwnership(planned.id, "task-1", 1);
-            const verifying = transitionSecurityMigration(active, "verifying", now.toISOString());
-            await transaction.securityMigrations.saveProgressPreservingPlan(planned.id, verifying, active.version);
-            const committed = transitionSecurityMigration(verifying, "committed", now.toISOString());
-            await transaction.securityMigrations.saveProgressPreservingPlan(planned.id, committed, verifying.version);
-          } else if (testState === "rolled_back") {
-            const rolledBack = transitionSecurityMigration(planned, "rolled_back", now.toISOString());
-            await transaction.securityMigrations.saveProgressPreservingPlan(planned.id, rolledBack, planned.version);
+            const checkpoint = checkpointSecurityMigration(active, {
+              cursor: JSON.stringify(["node-1", "task", "task-1"]),
+              migratedItems: 2,
+              occurredAtUtc: now.toISOString(),
+            });
+            await transaction.securityMigrations.saveProgressPreservingPlan(planned.id, checkpoint, active.version);
+            const verifying = transitionSecurityMigration(checkpoint, "verifying", now.toISOString());
+            await transaction.securityMigrations.saveProgressPreservingPlan(planned.id, verifying, checkpoint.version);
           }
         });
+
+        if (testState === "committed") {
+          await commitMigrationForTest(fixture.persistence, tenant, `migration-${testState}`, now.toISOString());
+        } else if (testState === "rolled_back") {
+          await rollbackMigrationForTest(fixture.persistence, tenant, `migration-${testState}`, now.toISOString());
+        }
 
         const processor = new CollaborationProjectionProcessor({
           persistence: fixture.persistence, assetContent: content, tasks,
@@ -2210,7 +2384,7 @@ test("TC-SEC-002J real concurrency racing planned-to-active with open provider p
       });
       await fixture.persistence.transaction(tenant, async (tx) => {
         await insertDomain(tx, "domain-target-task", "node-race-task");
-        await tx.securityMigrations.insert(migrationPlan("race-task", "node-race-task", null, "domain-target-task", 1, 2));
+        await tx.securityMigrations.insert(migrationPlan("race-task", "node-race-task", null, "domain-target-task", 1, 2, 2));
       });
 
       const taskCallStarted = createDeferred();
@@ -2265,11 +2439,18 @@ test("TC-SEC-002J real concurrency racing planned-to-active with open provider p
         assert.ok(planned);
         const active = transitionSecurityMigration(planned, "active", currentTime.toISOString());
         await tx.securityMigrations.saveProgressPreservingPlan(planned.id, active, planned.version);
-        const verifying = transitionSecurityMigration(active, "verifying", currentTime.toISOString());
-        await tx.securityMigrations.saveProgressPreservingPlan(planned.id, verifying, active.version);
-        const committed = transitionSecurityMigration(verifying, "committed", currentTime.toISOString());
-        await tx.securityMigrations.saveProgressPreservingPlan(planned.id, committed, verifying.version);
+        await tx.nodes.migrateSecurityOwnership(planned.id, "node-race-task", 1);
+        await tx.tasks.migrateSecurityOwnership(planned.id, "task-race", 1);
+        const checkpoint = checkpointSecurityMigration(active, {
+          cursor: JSON.stringify(["node-race-task", "task", "task-race"]),
+          migratedItems: 2,
+          occurredAtUtc: currentTime.toISOString(),
+        });
+        await tx.securityMigrations.saveProgressPreservingPlan(planned.id, checkpoint, active.version);
+        const verifying = transitionSecurityMigration(checkpoint, "verifying", currentTime.toISOString());
+        await tx.securityMigrations.saveProgressPreservingPlan(planned.id, verifying, checkpoint.version);
       });
+      await commitMigrationForTest(fixture.persistence, tenant, "migration-race-task", currentTime.toISOString());
       const committedMigration1 = await fixture.persistence.read(tenant, async (tx) => await tx.securityMigrations.get("migration-race-task"));
       assert.equal(committedMigration1?.state, "committed", `${name}:task_migration_committed`);
 
@@ -2317,7 +2498,7 @@ test("TC-SEC-002J real concurrency racing planned-to-active with open provider p
 
       await fixture.persistence.transaction(tenant, async (tx) => {
         await insertDomain(tx, "domain-target-asset", "node-race-asset");
-        await tx.securityMigrations.insert(migrationPlan("race-asset", "node-race-asset", null, "domain-target-asset", 1, 2));
+        await tx.securityMigrations.insert(migrationPlan("race-asset", "node-race-asset", null, "domain-target-asset", 1, 2, 3));
       });
 
       const blobCallStarted = createDeferred();
@@ -2407,11 +2588,21 @@ test("TC-SEC-002J real concurrency racing planned-to-active with open provider p
         assert.ok(planned);
         const active = transitionSecurityMigration(planned, "active", currentTime.toISOString());
         await tx.securityMigrations.saveProgressPreservingPlan(planned.id, active, planned.version);
-        const verifying = transitionSecurityMigration(active, "verifying", currentTime.toISOString());
-        await tx.securityMigrations.saveProgressPreservingPlan(planned.id, verifying, active.version);
-        const committed = transitionSecurityMigration(verifying, "committed", currentTime.toISOString());
-        await tx.securityMigrations.saveProgressPreservingPlan(planned.id, committed, verifying.version);
+        await tx.nodes.migrateSecurityOwnership(planned.id, "node-race-asset", 1);
+        await tx.tasks.migrateSecurityOwnership(planned.id, "task-for-asset", 1);
+        const asset = await tx.assets.get("asset-race");
+        assert.ok(asset);
+        await tx.assets.migrateSecurityOwnership(planned.id, "asset-race", asset.version);
+        const checkpoint = checkpointSecurityMigration(active, {
+          cursor: JSON.stringify(["node-race-asset", "asset", "asset-race"]),
+          migratedItems: 3,
+          occurredAtUtc: currentTime.toISOString(),
+        });
+        await tx.securityMigrations.saveProgressPreservingPlan(planned.id, checkpoint, active.version);
+        const verifying = transitionSecurityMigration(checkpoint, "verifying", currentTime.toISOString());
+        await tx.securityMigrations.saveProgressPreservingPlan(planned.id, verifying, checkpoint.version);
       });
+      await commitMigrationForTest(fixture.persistence, tenant, "migration-race-asset", currentTime.toISOString());
       const committedMigration2 = await fixture.persistence.read(tenant, async (tx) => await tx.securityMigrations.get("migration-race-asset"));
       assert.equal(committedMigration2?.state, "committed", `${name}:asset_migration_committed`);
 
@@ -2604,7 +2795,7 @@ test("TC-SEC-002J direct Asset matrix: source, target, and outside scope during 
 
       await fixture.persistence.transaction(tenant, async (tx) => {
         await insertDomain(tx, "domain-target", "node-1");
-        const planned = migrationPlan("asset-scope", "node-1", null, "domain-target", 1, 2);
+        const planned = migrationPlan("asset-scope", "node-1", null, "domain-target", 1, 2, 3);
         await tx.securityMigrations.insert(planned);
         const active = transitionSecurityMigration(planned, "active", now.toISOString());
         await tx.securityMigrations.saveProgressPreservingPlan(planned.id, active, planned.version);
@@ -2664,11 +2855,16 @@ test("TC-SEC-002J direct Asset matrix: source, target, and outside scope during 
         await tx.nodes.migrateSecurityOwnership("migration-asset-scope", "node-1", 1);
         const active = await tx.securityMigrations.get("migration-asset-scope");
         assert.ok(active);
-        const verifying = transitionSecurityMigration(active, "verifying", now.toISOString());
-        await tx.securityMigrations.saveProgressPreservingPlan(active.id, verifying, active.version);
-        const committed = transitionSecurityMigration(verifying, "committed", now.toISOString());
-        await tx.securityMigrations.saveProgressPreservingPlan(active.id, committed, verifying.version);
+        const checkpoint = checkpointSecurityMigration(active, {
+          cursor: JSON.stringify(["node-1", "asset", "asset-source"]),
+          migratedItems: 3,
+          occurredAtUtc: now.toISOString(),
+        });
+        await tx.securityMigrations.saveProgressPreservingPlan(active.id, checkpoint, active.version);
+        const verifying = transitionSecurityMigration(checkpoint, "verifying", now.toISOString());
+        await tx.securityMigrations.saveProgressPreservingPlan(active.id, verifying, checkpoint.version);
       });
+      await commitMigrationForTest(fixture.persistence, tenant, "migration-asset-scope", now.toISOString());
 
       // After migration committed -> SUCCEEDS!
       const committedResult = await processor.process(sourceJob);
@@ -2727,7 +2923,7 @@ test("TC-SEC-002J direct Asset matrix: planned, committed, and rolled_back state
 
         await fixture.persistence.transaction(tenant, async (tx) => {
           await insertDomain(tx, "domain-target", "node-1");
-          const planned = migrationPlan(testState, "node-1", null, "domain-target", 1, 2);
+          const planned = migrationPlan(testState, "node-1", null, "domain-target", 1, 2, 3);
           await tx.securityMigrations.insert(planned);
           if (testState === "committed") {
             const active = transitionSecurityMigration(planned, "active", now.toISOString());
@@ -2737,15 +2933,22 @@ test("TC-SEC-002J direct Asset matrix: planned, committed, and rolled_back state
             const asset = await tx.assets.get("asset-1");
             assert.ok(asset);
             await tx.assets.migrateSecurityOwnership(planned.id, "asset-1", asset.version);
-            const verifying = transitionSecurityMigration(active, "verifying", now.toISOString());
-            await tx.securityMigrations.saveProgressPreservingPlan(planned.id, verifying, active.version);
-            const committed = transitionSecurityMigration(verifying, "committed", now.toISOString());
-            await tx.securityMigrations.saveProgressPreservingPlan(planned.id, committed, verifying.version);
-          } else if (testState === "rolled_back") {
-            const rolledBack = transitionSecurityMigration(planned, "rolled_back", now.toISOString());
-            await tx.securityMigrations.saveProgressPreservingPlan(planned.id, rolledBack, planned.version);
+            const checkpoint = checkpointSecurityMigration(active, {
+              cursor: JSON.stringify(["node-1", "asset", "asset-1"]),
+              migratedItems: 3,
+              occurredAtUtc: now.toISOString(),
+            });
+            await tx.securityMigrations.saveProgressPreservingPlan(planned.id, checkpoint, active.version);
+            const verifying = transitionSecurityMigration(checkpoint, "verifying", now.toISOString());
+            await tx.securityMigrations.saveProgressPreservingPlan(planned.id, verifying, checkpoint.version);
           }
         });
+
+        if (testState === "committed") {
+          await commitMigrationForTest(fixture.persistence, tenant, `migration-${testState}`, now.toISOString());
+        } else if (testState === "rolled_back") {
+          await rollbackMigrationForTest(fixture.persistence, tenant, `migration-${testState}`, now.toISOString());
+        }
 
         const processor = new CollaborationProjectionProcessor({
           persistence: fixture.persistence, assetContent: content, tasks,
@@ -3254,7 +3457,7 @@ test("TC-SEC-002J direct Asset matrix: defer preserves previous attempts, lastEr
       // 2. Verify planned-to-active refuses while asset operation is unresolved / fence active
       await fixture.persistence.transaction(tenant, async (tx) => {
         await insertDomain(tx, "domain-target", "node-1");
-        const planned = migrationPlan("asset-defer-preserve");
+        const planned = migrationPlan("asset-defer-preserve", "node-1", null, "domain-target", 1, 2, 3);
         await tx.securityMigrations.insert(planned);
       });
       await assert.rejects(
@@ -3313,12 +3516,19 @@ test("TC-SEC-002J direct Asset matrix: defer preserves previous attempts, lastEr
         const asset = await tx.assets.get("asset-1");
         assert.ok(asset);
         await tx.assets.migrateSecurityOwnership(active.id, "asset-1", asset.version);
-        const verifying = transitionSecurityMigration(active, "verifying", time2.toISOString());
-        await tx.securityMigrations.saveProgressPreservingPlan(active.id, verifying, active.version);
-        const committed = transitionSecurityMigration(verifying, "committed", time2.toISOString());
-        await tx.securityMigrations.saveProgressPreservingPlan(active.id, committed, verifying.version);
+        const checkpoint = checkpointSecurityMigration(active, {
+          cursor: JSON.stringify(["node-1", "asset", "asset-1"]),
+          migratedItems: 3,
+          occurredAtUtc: time2.toISOString(),
+        });
+        await tx.securityMigrations.saveProgressPreservingPlan(active.id, checkpoint, active.version);
+        const verifying = transitionSecurityMigration(checkpoint, "verifying", time2.toISOString());
+        await tx.securityMigrations.saveProgressPreservingPlan(active.id, verifying, checkpoint.version);
+      });
+      await commitMigrationForTest(fixture.persistence, tenant, "migration-asset-defer-preserve", time2.toISOString());
 
-        // Reset operation to retryable so the deferred job can retry to completion under new epoch
+      // Reset operation to retryable so the deferred job can retry to completion under new epoch
+      await fixture.persistence.transaction(tenant, async (tx) => {
         const op = await tx.integrationOperations.get("op:job:collaboration-asset:asset-1:v1");
         if (op) {
           await tx.integrationOperations.update({

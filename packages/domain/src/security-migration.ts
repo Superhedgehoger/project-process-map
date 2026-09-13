@@ -1,4 +1,22 @@
-import type { TenantId } from "./identity.ts";
+import type { PrincipalId, TenantId } from "./identity.ts";
+
+export type SecurityMigrationAuditAction = "committed" | "rolled_back" | "recovery_required";
+
+export type SecurityMigrationAuditEntry = Readonly<{
+  tenantId: TenantId;
+  auditId: string;
+  migrationId: string;
+  projectId: string;
+  action: SecurityMigrationAuditAction;
+  actorPrincipalId: PrincipalId;
+  reason: string;
+  sourceSecurityDomainId: string | null;
+  targetSecurityDomainId: string | null;
+  sourceSecurityEpoch: number;
+  targetSecurityEpoch: number;
+  migratedItems: number;
+  occurredAtUtc: string;
+}>;
 
 export type SecurityDomainMigrationState = "planned" | "active" | "verifying" | "committed" | "retryable" | "recovery_required" | "rolled_back";
 
@@ -68,9 +86,9 @@ export function transitionSecurityMigration(
 ): SecurityDomainMigration {
   const allowed: Record<SecurityDomainMigrationState, readonly SecurityDomainMigrationState[]> = {
     planned: ["active", "rolled_back"],
-    active: ["verifying", "retryable", "recovery_required"],
-    verifying: ["committed", "retryable", "recovery_required"],
-    retryable: ["active", "verifying", "recovery_required"],
+    active: ["verifying", "retryable", "recovery_required", "rolled_back"],
+    verifying: ["committed", "retryable", "recovery_required", "rolled_back"],
+    retryable: ["active", "verifying", "recovery_required", "rolled_back"],
     recovery_required: ["active", "verifying", "rolled_back"],
     committed: [],
     rolled_back: [],

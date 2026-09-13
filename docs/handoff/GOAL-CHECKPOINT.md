@@ -1,20 +1,20 @@
 # Goal Handoff Checkpoint — project-process-map
 
-## 当前恢复状态（2026-09-11，优先于下方历史暂停记录）
+## 当前恢复状态（2026-09-13，优先于下方历史暂停记录）
 
 - 状态：GOAL_RUNNING
 - Goal threadId：`01a06f07-6235-7a43-b22d-fc042cf0f6aa`
 - Branch：`main`
-- 已验收并推送基线：`8e24eb4`（`docs: checkpoint collaboration projection slice`）。
-- 已验收实现提交：`f1cf052`（`feat: secure asset content downloads`；TC-SEC-002I）。
-- 工作区：TC-SEC-002J 实现、测试、Evidence、Phase 状态与 TC-SEC-002K Task Packet 已就绪，最终独立安全 Review PASS，本切片待提交并推送。
+- 已验收实现提交：`2edd4a8`（`feat: outbound projection freeze during migration`；TC-SEC-002J）。
+- 最近完成：P0-07 / TC-SEC-002K 安全域迁移的外部可见性收敛与全通道纪元就绪守卫
+- 验收报告：`docs/reports/P0-07-TC-SEC-002K-migration-epoch-readiness.md`
+- 独立安全 Review：全新 Antigravity 独立只读会话执行，结论 PASS（Safe to acceptance/evidence/commit/push: YES）。Codex Reviewer 此前两次因 `app-server reconnect 120s` 基础设施超时故障未产出结论，Claude CLI 本机未配置/不可用；未声称 Claude/Codex PASS。
+- 验收测试：定向收敛测试 25/25；架构门禁 4/4；协作投影 19/19；Product API 19/19；安全授权 19/19；Task 升级兼容 5/5；批迁移 7/7；全量生产门禁 `pnpm check` 197/197（0 fail, 0 skipped）；Huly 14 镜像 lockfile 验证通过；Huly 插件扩展锁定验证通过；独立安全探针（生产 persistence 伪造 evidenceId 被 `SECURITY_MIGRATION_EVIDENCE_NOT_FOUND` fail-closed 拦截）通过；`git diff --check` 与凭据/私钥扫描 clean。
+- 生产 Huly 约束：生产 Huly 当前对 epoch/ACL 无法证明时继续保持 `HULY_EPOCH_CONVERGENCE_UNSUPPORTED` fail-closed，绝不把本地提交写成 Huly 物理 ACL convergence 已完成。
 - 当前 Gate：P0-07 敏感 ACL（总项继续进行中）
-- 最近完成：P0-07 / TC-SEC-002J 外部协作投影的迁移期出站冻结
-- 验收：独立安全 Review 最终 PASS，无残留严重性发现；SQLite state-prefilter 绕过彻底修复（租户全量操作在跳过前先完成解析与 7 复制列交叉比对，枚举与字段漂移一致 fail-closed）；定向协作测试 19/19；全量 `pnpm check` 169/169（0 fail, 0 skipped）；14 个 Huly 镜像锁；扩展边界、`git diff --check` 与凭据/私钥特征扫描均通过。
-- 当前 Task：P0-07 / TC-SEC-002K 安全域迁移的外部可见性收敛与全通道纪元就绪守卫
-- Task Packet：`docs/agent-tasks/P0-07-TC-SEC-002K.md`
-- Blocker：无（准备就绪）。
-- next_action：在新的执行上下文中仅读取本 checkpoint、AGENTS.md、TC-SEC-002K Task Packet 与当前 Git 状态，推进 P0-07 / TC-SEC-002K 外部协作历史副本收敛与纪元就绪验证守卫；不得恢复旧会话历史。
+- 下一个 Ready Task：P0-07 / TC-SEC-004 固定身份与角色模型扩展（U2 Node Owner / U7 组织管理员 / U8 紧急访问）或 P0-05A-T1b 任务交付物与节点完成守卫
+- 理由：TC-SEC-002 迁移全周期（002A～002K）与 TC-SEC-003 授权全周期（003A～003C）已完全闭合验收；下一阶段可补齐 U2/U7/U8 角色槽位模型或继续推进 P0-05A 交付物守卫。
+- next_action：在新的干净执行上下文中仅读取本 checkpoint、AGENTS.md 与选定的 Task Packet，推进下一任务。
 
 旧会话 `e8e244ee-0c02-4769-8bd0-37f1ca8bd485` 仅是该 Git 工作树所在目录，不得作为聊天执行上下文恢复。原绑定的“project-process-map Goal 恢复”和“用量恢复后继续任务”自动任务已于 2026-09-05 暂停；后续不得把本 Goal 的恢复投递到该旧会话。
 

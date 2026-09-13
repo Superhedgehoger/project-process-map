@@ -9,11 +9,19 @@ import {
   canViewProjectObjectDuringMigration,
 } from "../../../../packages/application/src/access/project-security.ts";
 import type { AssetContentPort } from "../../../../packages/application/src/ports/integrations.ts";
-import type { Persistence } from "../../../../packages/application/src/ports/persistence.ts";
+import type {
+  CommitSecurityMigrationResult,
+  Persistence,
+  RollbackSecurityMigrationResult,
+} from "../../../../packages/application/src/ports/persistence.ts";
 import { ActOnTaskHandler, type TaskCommandAction } from "../../../../packages/application/src/tasks/act-on-task.ts";
 import { CreateTaskHandler, listTasksForNodeInTransaction } from "../../../../packages/application/src/tasks/create-task.ts";
 import { CreateSecurityRootHandler } from "../../../../packages/application/src/security/create-security-root.ts";
 import { ManageSecurityGrantHandler } from "../../../../packages/application/src/security/manage-security-grant.ts";
+import { CommitSecurityMigrationHandler } from "../../../../packages/application/src/security/commit-security-migration.ts";
+import { RollbackSecurityMigrationHandler } from "../../../../packages/application/src/security/rollback-security-migration.ts";
+import type { VerifyMigrationReadiness } from "../../../../packages/application/src/security/security-migration-coordinator.ts";
+
 import type { ApiNode } from "../../../../packages/contracts/src/project-process-map-api.ts";
 import { principalId, type PrincipalId, type TenantId } from "../../../../packages/domain/src/identity.ts";
 import type { ProjectNode } from "../../../../packages/domain/src/project-structure.ts";
@@ -25,6 +33,7 @@ export type ProjectRouteDependencies = Readonly<{
   persistence: Persistence;
   assetContent: AssetContentPort;
   scheduleCollaborationProjection: boolean;
+  verifyMigrationReadiness?: VerifyMigrationReadiness | undefined;
 }>;
 
 export async function routeProjectRequest(
@@ -291,6 +300,66 @@ export async function routeProjectRequest(
       deadlineAtUtc: new Date(Date.parse(occurredAtUtc) + 5 * 60_000).toISOString(),
     });
     sendJson(response, result.replayed ? 200 : 201, result);
+    return true;
+  }
+  const migrationCommitMatch = url.pathname.match(/^\/api\/security-migrations\/([^/]+)\/actions\/commit$/);
+  if (request.method === "POST" && migrationCommitMatch?.[1] !== undefined) {
+    const migrationId = decodePathIdentifier(migrationCommitMatch[1]);
+    const body = await readJson(request);
+    assertExactFields(body, ["expectedVersion"]);
+    const expectedMigrationVersion = requiredPositiveInteger(body, "expectedVersion");
+    const idempotencyKey = requiredHeader(request, "idempotency-key");
+    const verifyMigrationReadiness = dependencies.verifyMigrationReadiness;
+    if (verifyMigrationReadiness === undefined) {
+      throw new ApplicationError("HULY_ADAPTER_NOT_CONFIGURED", "Collaboration epoch readiness adapter is not configured");
+    }
+    const existingReceipt = await persistence.read(identity.tenantId, async (tx) => {
+      return await tx.receipts.get<CommitSecurityMigrationResult>({
+        principalId: identity.principalId,
+        operation: "commit_security_migration",
+        idempotencyKey,
+      });
+    });
+    const occurredAtUtc = existingReceipt?.result?.occurredAtUtc ?? new Date().toISOString();
+    const handler = new CommitSecurityMigrationHandler(persistence, verifyMigrationReadiness);
+    const result = await handler.execute({
+      tenantId: identity.tenantId,
+      migrationId,
+      expectedMigrationVersion,
+      actorPrincipalId: identity.principalId,
+      occurredAtUtc,
+      idempotencyKey,
+    });
+    sendJson(response, 200, result);
+    return true;
+  }
+  const migrationRollbackMatch = url.pathname.match(/^\/api\/security-migrations\/([^/]+)\/actions\/rollback$/);
+  if (request.method === "POST" && migrationRollbackMatch?.[1] !== undefined) {
+    const migrationId = decodePathIdentifier(migrationRollbackMatch[1]);
+    const body = await readJson(request);
+    assertExactFields(body, ["expectedVersion", "reason"]);
+    const expectedMigrationVersion = requiredPositiveInteger(body, "expectedVersion");
+    const reason = requiredString(body, "reason");
+    const idempotencyKey = requiredHeader(request, "idempotency-key");
+    const existingReceipt = await persistence.read(identity.tenantId, async (tx) => {
+      return await tx.receipts.get<RollbackSecurityMigrationResult>({
+        principalId: identity.principalId,
+        operation: "rollback_security_migration",
+        idempotencyKey,
+      });
+    });
+    const occurredAtUtc = existingReceipt?.result?.occurredAtUtc ?? new Date().toISOString();
+    const handler = new RollbackSecurityMigrationHandler(persistence, dependencies.verifyMigrationReadiness);
+    const result = await handler.execute({
+      tenantId: identity.tenantId,
+      migrationId,
+      expectedMigrationVersion,
+      actorPrincipalId: identity.principalId,
+      reason,
+      occurredAtUtc,
+      idempotencyKey,
+    });
+    sendJson(response, 200, result);
     return true;
   }
   return false;

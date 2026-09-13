@@ -364,6 +364,7 @@ function isCode(code: string): (error: unknown) => boolean {
 
 function failingPersistence(base: Persistence, failure: "node" | "task" | "asset" | "checkpoint"): Persistence {
   return {
+    nowUtc: () => new Date().toISOString(),
     transaction: async (tenantId, work) => await base.transaction(tenantId, async (transaction) => {
       const injected = (): never => { throw new Error(`INJECTED_FAILURE:${failure}`); };
       const decorated: TransactionContext = {
@@ -373,10 +374,10 @@ function failingPersistence(base: Persistence, failure: "node" | "task" | "asset
         assets: failure === "asset" ? { ...transaction.assets, migrateSecurityOwnership: async () => injected() } : transaction.assets,
         securityMigrations: failure === "checkpoint"
           ? {
-            ...transaction.securityMigrations,
-            saveProgressPreservingPlan: async (migrationId, migration, expectedVersion) =>
-              await transaction.securityMigrations.saveProgressPreservingPlan(migrationId, migration, expectedVersion + 1),
-          }
+              ...transaction.securityMigrations,
+              saveProgressPreservingPlan: async (migrationId, migration, expectedVersion) =>
+                await transaction.securityMigrations.saveProgressPreservingPlan(migrationId, migration, expectedVersion + 1),
+            }
           : transaction.securityMigrations,
       };
       return await work(decorated);

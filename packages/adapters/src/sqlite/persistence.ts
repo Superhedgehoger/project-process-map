@@ -1,21 +1,23 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { Asset, AssetBinding } from "../../../domain/src/assets.ts";
-import type { BackgroundJob, DomainEvent, OutboxMessage } from "../../../domain/src/events.ts";
+import { eventTopic, type BackgroundJob, type DomainEvent, type OutboxMessage } from "../../../domain/src/events.ts";
 import type { ExternalBinding } from "../../../domain/src/external-reference.ts";
-import { tenantId as parseTenantId, type TenantId } from "../../../domain/src/identity.ts";
+import { tenantId as parseTenantId, type TenantId, type PrincipalId } from "../../../domain/src/identity.ts";
 import type { ExternalIdentityMapping, Principal } from "../../../domain/src/identity.ts";
 import type { IntegrationOperation, IntegrationStepAttempt } from "../../../domain/src/integration-operations.ts";
 import type { ProjectNode } from "../../../domain/src/project-structure.ts";
 import type { OutboundProjectionFence } from "../../../domain/src/outbound-projection-fence.ts";
-import type { ProjectMembership, ProjectMembershipSecurityAuditEntry } from "../../../domain/src/project-access.ts";
+import { isProjectManager, type ProjectMembership, type ProjectMembershipSecurityAuditEntry } from "../../../domain/src/project-access.ts";
 import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import {
   assertSecurityMigrationInitialPlan,
   assertSecurityMigrationProgressChange,
+  transitionSecurityMigration,
   type SecurityDomainMigration,
+  type SecurityMigrationAuditEntry,
 } from "../../../domain/src/security-migration.ts";
 import {
   grantAllows,
@@ -25,29 +27,55 @@ import {
   type SecurityGrant,
   type SecurityGrantAuditEntry,
 } from "../../../domain/src/security-access.ts";
-import type {
-  ClaimOptions,
-  CommandReceipt,
-  CommandScope,
-  JobConsumer,
-  OutboxConsumer,
-  Persistence,
-  TransactionContext,
+import {
+  type ClaimOptions,
+  type CommandReceipt,
+  type CommandScope,
+  type CommitSecurityMigrationResult,
+  type CommitWithReadinessEvidenceParams,
+  type JobConsumer,
+  type OutboxConsumer,
+  type Persistence,
+  type RollbackSecurityMigrationResult,
+  type RollbackWithAuditParams,
+  type SecurityMigrationManifestSnapshot,
+  type SecurityMigrationReadinessEvidenceRecord,
+  type TransactionContext,
 } from "../../../application/src/ports/persistence.ts";
+import {
+  createVerificationOperation,
+  type InternalIssueChallengeParams,
+  type InternalRecordVerifiedEvidenceParams,
+  type TestReadinessHarness,
+} from "../security-migration-coordinator.ts";
+import type { VerifyMigrationReadiness } from "../../../application/src/security/security-migration-coordinator.ts";
+import type { ExternalCollaborationEpochReadinessPort } from "../../../application/src/ports/integrations.ts";
+import { canAccessProjectObjectDuringMigration } from "../../../application/src/access/project-security.ts";
+import {
+  assertManifestMatchesSnapshot,
+  collectSecurityMigrationManifest,
+  computeSecurityMigrationManifestDigest,
+  validateCanonicalSnapshotItems,
+  type SecurityMigrationManifestInput,
+} from "../../../application/src/security/security-migration-manifest.ts";
+import { buildResumableSecurityMigrationInventory } from "../../../application/src/security/build-security-migration-inventory.ts";
 
 export type SqlitePersistenceOptions = Readonly<{
   path: string;
-  busyTimeoutMilliseconds?: number;
-  now?: () => Date;
+  busyTimeoutMilliseconds?: number | undefined;
+  now?: (() => Date) | undefined;
+  verifier?: ExternalCollaborationEpochReadinessPort | undefined;
+  attachTestHarness?: ((harness: TestReadinessHarness) => void) | undefined;
 }>;
 
 const pathLocks = new Map<string, Promise<void>>();
-const currentSchemaVersion = 7;
+const currentSchemaVersion = 9;
 
 export class SqlitePersistence implements Persistence {
   readonly #database: DatabaseSync;
   readonly #lockKey: string;
   readonly #now: () => Date;
+  readonly #verifyMigrationReadiness?: VerifyMigrationReadiness | undefined;
   #closed = false;
 
   constructor(options: SqlitePersistenceOptions) {
@@ -65,9 +93,35 @@ export class SqlitePersistence implements Persistence {
     this.#database.exec("PRAGMA foreign_keys=ON");
     this.assertSupportedSchema();
     this.migrate();
+    if (options.verifier !== undefined) {
+      this.#verifyMigrationReadiness = createVerificationOperation({
+        persistence: this,
+        verifier: options.verifier,
+        issueChallenge: async (tenantId, params) => await this.#issueReadinessChallenge(tenantId, params),
+        recordVerifiedEvidence: async (tenantId, params) => await this.#recordVerifiedEvidence(tenantId, params),
+        nowUtc: () => this.nowUtc(),
+      });
+    }
+    if (options.attachTestHarness !== undefined) {
+      options.attachTestHarness({
+        issueChallenge: async (tenantId, params) => await this.#issueReadinessChallenge(tenantId, params),
+        recordVerifiedEvidence: async (tenantId, params) => await this.#recordVerifiedEvidence(tenantId, params),
+        createVerificationOperation: (verifier) => createVerificationOperation({
+          persistence: this,
+          verifier,
+          issueChallenge: async (tenantId, params) => await this.#issueReadinessChallenge(tenantId, params),
+          recordVerifiedEvidence: async (tenantId, params) => await this.#recordVerifiedEvidence(tenantId, params),
+          nowUtc: () => this.nowUtc(),
+        }),
+      });
+    }
   }
 
-  private nowUtc(): string {
+  get verifyMigrationReadiness(): VerifyMigrationReadiness | undefined {
+    return this.#verifyMigrationReadiness;
+  }
+
+  nowUtc(): string {
     return (this.#now ?? (() => new Date()))().toISOString();
   }
 
@@ -139,6 +193,153 @@ export class SqlitePersistence implements Persistence {
     });
   }
 
+  async #issueReadinessChallenge(
+    tenantId: TenantId,
+    params: InternalIssueChallengeParams,
+  ): Promise<SecurityMigrationReadinessEvidenceRecord> {
+    return await this.transaction(tenantId, async () => {
+      const row = this.#database.prepare(`
+        SELECT * FROM security_domain_migrations WHERE tenant_id = ? AND migration_id = ?
+      `).get(tenantId, params.migrationId);
+      if (row === undefined) throw new Error("SECURITY_MIGRATION_NOT_FOUND");
+      const migration = securityMigrationFromRow(row);
+      if (params.purpose !== "commit" && params.purpose !== "rollback") {
+        throw new Error("VALIDATION_FAILED");
+      }
+      if (params.purpose === "commit" && migration.state !== "verifying") {
+        throw new Error("SECURITY_MIGRATION_COMMIT_INVALID");
+      }
+      if (params.purpose === "rollback" && !["planned", "active", "verifying", "retryable", "recovery_required"].includes(migration.state)) {
+        throw new Error("SECURITY_MIGRATION_ROLLBACK_INVALID");
+      }
+      const snapshotRow = this.#database.prepare(`
+        SELECT * FROM security_migration_manifest_snapshots
+        WHERE tenant_id = ? AND migration_id = ?
+      `).get(tenantId, params.migrationId) as Record<string, unknown> | undefined;
+      if (snapshotRow === undefined) {
+        throw new Error("SECURITY_MIGRATION_MANIFEST_SNAPSHOT_NOT_FOUND");
+      }
+      const snapshot = manifestSnapshotFromRow(snapshotRow, this.#database);
+
+      const evidenceId = randomUUID();
+      const nonce = randomUUID();
+      const issuedAtUtc = this.nowUtc();
+      const expiresAtUtc = new Date(Date.parse(issuedAtUtc) + (params.ttlMilliseconds ?? 60_000)).toISOString();
+
+      const targetSecurityDomainId = params.purpose === "rollback" ? migration.sourceSecurityDomainId : migration.targetSecurityDomainId;
+      const targetSecurityEpoch = params.purpose === "rollback" ? migration.sourceSecurityEpoch : migration.targetSecurityEpoch;
+      const sourceSecurityDomainId = params.purpose === "rollback" ? migration.targetSecurityDomainId : migration.sourceSecurityDomainId;
+      const sourceSecurityEpoch = params.purpose === "rollback" ? migration.targetSecurityEpoch : migration.sourceSecurityEpoch;
+
+      const record: SecurityMigrationReadinessEvidenceRecord = {
+        tenantId,
+        evidenceId,
+        nonce,
+        migrationId: migration.id,
+        purpose: params.purpose,
+        projectId: migration.projectId,
+        sourceSecurityDomainId,
+        targetSecurityDomainId,
+        sourceSecurityEpoch,
+        targetSecurityEpoch,
+        manifestDigest: snapshot.manifestDigest,
+        itemCount: snapshot.items.length,
+        provider: null,
+        status: "issued",
+        converged: false,
+        issuedAtUtc,
+        verifiedAtUtc: null,
+        expiresAtUtc,
+        consumedAtUtc: null,
+        channels: null,
+        reason: null,
+      };
+
+      this.#database.prepare(`
+        INSERT INTO security_migration_readiness_evidence (
+          tenant_id, evidence_id, migration_id, purpose, nonce, status,
+          manifest_digest, item_count, source_security_domain_id, target_security_domain_id,
+          source_security_epoch, target_security_epoch, issued_at_utc, expires_at_utc,
+          verified_at_utc, consumed_at_utc, verifier_provider, channels_json, converged, reason, evidence_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        tenantId, record.evidenceId, record.migrationId, record.purpose, record.nonce, record.status,
+        record.manifestDigest, record.itemCount, record.sourceSecurityDomainId, record.targetSecurityDomainId,
+        record.sourceSecurityEpoch, record.targetSecurityEpoch, record.issuedAtUtc, record.expiresAtUtc,
+        null, null, null, null, 0, null, JSON.stringify(record),
+      );
+
+      return record;
+    });
+  }
+
+  async #recordVerifiedEvidence(
+    tenantId: TenantId,
+    params: InternalRecordVerifiedEvidenceParams,
+  ): Promise<SecurityMigrationReadinessEvidenceRecord> {
+    return await this.transaction(tenantId, async () => {
+      const row = this.#database.prepare(`
+        SELECT * FROM security_migration_readiness_evidence WHERE tenant_id = ? AND evidence_id = ?
+      `).get(tenantId, params.evidenceId) as Record<string, unknown> | undefined;
+      if (row === undefined) throw new Error("SECURITY_MIGRATION_EVIDENCE_NOT_FOUND");
+      const existing = readinessEvidenceFromRow(row);
+      if (existing.status !== "issued") {
+        throw new Error("SECURITY_MIGRATION_EVIDENCE_ALREADY_VERIFIED");
+      }
+      const nowUtc = this.nowUtc();
+      if (nowUtc > existing.expiresAtUtc) {
+        throw new Error("SECURITY_MIGRATION_EVIDENCE_EXPIRED");
+      }
+      if (params.provider !== "huly") {
+        throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+      }
+      if (
+        params.evidenceId !== existing.evidenceId
+        || params.nonce !== existing.nonce
+        || params.tenantId !== existing.tenantId
+        || params.projectId !== existing.projectId
+        || params.migrationId !== existing.migrationId
+        || params.purpose !== existing.purpose
+        || params.sourceSecurityDomainId !== existing.sourceSecurityDomainId
+        || params.targetSecurityDomainId !== existing.targetSecurityDomainId
+        || params.sourceSecurityEpoch !== existing.sourceSecurityEpoch
+        || params.targetSecurityEpoch !== existing.targetSecurityEpoch
+        || params.manifestDigest !== existing.manifestDigest
+        || params.itemCount !== existing.itemCount
+        || params.issuedAtUtc !== existing.issuedAtUtc
+        || params.expiresAtUtc !== existing.expiresAtUtc
+      ) {
+        throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+      }
+
+      const updated: SecurityMigrationReadinessEvidenceRecord = {
+        ...existing,
+        status: "verified",
+        provider: params.provider,
+        converged: params.converged,
+        channels: params.channels,
+        verifiedAtUtc: nowUtc,
+        reason: params.reason ?? null,
+      };
+
+      const updateResult = this.#database.prepare(`
+        UPDATE security_migration_readiness_evidence
+        SET status = ?, verified_at_utc = ?, verifier_provider = ?,
+            channels_json = ?, converged = ?, reason = ?, evidence_json = ?
+        WHERE tenant_id = ? AND evidence_id = ? AND status = 'issued'
+      `).run(
+        updated.status, updated.verifiedAtUtc, updated.provider ?? null,
+        JSON.stringify(updated.channels), updated.converged ? 1 : 0, updated.reason ?? null, JSON.stringify(updated),
+        tenantId, params.evidenceId,
+      );
+      if (updateResult.changes !== 1) {
+        throw new Error("SECURITY_MIGRATION_EVIDENCE_ALREADY_VERIFIED");
+      }
+
+      return updated;
+    });
+  }
+
   async listEvents(tenantId: TenantId): Promise<DomainEvent[]> {
     return await this.exclusive(async () => this.#database.prepare(
         "SELECT event_json FROM domain_events WHERE tenant_id = ? ORDER BY project_id, project_sequence",
@@ -158,7 +359,7 @@ export class SqlitePersistence implements Persistence {
   }
 
   private context(tenantId: TenantId): TransactionContext {
-    return {
+    const context: TransactionContext = {
       tenantId,
       nodes: {
         get: async (nodeId) => {
@@ -248,6 +449,36 @@ export class SqlitePersistence implements Persistence {
           if (updated === undefined) throw new Error("NODE_NOT_FOUND");
           return nodeFromRow(updated);
         },
+        rollbackSecurityOwnership: async (migrationId, nodeId, expectedVersion) => {
+          const migration = this.migrationForObjectRollback(tenantId, migrationId);
+          const row = this.#database.prepare(
+            "SELECT * FROM project_nodes WHERE tenant_id = ? AND node_id = ?",
+          ).get(tenantId, nodeId);
+          if (row === undefined) throw new Error("NODE_NOT_FOUND");
+          const current = nodeFromRow(row);
+          if (current.version !== expectedVersion) throw new Error("NODE_VERSION_CONFLICT");
+          this.assertMigrationScope(tenantId, migration, current.id);
+          if (current.projectId !== migration.projectId
+            || current.securityDomainId !== migration.targetSecurityDomainId
+            || current.securityEpoch !== migration.targetSecurityEpoch) {
+            throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+          }
+          const result = this.#database.prepare(`
+            UPDATE project_nodes
+            SET security_domain_id = ?, security_epoch = ?, version = version + 1
+            WHERE tenant_id = ? AND node_id = ? AND project_id = ? AND version = ?
+              AND security_domain_id IS ? AND security_epoch = ?
+          `).run(
+            migration.sourceSecurityDomainId, migration.sourceSecurityEpoch, tenantId, nodeId,
+            migration.projectId, expectedVersion, migration.targetSecurityDomainId, migration.targetSecurityEpoch,
+          );
+          if (result.changes !== 1) throw new Error("NODE_VERSION_CONFLICT");
+          const updated = this.#database.prepare(
+            "SELECT * FROM project_nodes WHERE tenant_id = ? AND node_id = ?",
+          ).get(tenantId, nodeId);
+          if (updated === undefined) throw new Error("NODE_NOT_FOUND");
+          return nodeFromRow(updated);
+        },
       },
       tasks: {
         get: async (taskId) => {
@@ -317,6 +548,31 @@ export class SqlitePersistence implements Persistence {
           }
           const updated = { ...current, securityDomainId: migration.targetSecurityDomainId,
             securityEpoch: migration.targetSecurityEpoch, version: current.version + 1 };
+          const result = this.#database.prepare(`
+            UPDATE product_tasks SET version = ?, task_json = ?
+            WHERE tenant_id = ? AND task_id = ? AND project_id = ? AND owner_node_id = ? AND version = ?
+          `).run(
+            updated.version, JSON.stringify(updated), tenantId, taskId, migration.projectId,
+            current.ownerNodeId, expectedVersion,
+          );
+          if (result.changes !== 1) throw new Error("TASK_VERSION_CONFLICT");
+          return updated;
+        },
+        rollbackSecurityOwnership: async (migrationId, taskId, expectedVersion) => {
+          const migration = this.migrationForObjectRollback(tenantId, migrationId);
+          const row = this.#database.prepare(
+            "SELECT * FROM product_tasks WHERE tenant_id = ? AND task_id = ?",
+          ).get(tenantId, taskId);
+          if (row === undefined) throw new Error("TASK_NOT_FOUND");
+          const current = productTaskFromRow(row);
+          if (current.version !== expectedVersion) throw new Error("TASK_VERSION_CONFLICT");
+          this.assertMigrationScope(tenantId, migration, current.ownerNodeId);
+          if (current.projectId !== migration.projectId || current.securityDomainId !== migration.targetSecurityDomainId
+            || current.securityEpoch !== migration.targetSecurityEpoch) {
+            throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+          }
+          const updated = { ...current, securityDomainId: migration.sourceSecurityDomainId,
+            securityEpoch: migration.sourceSecurityEpoch, version: current.version + 1 };
           const result = this.#database.prepare(`
             UPDATE product_tasks SET version = ?, task_json = ?
             WHERE tenant_id = ? AND task_id = ? AND project_id = ? AND owner_node_id = ? AND version = ?
@@ -407,6 +663,31 @@ export class SqlitePersistence implements Persistence {
           }
           const updated = { ...current, securityDomainId: migration.targetSecurityDomainId,
             securityEpoch: migration.targetSecurityEpoch, version: current.version + 1 };
+          const result = this.#database.prepare(`
+            UPDATE assets SET version = ?, asset_json = ?
+            WHERE tenant_id = ? AND asset_id = ? AND project_id = ? AND owner_node_id = ? AND version = ?
+          `).run(
+            updated.version, JSON.stringify(updated), tenantId, assetId, migration.projectId,
+            current.ownerNodeId, expectedVersion,
+          );
+          if (result.changes !== 1) throw new Error("ASSET_VERSION_CONFLICT");
+          return updated;
+        },
+        rollbackSecurityOwnership: async (migrationId, assetId, expectedVersion) => {
+          const migration = this.migrationForObjectRollback(tenantId, migrationId);
+          const row = this.#database.prepare(
+            "SELECT * FROM assets WHERE tenant_id = ? AND asset_id = ?",
+          ).get(tenantId, assetId);
+          if (row === undefined) throw new Error("ASSET_NOT_FOUND");
+          const current = assetFromRow(row);
+          if (current.version !== expectedVersion) throw new Error("ASSET_VERSION_CONFLICT");
+          this.assertMigrationScope(tenantId, migration, current.ownerNodeId);
+          if (current.projectId !== migration.projectId || current.securityDomainId !== migration.targetSecurityDomainId
+            || current.securityEpoch !== migration.targetSecurityEpoch) {
+            throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+          }
+          const updated = { ...current, securityDomainId: migration.sourceSecurityDomainId,
+            securityEpoch: migration.sourceSecurityEpoch, version: current.version + 1 };
           const result = this.#database.prepare(`
             UPDATE assets SET version = ?, asset_json = ?
             WHERE tenant_id = ? AND asset_id = ? AND project_id = ? AND owner_node_id = ? AND version = ?
@@ -994,6 +1275,9 @@ export class SqlitePersistence implements Persistence {
             throw new Error("SECURITY_MIGRATION_PLAN_IMMUTABLE");
           }
           assertSecurityMigrationProgressChange(current, migration);
+          if (migration.state === "committed" || migration.state === "rolled_back") {
+            throw new Error("SECURITY_MIGRATION_TERMINAL_BYPASS_FORBIDDEN");
+          }
           if (current.state === "planned" && migration.state === "active"
             && this.hasActiveFenceOrUnresolvedOperationInMigrationScope(tenantId, migration, this.nowUtc())) {
             throw new Error("SECURITY_MIGRATION_OUTBOUND_FENCE_ACTIVE");
@@ -1010,6 +1294,547 @@ export class SqlitePersistence implements Persistence {
           );
           if (result.changes !== 1) throw new Error("SECURITY_MIGRATION_VERSION_CONFLICT");
         },
+        saveManifestSnapshot: async (snapshot) => {
+          assertTenant(tenantId, snapshot.tenantId);
+          const existingRow = this.#database.prepare(`
+            SELECT * FROM security_migration_manifest_snapshots
+            WHERE tenant_id = ? AND migration_id = ?
+          `).get(tenantId, snapshot.migrationId) as Record<string, unknown> | undefined;
+          if (existingRow !== undefined) {
+            const existing = manifestSnapshotFromRow(existingRow, this.#database);
+            if (
+              existing.manifestDigest !== snapshot.manifestDigest
+              || existing.itemCount !== snapshot.itemCount
+              || existing.itemCount !== snapshot.items.length
+              || existing.createdAtUtc !== snapshot.createdAtUtc
+              || JSON.stringify(existing.items) !== JSON.stringify(snapshot.items)
+            ) {
+              throw new Error("SECURITY_MIGRATION_SNAPSHOT_IMMUTABLE");
+            }
+            return;
+          }
+          const migrationRow = this.#database.prepare(`
+            SELECT * FROM security_domain_migrations WHERE tenant_id = ? AND migration_id = ?
+          `).get(tenantId, snapshot.migrationId);
+          let envelope: Parameters<typeof validateCanonicalSnapshotItems>[1] = {
+            tenantId,
+            projectId: snapshot.projectId,
+            migrationId: snapshot.migrationId,
+            sourceSecurityDomainId: snapshot.sourceSecurityDomainId ?? null,
+            targetSecurityDomainId: snapshot.targetSecurityDomainId ?? null,
+            sourceSecurityEpoch: snapshot.sourceSecurityEpoch,
+            targetSecurityEpoch: snapshot.targetSecurityEpoch,
+          };
+          if (migrationRow !== undefined) {
+            const migration = securityMigrationFromRow(migrationRow);
+            envelope = {
+              tenantId,
+              projectId: snapshot.projectId ?? migration.projectId,
+              migrationId: snapshot.migrationId,
+              sourceSecurityDomainId: snapshot.sourceSecurityDomainId !== undefined ? snapshot.sourceSecurityDomainId : migration.sourceSecurityDomainId,
+              targetSecurityDomainId: snapshot.targetSecurityDomainId !== undefined ? snapshot.targetSecurityDomainId : migration.targetSecurityDomainId,
+              sourceSecurityEpoch: snapshot.sourceSecurityEpoch ?? migration.sourceSecurityEpoch,
+              targetSecurityEpoch: snapshot.targetSecurityEpoch ?? migration.targetSecurityEpoch,
+            };
+          }
+          validateCanonicalSnapshotItems(snapshot, envelope);
+          this.#database.prepare(`
+            INSERT INTO security_migration_manifest_snapshots (
+              tenant_id, migration_id, manifest_digest, item_count, snapshot_json, created_at_utc
+            ) VALUES (?, ?, ?, ?, ?, ?)
+          `).run(
+            tenantId, snapshot.migrationId, snapshot.manifestDigest, snapshot.items.length,
+            JSON.stringify(snapshot), snapshot.createdAtUtc,
+          );
+        },
+        getManifestSnapshot: async (migrationId) => {
+          const row = this.#database.prepare(`
+            SELECT * FROM security_migration_manifest_snapshots
+            WHERE tenant_id = ? AND migration_id = ?
+          `).get(tenantId, migrationId) as Record<string, unknown> | undefined;
+          return row === undefined ? undefined : manifestSnapshotFromRow(row, this.#database);
+        },
+        getReadinessEvidence: async (evidenceId) => {
+          const row = this.#database.prepare(`
+            SELECT * FROM security_migration_readiness_evidence
+            WHERE tenant_id = ? AND evidence_id = ?
+          `).get(tenantId, evidenceId) as Record<string, unknown> | undefined;
+          return row === undefined ? undefined : readinessEvidenceFromRow(row);
+        },
+        commitWithReadinessEvidence: async (params) => {
+          const nowUtc = this.nowUtc();
+          const currentRow = this.#database.prepare(`
+            SELECT * FROM security_domain_migrations WHERE tenant_id = ? AND migration_id = ?
+          `).get(tenantId, params.migrationId);
+          if (currentRow === undefined) throw new Error("SECURITY_MIGRATION_NOT_FOUND");
+          const current = securityMigrationFromRow(currentRow);
+          if (current.version !== params.expectedVersion) {
+            throw new Error("SECURITY_MIGRATION_VERSION_CONFLICT");
+          }
+          if (current.state !== "verifying") {
+            throw new Error("SECURITY_MIGRATION_COMMIT_INVALID");
+          }
+
+          await this.assertActorAuthorizedForMigration(context, tenantId, current, params.actorPrincipalId, nowUtc);
+
+          const evidenceRow = this.#database.prepare(`
+            SELECT * FROM security_migration_readiness_evidence WHERE tenant_id = ? AND evidence_id = ?
+          `).get(tenantId, params.evidenceId) as Record<string, unknown> | undefined;
+          if (evidenceRow === undefined) throw new Error("SECURITY_MIGRATION_EVIDENCE_NOT_FOUND");
+          const evidence = readinessEvidenceFromRow(evidenceRow);
+
+          if (evidence.status !== "verified") {
+            throw new Error("SECURITY_MIGRATION_EVIDENCE_NOT_VERIFIED");
+          }
+          if (evidence.provider !== "huly") {
+            throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+          }
+          if (evidence.purpose !== "commit") {
+            throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+          }
+          if (
+            evidence.tenantId !== tenantId
+            || evidence.projectId !== current.projectId
+            || evidence.migrationId !== current.id
+            || evidence.targetSecurityDomainId !== current.targetSecurityDomainId
+            || evidence.targetSecurityEpoch !== current.targetSecurityEpoch
+            || evidence.sourceSecurityDomainId !== current.sourceSecurityDomainId
+            || evidence.sourceSecurityEpoch !== current.sourceSecurityEpoch
+          ) {
+            throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+          }
+
+          if (
+            !evidence.converged
+            || evidence.channels?.issue !== "converged"
+            || evidence.channels?.attachment !== "converged"
+            || evidence.channels?.blob !== "converged"
+          ) {
+            throw new Error("SECURITY_MIGRATION_CONVERGENCE_NOT_READY");
+          }
+
+          if (nowUtc > evidence.expiresAtUtc) {
+            throw new Error("SECURITY_MIGRATION_EVIDENCE_EXPIRED");
+          }
+
+          if (evidence.verifiedAtUtc === null || evidence.verifiedAtUtc > nowUtc) {
+            throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+          }
+
+          if (evidence.issuedAtUtc > evidence.verifiedAtUtc) {
+            throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+          }
+
+          const consumedByNonce = this.#database.prepare(`
+            SELECT 1 FROM consumed_security_migration_evidence
+            WHERE tenant_id = ? AND nonce = ?
+            LIMIT 1
+          `).get(tenantId, evidence.nonce);
+          const consumedById = this.#database.prepare(`
+            SELECT 1 FROM consumed_security_migration_evidence
+            WHERE tenant_id = ? AND evidence_id = ?
+            LIMIT 1
+          `).get(tenantId, evidence.evidenceId);
+          if (consumedByNonce !== undefined || consumedById !== undefined) {
+            throw new Error("SECURITY_MIGRATION_EVIDENCE_REPLAYED");
+          }
+
+          // TOCTOU Revalidation
+          const snapshotRow = this.#database.prepare(`
+            SELECT * FROM security_migration_manifest_snapshots WHERE tenant_id = ? AND migration_id = ?
+          `).get(tenantId, current.id) as Record<string, unknown> | undefined;
+          if (snapshotRow === undefined) {
+            throw new Error("SECURITY_MIGRATION_MANIFEST_SNAPSHOT_NOT_FOUND");
+          }
+          const snapshot = manifestSnapshotFromRow(snapshotRow, this.#database);
+          if (snapshot.manifestDigest !== evidence.manifestDigest || snapshot.items.length !== evidence.itemCount) {
+            throw new Error("SECURITY_MIGRATION_MANIFEST_MISMATCH");
+          }
+
+          const liveManifest = await collectSecurityMigrationManifest(context, current);
+          assertManifestMatchesSnapshot(liveManifest, snapshot);
+
+          if (this.hasIncompleteInventoryObjectsInMigrationScope(tenantId, current)) {
+            throw new Error("SECURITY_MIGRATION_INVENTORY_INCOMPLETE");
+          }
+
+          if (this.hasActiveFenceOrUnresolvedOperationInMigrationScope(tenantId, current, nowUtc)) {
+            throw new Error("SECURITY_MIGRATION_OUTBOUND_FENCE_ACTIVE");
+          }
+
+          const updatedEvidence: SecurityMigrationReadinessEvidenceRecord = {
+            ...evidence,
+            status: "consumed",
+            consumedAtUtc: nowUtc,
+          };
+          this.#database.prepare(`
+            UPDATE security_migration_readiness_evidence
+            SET status = 'consumed', consumed_at_utc = ?, evidence_json = ?
+            WHERE tenant_id = ? AND evidence_id = ? AND status = 'verified'
+          `).run(nowUtc, JSON.stringify(updatedEvidence), tenantId, evidence.evidenceId);
+
+          this.#database.prepare(`
+            INSERT INTO consumed_security_migration_evidence (
+              tenant_id, evidence_id, nonce, migration_id, manifest_digest, consumed_at_utc
+            ) VALUES (?, ?, ?, ?, ?, ?)
+          `).run(tenantId, evidence.evidenceId, evidence.nonce, current.id, evidence.manifestDigest, nowUtc);
+
+          const committed = transitionSecurityMigration(current, "committed", nowUtc);
+          const result = this.#database.prepare(`
+            UPDATE security_domain_migrations
+            SET state = ?, updated_at_utc = ?, version = version + 1, migration_json = ?
+            WHERE tenant_id = ? AND migration_id = ? AND version = ?
+          `).run(
+            committed.state, committed.updatedAtUtc, JSON.stringify(committed),
+            tenantId, committed.id, current.version,
+          );
+          if (result.changes !== 1) throw new Error("SECURITY_MIGRATION_VERSION_CONFLICT");
+
+          const audit: SecurityMigrationAuditEntry = {
+            tenantId,
+            auditId: randomUUID(),
+            migrationId: committed.id,
+            projectId: committed.projectId,
+            action: "committed",
+            actorPrincipalId: params.actorPrincipalId,
+            reason: params.reason ?? "Security migration external convergence verified and committed",
+            sourceSecurityDomainId: committed.sourceSecurityDomainId,
+            targetSecurityDomainId: committed.targetSecurityDomainId,
+            sourceSecurityEpoch: committed.sourceSecurityEpoch,
+            targetSecurityEpoch: committed.targetSecurityEpoch,
+            migratedItems: committed.migratedItems,
+            occurredAtUtc: nowUtc,
+          };
+          await context.securityMigrationAudits.append(audit);
+
+          const projectSequence = await context.sequences.next(committed.projectId);
+          const event: DomainEvent = {
+            tenantId,
+            eventId: randomUUID(),
+            projectId: committed.projectId,
+            projectSequence,
+            aggregateType: "security_domain_migration",
+            aggregateId: committed.id,
+            aggregateVersion: committed.version,
+            eventType: "project-map.security-migration.committed",
+            schemaVersion: 1,
+            actorPrincipalId: params.actorPrincipalId,
+            occurredAtUtc: nowUtc,
+            correlationId: params.idempotencyKey ?? committed.id,
+            causationId: params.idempotencyKey ?? committed.id,
+            originalSecurityDomainId: committed.targetSecurityDomainId,
+            originalSecurityEpoch: committed.targetSecurityEpoch,
+            payload: {
+              migrationId: committed.id,
+              rootNodeId: committed.rootNodeId,
+              sourceSecurityDomainId: committed.sourceSecurityDomainId,
+              targetSecurityDomainId: committed.targetSecurityDomainId,
+              sourceSecurityEpoch: committed.sourceSecurityEpoch,
+              targetSecurityEpoch: committed.targetSecurityEpoch,
+              migratedItems: committed.migratedItems,
+            },
+          };
+          await context.events.append(event);
+
+          const outbox: OutboxMessage = {
+            tenantId,
+            id: `outbox:${event.eventId}`,
+            eventId: event.eventId,
+            topic: eventTopic(event),
+            payload: event,
+            state: "pending",
+            availableAtUtc: nowUtc,
+            attempts: 0,
+            maxAttempts: 8,
+            leaseOwner: null,
+            leaseToken: null,
+            leaseExpiresAtUtc: null,
+            lastError: null,
+            publishedAtUtc: null,
+            createdAtUtc: nowUtc,
+          };
+          await context.outbox.enqueue(outbox);
+
+          const commitResult: CommitSecurityMigrationResult = {
+            migrationId: committed.id,
+            state: "committed",
+            migrationVersion: committed.version,
+            occurredAtUtc: params.occurredAtUtc,
+          };
+
+          if (params.idempotencyKey !== undefined) {
+            const scope: CommandScope = {
+              principalId: params.actorPrincipalId,
+              operation: "commit_security_migration",
+              idempotencyKey: params.idempotencyKey,
+            };
+            await context.receipts.insert({
+              scope,
+              fingerprint: createHash("sha256").update(JSON.stringify({
+                migrationId: committed.id,
+                expectedVersion: params.expectedVersion,
+                occurredAtUtc: params.occurredAtUtc,
+              })).digest("hex"),
+              result: commitResult,
+              createdAtUtc: nowUtc,
+            });
+          }
+
+          return commitResult;
+        },
+        rollbackWithAudit: async (params) => {
+          const nowUtc = this.nowUtc();
+          const currentRow = this.#database.prepare(`
+            SELECT * FROM security_domain_migrations WHERE tenant_id = ? AND migration_id = ?
+          `).get(tenantId, params.migrationId);
+          if (currentRow === undefined) throw new Error("SECURITY_MIGRATION_NOT_FOUND");
+          const current = securityMigrationFromRow(currentRow);
+          if (current.version !== params.expectedVersion) {
+            throw new Error("SECURITY_MIGRATION_VERSION_CONFLICT");
+          }
+          if (!["planned", "active", "verifying", "retryable", "recovery_required"].includes(current.state)) {
+            throw new Error("SECURITY_MIGRATION_ROLLBACK_INVALID");
+          }
+
+          await this.assertActorAuthorizedForMigration(context, tenantId, current, params.actorPrincipalId, nowUtc);
+
+          let rolledBackItems = 0;
+          if (current.migratedItems > 0) {
+            if (params.evidenceId === undefined) {
+              throw new Error("SECURITY_MIGRATION_EVIDENCE_REQUIRED");
+            }
+            const evidenceRow = this.#database.prepare(`
+              SELECT * FROM security_migration_readiness_evidence WHERE tenant_id = ? AND evidence_id = ?
+            `).get(tenantId, params.evidenceId) as Record<string, unknown> | undefined;
+            if (evidenceRow === undefined) throw new Error("SECURITY_MIGRATION_EVIDENCE_NOT_FOUND");
+            const evidence = readinessEvidenceFromRow(evidenceRow);
+
+            if (evidence.status !== "verified") {
+              throw new Error("SECURITY_MIGRATION_EVIDENCE_NOT_VERIFIED");
+            }
+            if (evidence.provider !== "huly") {
+              throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+            }
+            if (evidence.purpose !== "rollback") {
+              throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+            }
+            if (
+              evidence.tenantId !== tenantId
+              || evidence.projectId !== current.projectId
+              || evidence.migrationId !== current.id
+              || evidence.targetSecurityDomainId !== current.sourceSecurityDomainId
+              || evidence.targetSecurityEpoch !== current.sourceSecurityEpoch
+              || evidence.sourceSecurityDomainId !== current.targetSecurityDomainId
+              || evidence.sourceSecurityEpoch !== current.targetSecurityEpoch
+            ) {
+              throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+            }
+
+            if (
+              !evidence.converged
+              || evidence.channels?.issue !== "converged"
+              || evidence.channels?.attachment !== "converged"
+              || evidence.channels?.blob !== "converged"
+            ) {
+              throw new Error("SECURITY_MIGRATION_CONVERGENCE_NOT_READY");
+            }
+
+            if (nowUtc > evidence.expiresAtUtc) {
+              throw new Error("SECURITY_MIGRATION_EVIDENCE_EXPIRED");
+            }
+
+            if (evidence.verifiedAtUtc === null || evidence.verifiedAtUtc > nowUtc) {
+              throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+            }
+
+            if (evidence.issuedAtUtc > evidence.verifiedAtUtc) {
+              throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+            }
+
+            const existingNonce = this.#database.prepare(`
+              SELECT evidence_id FROM consumed_security_migration_evidence WHERE tenant_id = ? AND (nonce = ? OR evidence_id = ?)
+            `).get(tenantId, evidence.nonce, evidence.evidenceId);
+            if (existingNonce !== undefined) {
+              throw new Error("SECURITY_MIGRATION_EVIDENCE_REPLAYED");
+            }
+
+            const snapshotRow = this.#database.prepare(`
+              SELECT * FROM security_migration_manifest_snapshots WHERE tenant_id = ? AND migration_id = ?
+            `).get(tenantId, current.id) as Record<string, unknown> | undefined;
+            if (snapshotRow === undefined) {
+              throw new Error("SECURITY_MIGRATION_MANIFEST_SNAPSHOT_NOT_FOUND");
+            }
+            const snapshot = manifestSnapshotFromRow(snapshotRow, this.#database);
+            if (snapshot.manifestDigest !== evidence.manifestDigest || snapshot.items.length !== evidence.itemCount) {
+              throw new Error("SECURITY_MIGRATION_MANIFEST_MISMATCH");
+            }
+
+            if (this.hasActiveFenceOrUnresolvedOperationInMigrationScope(tenantId, current, nowUtc)) {
+              throw new Error("SECURITY_MIGRATION_OUTBOUND_FENCE_ACTIVE");
+            }
+
+            const liveManifest = await collectSecurityMigrationManifest(context, current);
+            assertManifestMatchesSnapshot(liveManifest, snapshot);
+
+            const updatedEvidence: SecurityMigrationReadinessEvidenceRecord = {
+              ...evidence,
+              status: "consumed",
+              consumedAtUtc: nowUtc,
+            };
+            this.#database.prepare(`
+              UPDATE security_migration_readiness_evidence
+              SET status = 'consumed', consumed_at_utc = ?, evidence_json = ?
+              WHERE tenant_id = ? AND evidence_id = ? AND status = 'verified'
+            `).run(nowUtc, JSON.stringify(updatedEvidence), tenantId, evidence.evidenceId);
+
+            this.#database.prepare(`
+              INSERT INTO consumed_security_migration_evidence (
+                tenant_id, evidence_id, nonce, migration_id, manifest_digest, consumed_at_utc
+              ) VALUES (?, ?, ?, ?, ?, ?)
+            `).run(tenantId, evidence.evidenceId, evidence.nonce, current.id, evidence.manifestDigest, nowUtc);
+
+            // Restore objects in reverse order using immutable manifest snapshot (asset -> task -> node)
+            // 1. Assets
+            for (const item of snapshot.items.filter((i) => i.kind === "asset")) {
+              const asset = await context.assets.get(item.id);
+              if (asset !== undefined && asset.securityDomainId === current.targetSecurityDomainId && asset.securityEpoch === current.targetSecurityEpoch) {
+                await context.assets.rollbackSecurityOwnership(current.id, asset.id, asset.version);
+                rolledBackItems++;
+              }
+            }
+            // 2. Tasks
+            for (const item of snapshot.items.filter((i) => i.kind === "task")) {
+              const task = await context.tasks.get(item.id);
+              if (task !== undefined && task.securityDomainId === current.targetSecurityDomainId && task.securityEpoch === current.targetSecurityEpoch) {
+                await context.tasks.rollbackSecurityOwnership(current.id, task.id, task.version);
+                rolledBackItems++;
+              }
+            }
+            // 3. Nodes in reverse depth order (leaves before root)
+            const nodeDepths = this.collectSubtreeDepths(tenantId, current.projectId, current.rootNodeId);
+            const nodeItems = snapshot.items
+              .filter((i) => i.kind === "node")
+              .sort((a, b) => (nodeDepths.get(b.id) ?? 0) - (nodeDepths.get(a.id) ?? 0));
+            for (const item of nodeItems) {
+              const node = await context.nodes.get(item.id);
+              if (node !== undefined && node.securityDomainId === current.targetSecurityDomainId && node.securityEpoch === current.targetSecurityEpoch) {
+                await context.nodes.rollbackSecurityOwnership(current.id, node.id, node.version);
+                rolledBackItems++;
+              }
+            }
+          }
+
+          if (this.hasObjectsNotRevertedToSourceInMigrationScope(tenantId, current)) {
+            throw new Error("SECURITY_MIGRATION_ROLLBACK_INCOMPLETE");
+          }
+
+          const rolledBack = transitionSecurityMigration(current, "rolled_back", nowUtc);
+          const result = this.#database.prepare(`
+            UPDATE security_domain_migrations
+            SET state = ?, cursor = ?, migrated_items = ?,
+                next_attempt_at_utc = ?, updated_at_utc = ?, version = ?, migration_json = ?
+            WHERE tenant_id = ? AND migration_id = ? AND version = ?
+          `).run(
+            rolledBack.state, rolledBack.cursor, rolledBack.migratedItems,
+            rolledBack.nextAttemptAtUtc, rolledBack.updatedAtUtc, rolledBack.version, JSON.stringify(rolledBack),
+            tenantId, params.migrationId, params.expectedVersion,
+          );
+          if (result.changes !== 1) throw new Error("SECURITY_MIGRATION_VERSION_CONFLICT");
+
+          const audit: SecurityMigrationAuditEntry = {
+            tenantId,
+            auditId: randomUUID(),
+            migrationId: rolledBack.id,
+            projectId: rolledBack.projectId,
+            action: "rolled_back",
+            actorPrincipalId: params.actorPrincipalId,
+            reason: params.reason,
+            sourceSecurityDomainId: rolledBack.sourceSecurityDomainId,
+            targetSecurityDomainId: rolledBack.targetSecurityDomainId,
+            sourceSecurityEpoch: rolledBack.sourceSecurityEpoch,
+            targetSecurityEpoch: rolledBack.targetSecurityEpoch,
+            migratedItems: rolledBackItems,
+            occurredAtUtc: nowUtc,
+          };
+          await context.securityMigrationAudits.append(audit);
+
+          const projectSequence = await context.sequences.next(rolledBack.projectId);
+          const event: DomainEvent = {
+            tenantId,
+            eventId: randomUUID(),
+            projectId: rolledBack.projectId,
+            projectSequence,
+            aggregateType: "security_domain_migration",
+            aggregateId: rolledBack.id,
+            aggregateVersion: rolledBack.version,
+            eventType: "project-map.security-migration.rolled_back",
+            schemaVersion: 1,
+            actorPrincipalId: params.actorPrincipalId,
+            occurredAtUtc: nowUtc,
+            correlationId: params.idempotencyKey ?? rolledBack.id,
+            causationId: params.idempotencyKey ?? rolledBack.id,
+            originalSecurityDomainId: rolledBack.sourceSecurityDomainId,
+            originalSecurityEpoch: rolledBack.sourceSecurityEpoch,
+            payload: {
+              migrationId: rolledBack.id,
+              rootNodeId: rolledBack.rootNodeId,
+              sourceSecurityDomainId: rolledBack.sourceSecurityDomainId,
+              targetSecurityDomainId: rolledBack.targetSecurityDomainId,
+              sourceSecurityEpoch: rolledBack.sourceSecurityEpoch,
+              targetSecurityEpoch: rolledBack.targetSecurityEpoch,
+              migratedItems: rolledBackItems,
+            },
+          };
+          await context.events.append(event);
+
+          const outbox: OutboxMessage = {
+            tenantId,
+            id: `outbox:${event.eventId}`,
+            eventId: event.eventId,
+            topic: eventTopic(event),
+            payload: event,
+            state: "pending",
+            availableAtUtc: nowUtc,
+            attempts: 0,
+            maxAttempts: 8,
+            leaseOwner: null,
+            leaseToken: null,
+            leaseExpiresAtUtc: null,
+            lastError: null,
+            publishedAtUtc: null,
+            createdAtUtc: nowUtc,
+          };
+          await context.outbox.enqueue(outbox);
+
+          const rollbackResult: RollbackSecurityMigrationResult = {
+            migrationId: rolledBack.id,
+            state: "rolled_back",
+            migrationVersion: rolledBack.version,
+            rolledBackItems,
+            occurredAtUtc: params.occurredAtUtc,
+          };
+
+          if (params.idempotencyKey !== undefined) {
+            const scope: CommandScope = {
+              principalId: params.actorPrincipalId,
+              operation: "rollback_security_migration",
+              idempotencyKey: params.idempotencyKey,
+            };
+            await context.receipts.insert({
+              scope,
+              fingerprint: createHash("sha256").update(JSON.stringify({
+                migrationId: rolledBack.id,
+                expectedVersion: params.expectedVersion,
+                reason: params.reason.trim(),
+                occurredAtUtc: params.occurredAtUtc,
+              })).digest("hex"),
+              result: rollbackResult,
+              createdAtUtc: nowUtc,
+            });
+          }
+
+          return rollbackResult;
+        },
         listRecoverable: async () => this.#database.prepare(`
           SELECT * FROM security_domain_migrations
           WHERE tenant_id = ?
@@ -1017,6 +1842,23 @@ export class SqlitePersistence implements Persistence {
         `).all(tenantId)
           .map((row) => securityMigrationFromRow(row))
           .filter((migration) => !["committed", "rolled_back"].includes(migration.state)),
+      },
+      securityMigrationAudits: {
+        append: async (entry) => {
+          assertTenant(tenantId, entry.tenantId);
+          this.#database.prepare(`
+            INSERT INTO security_migration_audits (
+              tenant_id, audit_id, project_id, migration_id, occurred_at_utc, audit_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+          `).run(tenantId, entry.auditId, entry.projectId, entry.migrationId, entry.occurredAtUtc, JSON.stringify(entry));
+        },
+        listByMigration: async (migrationId) => this.#database.prepare(`
+          SELECT audit_json FROM security_migration_audits
+          WHERE tenant_id = ? AND migration_id = ?
+          ORDER BY occurred_at_utc, audit_id
+        `).all(tenantId, migrationId).map(
+          (row) => parseJson<SecurityMigrationAuditEntry>(asString(row.audit_json)),
+        ),
       },
       receipts: {
         get: async <T>(scope: CommandScope) => {
@@ -1122,6 +1964,7 @@ export class SqlitePersistence implements Persistence {
         },
       },
     };
+    return context;
   }
 
   private migrate(): void {
@@ -1385,6 +2228,73 @@ export class SqlitePersistence implements Persistence {
         ON security_domain_migrations (tenant_id, root_node_id)
         WHERE state NOT IN ('committed', 'rolled_back');
 
+      CREATE TABLE IF NOT EXISTS security_migration_audits (
+        tenant_id TEXT NOT NULL,
+        audit_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        migration_id TEXT NOT NULL,
+        occurred_at_utc TEXT NOT NULL,
+        audit_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, audit_id),
+        FOREIGN KEY (tenant_id, migration_id) REFERENCES security_domain_migrations (tenant_id, migration_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS security_migration_audits_by_migration
+        ON security_migration_audits (tenant_id, migration_id, occurred_at_utc, audit_id);
+
+      CREATE TABLE IF NOT EXISTS security_migration_manifest_snapshots (
+        tenant_id TEXT NOT NULL,
+        migration_id TEXT NOT NULL,
+        manifest_digest TEXT NOT NULL,
+        item_count INTEGER NOT NULL CHECK (item_count >= 0),
+        snapshot_json TEXT NOT NULL,
+        created_at_utc TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, migration_id),
+        FOREIGN KEY (tenant_id, migration_id) REFERENCES security_domain_migrations (tenant_id, migration_id)
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS security_migration_readiness_evidence (
+        tenant_id TEXT NOT NULL,
+        evidence_id TEXT NOT NULL,
+        migration_id TEXT NOT NULL,
+        purpose TEXT NOT NULL CHECK (purpose IN ('commit', 'rollback')),
+        nonce TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('issued', 'verified', 'consumed')),
+        manifest_digest TEXT NOT NULL,
+        item_count INTEGER NOT NULL CHECK (item_count >= 0),
+        source_security_domain_id TEXT,
+        target_security_domain_id TEXT,
+        source_security_epoch INTEGER NOT NULL CHECK (source_security_epoch > 0),
+        target_security_epoch INTEGER NOT NULL CHECK (target_security_epoch > 0),
+        issued_at_utc TEXT NOT NULL,
+        expires_at_utc TEXT NOT NULL,
+        verified_at_utc TEXT,
+        consumed_at_utc TEXT,
+        verifier_provider TEXT,
+        channels_json TEXT,
+        converged INTEGER CHECK (converged IN (0, 1)),
+        reason TEXT,
+        evidence_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, evidence_id),
+        FOREIGN KEY (tenant_id, migration_id) REFERENCES security_domain_migrations (tenant_id, migration_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS readiness_evidence_by_migration
+        ON security_migration_readiness_evidence (tenant_id, migration_id, status);
+      CREATE UNIQUE INDEX IF NOT EXISTS readiness_evidence_by_nonce
+        ON security_migration_readiness_evidence (tenant_id, nonce);
+
+      CREATE TABLE IF NOT EXISTS consumed_security_migration_evidence (
+        tenant_id TEXT NOT NULL,
+        evidence_id TEXT NOT NULL,
+        nonce TEXT NOT NULL,
+        migration_id TEXT NOT NULL,
+        manifest_digest TEXT NOT NULL,
+        consumed_at_utc TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, evidence_id),
+        FOREIGN KEY (tenant_id, migration_id) REFERENCES security_domain_migrations (tenant_id, migration_id)
+      ) STRICT;
+      CREATE UNIQUE INDEX IF NOT EXISTS consumed_evidence_by_nonce
+        ON consumed_security_migration_evidence (tenant_id, nonce);
+
       CREATE TABLE IF NOT EXISTS command_receipts (
         tenant_id TEXT NOT NULL,
         principal_id TEXT NOT NULL,
@@ -1490,6 +2400,12 @@ export class SqlitePersistence implements Persistence {
     `).run(new Date().toISOString());
     this.#database.prepare(`
       INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc) VALUES (7, ?)
+    `).run(new Date().toISOString());
+    this.#database.prepare(`
+      INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc) VALUES (8, ?)
+    `).run(new Date().toISOString());
+    this.#database.prepare(`
+      INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc) VALUES (9, ?)
     `).run(new Date().toISOString());
   }
 
@@ -1810,6 +2726,229 @@ export class SqlitePersistence implements Persistence {
     return migration;
   }
 
+  private migrationForObjectRollback(tenantId: TenantId, migrationId: string): SecurityDomainMigration {
+    const row = this.#database.prepare(
+      "SELECT * FROM security_domain_migrations WHERE tenant_id = ? AND migration_id = ?",
+    ).get(tenantId, migrationId);
+    if (row === undefined) throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+    const migration = securityMigrationFromRow(row);
+    if (!["planned", "active", "verifying", "retryable", "recovery_required"].includes(migration.state)
+      || migration.sourceSecurityEpoch <= 0 || migration.targetSecurityEpoch <= 0
+      || (migration.sourceSecurityDomainId === migration.targetSecurityDomainId
+        && migration.sourceSecurityEpoch === migration.targetSecurityEpoch)) {
+      throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+    }
+    return migration;
+  }
+
+  private collectSubtreeDepths(tenantId: TenantId, projectId: string, rootNodeId: string): Map<string, number> {
+    const rows = this.#database.prepare(`
+      SELECT node_id, parent_node_id, deleted_at_utc
+      FROM project_nodes
+      WHERE tenant_id = ? AND project_id = ?
+    `).all(tenantId, projectId) as Array<Record<string, unknown>>;
+
+    const byParent = new Map<string | null, string[]>();
+    for (const row of rows) {
+      if (row.deleted_at_utc !== null) continue;
+      const id = asString(row.node_id);
+      const parentId = row.parent_node_id === null ? null : asString(row.parent_node_id);
+      const list = byParent.get(parentId) ?? [];
+      list.push(id);
+      byParent.set(parentId, list);
+    }
+    const depths = new Map<string, number>();
+    depths.set(rootNodeId, 0);
+    const queue = [rootNodeId];
+    while (queue.length > 0) {
+      const next = queue.shift()!;
+      const currentDepth = depths.get(next) ?? 0;
+      for (const child of byParent.get(next) ?? []) {
+        if (!depths.has(child)) {
+          depths.set(child, currentDepth + 1);
+          queue.push(child);
+        }
+      }
+    }
+    return depths;
+  }
+
+  private async assertActorAuthorizedForMigration(
+    context: TransactionContext,
+    tenantId: TenantId,
+    migration: SecurityDomainMigration,
+    actorPrincipalId: PrincipalId,
+    nowUtc: string,
+  ): Promise<void> {
+    const principal = await context.principals.get(actorPrincipalId);
+    if (principal?.status !== "active") {
+      throw new Error("NODE_NOT_FOUND");
+    }
+    const membership = await context.memberships.get(migration.projectId, actorPrincipalId);
+    if (membership?.status !== "active" || !isProjectManager(membership)) {
+      throw new Error("NODE_NOT_FOUND");
+    }
+    const rootNode = await context.nodes.get(migration.rootNodeId);
+    if (rootNode === undefined || rootNode.projectId !== migration.projectId || rootNode.deletedAtUtc !== null) {
+      throw new Error("NODE_NOT_FOUND");
+    }
+    const authorized = await canAccessProjectObjectDuringMigration(
+      context,
+      membership,
+      actorPrincipalId,
+      {
+        projectId: migration.projectId,
+        ownerNodeId: rootNode.id,
+        securityDomainId: rootNode.securityDomainId,
+        securityEpoch: rootNode.securityEpoch,
+      },
+      "manage_access",
+      nowUtc,
+    );
+    if (!authorized) {
+      throw new Error("NODE_NOT_FOUND");
+    }
+  }
+
+  private collectSubtreeNodeIds(tenantId: TenantId, projectId: string, rootNodeId: string): Set<string> {
+    const rows = this.#database.prepare(`
+      SELECT node_id, parent_node_id, deleted_at_utc
+      FROM project_nodes
+      WHERE tenant_id = ? AND project_id = ?
+    `).all(tenantId, projectId) as Array<Record<string, unknown>>;
+
+    const byParent = new Map<string | null, string[]>();
+    for (const row of rows) {
+      if (row.deleted_at_utc !== null) continue;
+      const id = asString(row.node_id);
+      const parentId = row.parent_node_id === null ? null : asString(row.parent_node_id);
+      const list = byParent.get(parentId) ?? [];
+      list.push(id);
+      byParent.set(parentId, list);
+    }
+    const subtree = new Set<string>();
+    const queue = [rootNodeId];
+    while (queue.length > 0) {
+      const next = queue.shift()!;
+      if (subtree.has(next)) continue;
+      subtree.add(next);
+      for (const child of byParent.get(next) ?? []) {
+        queue.push(child);
+      }
+    }
+    return subtree;
+  }
+
+  private hasIncompleteInventoryObjectsInMigrationScope(
+    tenantId: TenantId,
+    migration: SecurityDomainMigration,
+  ): boolean {
+    const rootRow = this.#database.prepare(`
+      SELECT * FROM project_nodes WHERE tenant_id = ? AND node_id = ?
+    `).get(tenantId, migration.rootNodeId) as Record<string, unknown> | undefined;
+    if (rootRow === undefined || asString(rootRow.project_id) !== migration.projectId || rootRow.deleted_at_utc !== null) {
+      return true;
+    }
+    const subtree = this.collectSubtreeNodeIds(tenantId, migration.projectId, migration.rootNodeId);
+
+    for (const nodeId of subtree) {
+      const nodeRow = this.#database.prepare(`
+        SELECT * FROM project_nodes WHERE tenant_id = ? AND node_id = ?
+      `).get(tenantId, nodeId) as Record<string, unknown> | undefined;
+      if (nodeRow === undefined) return true;
+      const node = nodeFromRow(nodeRow);
+      if (node.securityDomainId !== migration.targetSecurityDomainId
+        || node.securityEpoch !== migration.targetSecurityEpoch) {
+        return true;
+      }
+    }
+
+    const taskRows = this.#database.prepare(`
+      SELECT * FROM product_tasks WHERE tenant_id = ? AND project_id = ?
+    `).all(tenantId, migration.projectId) as Array<Record<string, unknown>>;
+    for (const taskRow of taskRows) {
+      const task = productTaskFromRow(taskRow);
+      if (task.deletedAtUtc !== null) continue;
+      if (subtree.has(task.ownerNodeId)) {
+        if (task.securityDomainId !== migration.targetSecurityDomainId
+          || task.securityEpoch !== migration.targetSecurityEpoch) {
+          return true;
+        }
+      }
+    }
+
+    const assetRows = this.#database.prepare(`
+      SELECT * FROM assets WHERE tenant_id = ? AND project_id = ?
+    `).all(tenantId, migration.projectId) as Array<Record<string, unknown>>;
+    for (const assetRow of assetRows) {
+      const asset = assetFromRow(assetRow);
+      if (asset.deletedAtUtc !== null) continue;
+      if (subtree.has(asset.ownerNodeId)) {
+        if (asset.securityDomainId !== migration.targetSecurityDomainId
+          || asset.securityEpoch !== migration.targetSecurityEpoch) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  private hasObjectsNotRevertedToSourceInMigrationScope(
+    tenantId: TenantId,
+    migration: SecurityDomainMigration,
+  ): boolean {
+    const rootRow = this.#database.prepare(`
+      SELECT * FROM project_nodes WHERE tenant_id = ? AND node_id = ?
+    `).get(tenantId, migration.rootNodeId) as Record<string, unknown> | undefined;
+    if (rootRow === undefined || asString(rootRow.project_id) !== migration.projectId || rootRow.deleted_at_utc !== null) {
+      return true;
+    }
+    const subtree = this.collectSubtreeNodeIds(tenantId, migration.projectId, migration.rootNodeId);
+
+    for (const nodeId of subtree) {
+      const nodeRow = this.#database.prepare(`
+        SELECT * FROM project_nodes WHERE tenant_id = ? AND node_id = ?
+      `).get(tenantId, nodeId) as Record<string, unknown> | undefined;
+      if (nodeRow === undefined) return true;
+      const node = nodeFromRow(nodeRow);
+      if (node.securityDomainId !== migration.sourceSecurityDomainId
+        || node.securityEpoch !== migration.sourceSecurityEpoch) {
+        return true;
+      }
+    }
+
+    const taskRows = this.#database.prepare(`
+      SELECT * FROM product_tasks WHERE tenant_id = ? AND project_id = ?
+    `).all(tenantId, migration.projectId) as Array<Record<string, unknown>>;
+    for (const taskRow of taskRows) {
+      const task = productTaskFromRow(taskRow);
+      if (task.deletedAtUtc !== null) continue;
+      if (subtree.has(task.ownerNodeId)) {
+        if (task.securityDomainId !== migration.sourceSecurityDomainId
+          || task.securityEpoch !== migration.sourceSecurityEpoch) {
+          return true;
+        }
+      }
+    }
+
+    const assetRows = this.#database.prepare(`
+      SELECT * FROM assets WHERE tenant_id = ? AND project_id = ?
+    `).all(tenantId, migration.projectId) as Array<Record<string, unknown>>;
+    for (const assetRow of assetRows) {
+      const asset = assetFromRow(assetRow);
+      if (asset.deletedAtUtc !== null) continue;
+      if (subtree.has(asset.ownerNodeId)) {
+        if (asset.securityDomainId !== migration.sourceSecurityDomainId
+          || asset.securityEpoch !== migration.sourceSecurityEpoch) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
   private assertMigrationScope(
     tenantId: TenantId,
     migration: SecurityDomainMigration,
@@ -1888,19 +3027,303 @@ function assetFromRow(row: Record<string, unknown>): Asset {
   return asset;
 }
 
+function isIsoTimestamp(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(value)) return false;
+  return !Number.isNaN(Date.parse(value));
+}
+
 function securityMigrationFromRow(row: Record<string, unknown>): SecurityDomainMigration {
-  const migration = parseJson<SecurityDomainMigration>(asString(row.migration_json));
-  if (migration.tenantId !== asString(row.tenant_id) || migration.id !== asString(row.migration_id)
-    || migration.projectId !== asString(row.project_id) || migration.rootNodeId !== asString(row.root_node_id)
-    || migration.state !== asString(row.state) || migration.hierarchyRevision !== asNumber(row.hierarchy_revision)
-    || migration.cursor !== nullableString(row.cursor) || migration.totalItems !== asNumber(row.total_items)
-    || migration.migratedItems !== asNumber(row.migrated_items)
+  let migration: SecurityDomainMigration;
+  try {
+    migration = parseJson<SecurityDomainMigration>(asString(row.migration_json));
+  } catch {
+    throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: malformed migration_json");
+  }
+
+  if (typeof migration !== "object" || migration === null) {
+    throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: migration_json is not an object");
+  }
+
+  // Required fields check
+  if (
+    typeof migration.tenantId !== "string" || migration.tenantId.length === 0
+    || typeof migration.id !== "string" || migration.id.length === 0
+    || typeof migration.projectId !== "string" || migration.projectId.length === 0
+    || typeof migration.rootNodeId !== "string" || migration.rootNodeId.length === 0
+    || typeof migration.state !== "string"
+    || typeof migration.hierarchyRevision !== "number"
+    || typeof migration.totalItems !== "number"
+    || typeof migration.migratedItems !== "number"
+    || typeof migration.version !== "number"
+    || typeof migration.sourceSecurityEpoch !== "number"
+    || typeof migration.targetSecurityEpoch !== "number"
+    || typeof migration.createdAtUtc !== "string"
+    || typeof migration.updatedAtUtc !== "string"
+    || typeof migration.deadlineAtUtc !== "string"
+  ) {
+    throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: missing required fields in migration_json");
+  }
+
+  // Illegal state string check
+  const validStates = new Set([
+    "planned", "active", "verifying", "committed", "retryable", "recovery_required", "rolled_back",
+  ]);
+  if (!validStates.has(migration.state)) {
+    throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: illegal migration state");
+  }
+
+  // Negative or non-integer items/version/epochs check
+  if (
+    !Number.isSafeInteger(migration.totalItems) || migration.totalItems < 0
+    || !Number.isSafeInteger(migration.migratedItems) || migration.migratedItems < 0
+    || !Number.isSafeInteger(migration.version) || migration.version <= 0
+    || !Number.isSafeInteger(migration.hierarchyRevision) || migration.hierarchyRevision < 0
+    || !Number.isSafeInteger(migration.sourceSecurityEpoch) || migration.sourceSecurityEpoch <= 0
+    || !Number.isSafeInteger(migration.targetSecurityEpoch) || migration.targetSecurityEpoch <= 0
+  ) {
+    throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: non-integer or negative counters");
+  }
+
+  // migrated_items > total_items check
+  if (migration.migratedItems > migration.totalItems) {
+    throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: migrated items exceeds total items");
+  }
+
+  // Timestamps validation
+  if (!isIsoTimestamp(migration.createdAtUtc) || !isIsoTimestamp(migration.updatedAtUtc) || !isIsoTimestamp(migration.deadlineAtUtc)) {
+    throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: invalid ISO timestamp");
+  }
+  if (migration.nextAttemptAtUtc !== null && migration.nextAttemptAtUtc !== undefined && !isIsoTimestamp(migration.nextAttemptAtUtc)) {
+    throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: invalid nextAttemptAtUtc");
+  }
+  if (Date.parse(migration.updatedAtUtc) < Date.parse(migration.createdAtUtc)) {
+    throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: updatedAtUtc precedes createdAtUtc");
+  }
+
+  // Relational columns validation
+  const relationalTotalItems = asNumber(row.total_items);
+  const relationalMigratedItems = asNumber(row.migrated_items);
+  const relationalVersion = asNumber(row.version);
+  if (!Number.isSafeInteger(relationalTotalItems) || relationalTotalItems < 0
+    || !Number.isSafeInteger(relationalMigratedItems) || relationalMigratedItems < 0
+    || !Number.isSafeInteger(relationalVersion) || relationalVersion <= 0) {
+    throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: relational column counter invalid");
+  }
+  if (relationalMigratedItems > relationalTotalItems) {
+    throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: relational migrated items exceeds total items");
+  }
+
+  // Mismatch between column and JSON check
+  if (
+    migration.tenantId !== asString(row.tenant_id)
+    || migration.id !== asString(row.migration_id)
+    || migration.projectId !== asString(row.project_id)
+    || migration.rootNodeId !== asString(row.root_node_id)
+    || migration.state !== asString(row.state)
+    || migration.hierarchyRevision !== asNumber(row.hierarchy_revision)
+    || migration.cursor !== nullableString(row.cursor)
+    || migration.totalItems !== relationalTotalItems
+    || migration.migratedItems !== relationalMigratedItems
     || migration.nextAttemptAtUtc !== nullableString(row.next_attempt_at_utc)
-    || migration.updatedAtUtc !== asString(row.updated_at_utc) || migration.version !== asNumber(row.version)) {
+    || migration.updatedAtUtc !== asString(row.updated_at_utc)
+    || migration.version !== relationalVersion
+  ) {
     throw new Error("SECURITY_MIGRATION_PERSISTENCE_INCONSISTENT");
   }
+
   return migration;
 }
+
+function manifestSnapshotFromRow(row: Record<string, unknown>, db?: DatabaseSync): SecurityMigrationManifestSnapshot {
+  let snapshot: SecurityMigrationManifestSnapshot;
+  try {
+    snapshot = parseJson<SecurityMigrationManifestSnapshot>(asString(row.snapshot_json));
+  } catch {
+    throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: malformed snapshot_json");
+  }
+
+  if (typeof snapshot !== "object" || snapshot === null) {
+    throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: snapshot_json is not an object");
+  }
+
+  if (
+    typeof snapshot.tenantId !== "string" || snapshot.tenantId.length === 0
+    || typeof snapshot.migrationId !== "string" || snapshot.migrationId.length === 0
+    || typeof snapshot.manifestDigest !== "string" || snapshot.manifestDigest.length === 0
+    || typeof snapshot.itemCount !== "number" || !Number.isSafeInteger(snapshot.itemCount) || snapshot.itemCount < 0
+    || typeof snapshot.createdAtUtc !== "string" || !isIsoTimestamp(snapshot.createdAtUtc)
+    || !Array.isArray(snapshot.items)
+  ) {
+    throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: missing or invalid required snapshot fields");
+  }
+
+  if (snapshot.items.length !== snapshot.itemCount) {
+    throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: snapshot item count mismatch");
+  }
+
+  const relationalTenantId = asString(row.tenant_id);
+  const relationalMigrationId = asString(row.migration_id);
+  const relationalManifestDigest = asString(row.manifest_digest);
+  const relationalItemCount = asNumber(row.item_count);
+  const relationalCreatedAtUtc = asString(row.created_at_utc);
+
+  if (
+    snapshot.tenantId !== relationalTenantId
+    || snapshot.migrationId !== relationalMigrationId
+    || snapshot.manifestDigest !== relationalManifestDigest
+    || snapshot.itemCount !== relationalItemCount
+    || snapshot.createdAtUtc !== relationalCreatedAtUtc
+  ) {
+    throw new Error("SECURITY_MIGRATION_PERSISTENCE_INCONSISTENT");
+  }
+
+  let envelope = {
+    projectId: snapshot.projectId,
+    sourceSecurityDomainId: snapshot.sourceSecurityDomainId ?? null,
+    targetSecurityDomainId: snapshot.targetSecurityDomainId ?? null,
+    sourceSecurityEpoch: snapshot.sourceSecurityEpoch,
+    targetSecurityEpoch: snapshot.targetSecurityEpoch,
+  };
+
+  if ((envelope.projectId === undefined || envelope.sourceSecurityEpoch === undefined || envelope.targetSecurityEpoch === undefined) && db !== undefined) {
+    const migRow = db.prepare(`
+      SELECT migration_json
+      FROM security_domain_migrations
+      WHERE tenant_id = ? AND migration_id = ?
+    `).get(relationalTenantId, relationalMigrationId) as Record<string, unknown> | undefined;
+    if (migRow !== undefined && migRow.migration_json) {
+      const parsedMig = JSON.parse(asString(migRow.migration_json));
+      envelope = {
+        projectId: asString(parsedMig.projectId),
+        sourceSecurityDomainId: parsedMig.sourceSecurityDomainId ? asString(parsedMig.sourceSecurityDomainId) : null,
+        targetSecurityDomainId: parsedMig.targetSecurityDomainId ? asString(parsedMig.targetSecurityDomainId) : null,
+        sourceSecurityEpoch: asNumber(parsedMig.sourceSecurityEpoch),
+        targetSecurityEpoch: asNumber(parsedMig.targetSecurityEpoch),
+      };
+    }
+  }
+
+  validateCanonicalSnapshotItems(snapshot, {
+    tenantId: relationalTenantId as TenantId,
+    projectId: envelope.projectId,
+    migrationId: relationalMigrationId,
+    sourceSecurityDomainId: envelope.sourceSecurityDomainId,
+    targetSecurityDomainId: envelope.targetSecurityDomainId,
+    sourceSecurityEpoch: envelope.sourceSecurityEpoch,
+    targetSecurityEpoch: envelope.targetSecurityEpoch,
+  });
+
+  return snapshot;
+}
+
+function readinessEvidenceFromRow(row: Record<string, unknown>): SecurityMigrationReadinessEvidenceRecord {
+  let evidence: SecurityMigrationReadinessEvidenceRecord;
+  try {
+    evidence = parseJson<SecurityMigrationReadinessEvidenceRecord>(asString(row.evidence_json));
+  } catch {
+    throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: malformed evidence_json");
+  }
+
+  if (typeof evidence !== "object" || evidence === null) {
+    throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: evidence_json is not an object");
+  }
+
+  if (
+    typeof evidence.tenantId !== "string" || evidence.tenantId.length === 0
+    || typeof evidence.evidenceId !== "string" || evidence.evidenceId.length === 0
+    || typeof evidence.nonce !== "string" || evidence.nonce.length === 0
+    || typeof evidence.migrationId !== "string" || evidence.migrationId.length === 0
+    || typeof evidence.purpose !== "string" || (evidence.purpose !== "commit" && evidence.purpose !== "rollback")
+    || typeof evidence.projectId !== "string" || evidence.projectId.length === 0
+    || typeof evidence.sourceSecurityEpoch !== "number" || !Number.isSafeInteger(evidence.sourceSecurityEpoch) || evidence.sourceSecurityEpoch <= 0
+    || typeof evidence.targetSecurityEpoch !== "number" || !Number.isSafeInteger(evidence.targetSecurityEpoch) || evidence.targetSecurityEpoch <= 0
+    || typeof evidence.manifestDigest !== "string" || evidence.manifestDigest.length === 0
+    || typeof evidence.itemCount !== "number" || !Number.isSafeInteger(evidence.itemCount) || evidence.itemCount < 0
+    || typeof evidence.status !== "string" || !["issued", "verified", "consumed"].includes(evidence.status)
+    || typeof evidence.converged !== "boolean"
+    || typeof evidence.issuedAtUtc !== "string" || !isIsoTimestamp(evidence.issuedAtUtc)
+    || typeof evidence.expiresAtUtc !== "string" || !isIsoTimestamp(evidence.expiresAtUtc)
+  ) {
+    throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: missing or invalid required evidence fields");
+  }
+
+  if (evidence.verifiedAtUtc !== null && (typeof evidence.verifiedAtUtc !== "string" || !isIsoTimestamp(evidence.verifiedAtUtc))) {
+    throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: invalid verifiedAtUtc");
+  }
+  if (evidence.consumedAtUtc !== null && (typeof evidence.consumedAtUtc !== "string" || !isIsoTimestamp(evidence.consumedAtUtc))) {
+    throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: invalid consumedAtUtc");
+  }
+
+  if (Date.parse(evidence.expiresAtUtc) <= Date.parse(evidence.issuedAtUtc)) {
+    throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: expiresAtUtc precedes issuedAtUtc");
+  }
+
+  if (evidence.status === "issued") {
+    if (evidence.verifiedAtUtc !== null || evidence.consumedAtUtc !== null || evidence.converged !== false || evidence.channels !== null) {
+      throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: issued evidence must not have verification fields");
+    }
+  } else if (evidence.status === "verified") {
+    if (evidence.verifiedAtUtc === null || evidence.consumedAtUtc !== null) {
+      throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: verified evidence must have verifiedAtUtc and no consumedAtUtc");
+    }
+  } else if (evidence.status === "consumed") {
+    if (evidence.verifiedAtUtc === null || evidence.consumedAtUtc === null) {
+      throw new Error("SECURITY_MIGRATION_RECORD_CORRUPT: consumed evidence must have verifiedAtUtc and consumedAtUtc");
+    }
+  }
+
+  const relationalTenantId = asString(row.tenant_id);
+  const relationalEvidenceId = asString(row.evidence_id);
+  const relationalMigrationId = asString(row.migration_id);
+  const relationalPurpose = asString(row.purpose);
+  const relationalNonce = asString(row.nonce);
+  const relationalStatus = asString(row.status);
+  const relationalManifestDigest = asString(row.manifest_digest);
+  const relationalItemCount = asNumber(row.item_count);
+  const relationalSourceSecurityDomainId = nullableString(row.source_security_domain_id);
+  const relationalTargetSecurityDomainId = nullableString(row.target_security_domain_id);
+  const relationalSourceSecurityEpoch = asNumber(row.source_security_epoch);
+  const relationalTargetSecurityEpoch = asNumber(row.target_security_epoch);
+  const relationalIssuedAtUtc = asString(row.issued_at_utc);
+  const relationalExpiresAtUtc = asString(row.expires_at_utc);
+  const relationalVerifiedAtUtc = nullableString(row.verified_at_utc);
+  const relationalConsumedAtUtc = nullableString(row.consumed_at_utc);
+  const relationalVerifierProvider = nullableString(row.verifier_provider);
+  const relationalConverged = asNumber(row.converged) === 1;
+  const relationalReason = nullableString(row.reason);
+
+  const channelsJson = nullableString(row.channels_json);
+  const expectedChannelsJson = evidence.channels === null ? null : JSON.stringify(evidence.channels);
+
+  if (
+    evidence.tenantId !== relationalTenantId
+    || evidence.evidenceId !== relationalEvidenceId
+    || evidence.migrationId !== relationalMigrationId
+    || evidence.purpose !== relationalPurpose
+    || evidence.nonce !== relationalNonce
+    || evidence.status !== relationalStatus
+    || evidence.manifestDigest !== relationalManifestDigest
+    || evidence.itemCount !== relationalItemCount
+    || evidence.sourceSecurityDomainId !== relationalSourceSecurityDomainId
+    || evidence.targetSecurityDomainId !== relationalTargetSecurityDomainId
+    || evidence.sourceSecurityEpoch !== relationalSourceSecurityEpoch
+    || evidence.targetSecurityEpoch !== relationalTargetSecurityEpoch
+    || evidence.issuedAtUtc !== relationalIssuedAtUtc
+    || evidence.expiresAtUtc !== relationalExpiresAtUtc
+    || evidence.verifiedAtUtc !== relationalVerifiedAtUtc
+    || evidence.consumedAtUtc !== relationalConsumedAtUtc
+    || evidence.provider !== relationalVerifierProvider
+    || evidence.converged !== relationalConverged
+    || (evidence.reason ?? null) !== relationalReason
+    || (channelsJson === null ? expectedChannelsJson !== null : JSON.stringify(parseJson(channelsJson)) !== expectedChannelsJson)
+  ) {
+    throw new Error("SECURITY_MIGRATION_PERSISTENCE_INCONSISTENT");
+  }
+
+  return evidence;
+}
+
 
 const ALLOWED_INTEGRATION_OPERATION_TYPES = new Set<string>([
   "asset.ingest",
@@ -2094,4 +3517,24 @@ function translateConstraint(error: unknown): unknown {
   if (error.message.includes("domain_events.tenant_id, domain_events.aggregate_type")) return new Error("AGGREGATE_VERSION_ALREADY_EXISTS");
   if (error.message.includes("domain_events.tenant_id, domain_events.project_id")) return new Error("PROJECT_SEQUENCE_ALREADY_EXISTS");
   return error;
+}
+
+function computeNodeDepths(rootNodeId: string, nodes: readonly ProjectNode[]): Map<string, number> {
+  const byParent = new Map<string | null, string[]>();
+  for (const node of nodes) {
+    const list = byParent.get(node.parentId) ?? [];
+    list.push(node.id);
+    byParent.set(node.parentId, list);
+  }
+  const depths = new Map<string, number>();
+  depths.set(rootNodeId, 0);
+  const queue = [{ id: rootNodeId, depth: 0 }];
+  while (queue.length > 0) {
+    const { id, depth } = queue.shift()!;
+    for (const child of byParent.get(id) ?? []) {
+      depths.set(child, depth + 1);
+      queue.push({ id: child, depth: depth + 1 });
+    }
+  }
+  return depths;
 }

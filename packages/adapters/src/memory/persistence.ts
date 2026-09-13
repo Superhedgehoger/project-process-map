@@ -1,29 +1,56 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Asset, AssetBinding } from "../../../domain/src/assets.ts";
-import type { BackgroundJob, DomainEvent, OutboxMessage } from "../../../domain/src/events.ts";
+import { eventTopic, type BackgroundJob, type DomainEvent, type OutboxMessage } from "../../../domain/src/events.ts";
 import type { ExternalBinding } from "../../../domain/src/external-reference.ts";
-import type { TenantId } from "../../../domain/src/identity.ts";
+import type { TenantId, PrincipalId } from "../../../domain/src/identity.ts";
 import type { ExternalIdentityMapping, Principal } from "../../../domain/src/identity.ts";
 import type { IntegrationOperation, IntegrationStepAttempt } from "../../../domain/src/integration-operations.ts";
 import type { ProjectNode } from "../../../domain/src/project-structure.ts";
 import type { OutboundProjectionFence } from "../../../domain/src/outbound-projection-fence.ts";
-import type { ProjectMembership, ProjectMembershipSecurityAuditEntry } from "../../../domain/src/project-access.ts";
+import { isProjectManager, type ProjectMembership, type ProjectMembershipSecurityAuditEntry } from "../../../domain/src/project-access.ts";
 import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import {
   assertSecurityMigrationInitialPlan,
   assertSecurityMigrationProgressChange,
+  transitionSecurityMigration,
   type SecurityDomainMigration,
+  type SecurityMigrationAuditEntry,
 } from "../../../domain/src/security-migration.ts";
 import { grantAllows, isCanonicalUtcTimestamp, isPermanentSecurityAdministrator, type SecurityDomain, type SecurityGrant, type SecurityGrantAuditEntry } from "../../../domain/src/security-access.ts";
-import type {
-  ClaimOptions,
-  CommandReceipt,
-  CommandScope,
-  JobConsumer,
-  OutboxConsumer,
-  Persistence,
-  TransactionContext,
+import {
+  type ClaimOptions,
+  type CommandReceipt,
+  type CommandScope,
+  type CommitSecurityMigrationResult,
+  type CommitWithReadinessEvidenceParams,
+  type JobConsumer,
+  type OutboxConsumer,
+  type Persistence,
+  type RollbackSecurityMigrationResult,
+  type RollbackWithAuditParams,
+  type SecurityMigrationAuditRepository,
+  type SecurityMigrationManifestItem,
+  type SecurityMigrationManifestSnapshot,
+  type SecurityMigrationReadinessEvidenceRecord,
+  type TransactionContext,
 } from "../../../application/src/ports/persistence.ts";
+import {
+  createVerificationOperation,
+  type InternalIssueChallengeParams,
+  type InternalRecordVerifiedEvidenceParams,
+  type TestReadinessHarness,
+} from "../security-migration-coordinator.ts";
+import type { VerifyMigrationReadiness } from "../../../application/src/security/security-migration-coordinator.ts";
+import type { ExternalCollaborationEpochReadinessPort } from "../../../application/src/ports/integrations.ts";
+import { canAccessProjectObjectDuringMigration } from "../../../application/src/access/project-security.ts";
+import {
+  assertManifestMatchesSnapshot,
+  collectSecurityMigrationManifest,
+  computeSecurityMigrationManifestDigest,
+  validateCanonicalSnapshotItems,
+  type SecurityMigrationManifestInput,
+} from "../../../application/src/security/security-migration-manifest.ts";
+import { buildResumableSecurityMigrationInventory } from "../../../application/src/security/build-security-migration-inventory.ts";
 
 type MemoryState = {
   nodes: Map<string, ProjectNode>;
@@ -43,6 +70,10 @@ type MemoryState = {
   securityGrants: Map<string, SecurityGrant>;
   securityGrantAudits: Map<string, SecurityGrantAuditEntry>;
   securityMigrations: Map<string, SecurityDomainMigration>;
+  securityMigrationAudits: Map<string, SecurityMigrationAuditEntry>;
+  manifestSnapshots: Map<string, SecurityMigrationManifestSnapshot>;
+  readinessEvidence: Map<string, SecurityMigrationReadinessEvidenceRecord>;
+  consumedReadinessEvidence: Map<string, { evidenceId: string; nonce: string; migrationId: string; manifestDigest: string; consumedAtUtc: string }>;
   receipts: Map<string, CommandReceipt>;
   sequences: Map<string, number>;
   events: Map<string, DomainEvent>;
@@ -72,6 +103,10 @@ function emptyState(): MemoryState {
     securityGrants: new Map(),
     securityGrantAudits: new Map(),
     securityMigrations: new Map(),
+    securityMigrationAudits: new Map(),
+    manifestSnapshots: new Map(),
+    readinessEvidence: new Map(),
+    consumedReadinessEvidence: new Map(),
     receipts: new Map(),
     sequences: new Map(),
     events: new Map(),
@@ -102,6 +137,10 @@ function cloneState(state: MemoryState): MemoryState {
     securityGrants: new Map(structuredClone([...state.securityGrants])),
     securityGrantAudits: new Map(structuredClone([...state.securityGrantAudits])),
     securityMigrations: new Map(structuredClone([...state.securityMigrations])),
+    securityMigrationAudits: new Map(structuredClone([...state.securityMigrationAudits])),
+    manifestSnapshots: new Map(structuredClone([...state.manifestSnapshots])),
+    readinessEvidence: new Map(structuredClone([...state.readinessEvidence])),
+    consumedReadinessEvidence: new Map(structuredClone([...state.consumedReadinessEvidence])),
     receipts: new Map(structuredClone([...state.receipts])),
     sequences: new Map(state.sequences),
     events: new Map(structuredClone([...state.events])),
@@ -115,16 +154,49 @@ function cloneState(state: MemoryState): MemoryState {
 
 export type MemoryPersistenceSnapshot = Readonly<MemoryState>;
 
+export type MemoryPersistenceOptions = Readonly<{
+  now?: (() => Date) | undefined;
+  verifier?: ExternalCollaborationEpochReadinessPort | undefined;
+  attachTestHarness?: ((harness: TestReadinessHarness) => void) | undefined;
+}>;
+
 export class MemoryPersistence implements Persistence {
   #state = emptyState();
   #tail: Promise<void> = Promise.resolve();
   readonly #now: () => Date;
+  readonly #verifyMigrationReadiness?: VerifyMigrationReadiness | undefined;
 
-  constructor(options?: { now?: () => Date }) {
+  constructor(options?: MemoryPersistenceOptions) {
     this.#now = options?.now ?? (() => new Date());
+    if (options?.verifier !== undefined) {
+      this.#verifyMigrationReadiness = createVerificationOperation({
+        persistence: this,
+        verifier: options.verifier,
+        issueChallenge: async (tenantId, params) => await this.#issueReadinessChallenge(tenantId, params),
+        recordVerifiedEvidence: async (tenantId, params) => await this.#recordVerifiedEvidence(tenantId, params),
+        nowUtc: () => this.nowUtc(),
+      });
+    }
+    if (options?.attachTestHarness !== undefined) {
+      options.attachTestHarness({
+        issueChallenge: async (tenantId, params) => await this.#issueReadinessChallenge(tenantId, params),
+        recordVerifiedEvidence: async (tenantId, params) => await this.#recordVerifiedEvidence(tenantId, params),
+        createVerificationOperation: (verifier) => createVerificationOperation({
+          persistence: this,
+          verifier,
+          issueChallenge: async (tenantId, params) => await this.#issueReadinessChallenge(tenantId, params),
+          recordVerifiedEvidence: async (tenantId, params) => await this.#recordVerifiedEvidence(tenantId, params),
+          nowUtc: () => this.nowUtc(),
+        }),
+      });
+    }
   }
 
-  private nowUtc(): string {
+  get verifyMigrationReadiness(): VerifyMigrationReadiness | undefined {
+    return this.#verifyMigrationReadiness;
+  }
+
+  nowUtc(): string {
     return this.#now().toISOString();
   }
 
@@ -201,6 +273,122 @@ export class MemoryPersistence implements Persistence {
       unlock();
     }
   }
+
+  async #issueReadinessChallenge(
+    tenantId: TenantId,
+    params: InternalIssueChallengeParams,
+  ): Promise<SecurityMigrationReadinessEvidenceRecord> {
+    return await this.exclusive(async () => {
+      const tenantPrefix = `${tenantId}\u0000`;
+      const key = `${tenantPrefix}${params.migrationId}`;
+      const migration = this.#state.securityMigrations.get(key);
+      if (migration === undefined) throw new Error("SECURITY_MIGRATION_NOT_FOUND");
+      if (params.purpose !== "commit" && params.purpose !== "rollback") {
+        throw new Error("VALIDATION_FAILED");
+      }
+      if (params.purpose === "commit" && migration.state !== "verifying") {
+        throw new Error("SECURITY_MIGRATION_COMMIT_INVALID");
+      }
+      if (params.purpose === "rollback" && !["planned", "active", "verifying", "retryable", "recovery_required"].includes(migration.state)) {
+        throw new Error("SECURITY_MIGRATION_ROLLBACK_INVALID");
+      }
+      const snapshotKey = `${tenantPrefix}${params.migrationId}`;
+      const snapshot = this.#state.manifestSnapshots.get(snapshotKey);
+      if (snapshot === undefined) {
+        throw new Error("SECURITY_MIGRATION_MANIFEST_SNAPSHOT_NOT_FOUND");
+      }
+
+      const evidenceId = randomUUID();
+      const nonce = randomUUID();
+      const issuedAtUtc = this.nowUtc();
+      const expiresAtUtc = new Date(Date.parse(issuedAtUtc) + (params.ttlMilliseconds ?? 60_000)).toISOString();
+
+      const targetSecurityDomainId = params.purpose === "rollback" ? migration.sourceSecurityDomainId : migration.targetSecurityDomainId;
+      const targetSecurityEpoch = params.purpose === "rollback" ? migration.sourceSecurityEpoch : migration.targetSecurityEpoch;
+      const sourceSecurityDomainId = params.purpose === "rollback" ? migration.targetSecurityDomainId : migration.sourceSecurityDomainId;
+      const sourceSecurityEpoch = params.purpose === "rollback" ? migration.targetSecurityEpoch : migration.sourceSecurityEpoch;
+
+      const record: SecurityMigrationReadinessEvidenceRecord = {
+        tenantId,
+        evidenceId,
+        nonce,
+        migrationId: migration.id,
+        purpose: params.purpose,
+        projectId: migration.projectId,
+        sourceSecurityDomainId,
+        targetSecurityDomainId,
+        sourceSecurityEpoch,
+        targetSecurityEpoch,
+        manifestDigest: snapshot.manifestDigest,
+        itemCount: snapshot.items.length,
+        provider: null,
+        status: "issued",
+        converged: false,
+        issuedAtUtc,
+        verifiedAtUtc: null,
+        expiresAtUtc,
+        consumedAtUtc: null,
+        channels: null,
+        reason: null,
+      };
+
+      this.#state.readinessEvidence.set(`${tenantPrefix}${evidenceId}`, structuredClone(record));
+      return record;
+    });
+  }
+
+  async #recordVerifiedEvidence(
+    tenantId: TenantId,
+    params: InternalRecordVerifiedEvidenceParams,
+  ): Promise<SecurityMigrationReadinessEvidenceRecord> {
+    return await this.exclusive(async () => {
+      const tenantPrefix = `${tenantId}\u0000`;
+      const evidenceKey = `${tenantPrefix}${params.evidenceId}`;
+      const existing = this.#state.readinessEvidence.get(evidenceKey);
+      if (existing === undefined) throw new Error("SECURITY_MIGRATION_EVIDENCE_NOT_FOUND");
+      if (existing.status !== "issued") {
+        throw new Error("SECURITY_MIGRATION_EVIDENCE_ALREADY_VERIFIED");
+      }
+      const currentNowUtc = this.nowUtc();
+      if (currentNowUtc > existing.expiresAtUtc) {
+        throw new Error("SECURITY_MIGRATION_EVIDENCE_EXPIRED");
+      }
+      if (params.provider !== "huly") {
+        throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+      }
+      if (
+        params.evidenceId !== existing.evidenceId
+        || params.nonce !== existing.nonce
+        || params.tenantId !== existing.tenantId
+        || params.projectId !== existing.projectId
+        || params.migrationId !== existing.migrationId
+        || params.purpose !== existing.purpose
+        || params.sourceSecurityDomainId !== existing.sourceSecurityDomainId
+        || params.targetSecurityDomainId !== existing.targetSecurityDomainId
+        || params.sourceSecurityEpoch !== existing.sourceSecurityEpoch
+        || params.targetSecurityEpoch !== existing.targetSecurityEpoch
+        || params.manifestDigest !== existing.manifestDigest
+        || params.itemCount !== existing.itemCount
+        || params.issuedAtUtc !== existing.issuedAtUtc
+        || params.expiresAtUtc !== existing.expiresAtUtc
+      ) {
+        throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+      }
+
+      const updated: SecurityMigrationReadinessEvidenceRecord = {
+        ...existing,
+        status: "verified",
+        provider: params.provider,
+        converged: params.converged,
+        channels: params.channels,
+        verifiedAtUtc: currentNowUtc,
+        reason: params.reason ?? null,
+      };
+
+      this.#state.readinessEvidence.set(evidenceKey, structuredClone(updated));
+      return updated;
+    });
+  }
 }
 
 function context(
@@ -212,6 +400,16 @@ function context(
   const migrationForObjectWrite = (migrationId: string): SecurityDomainMigration => {
     const migration = state.securityMigrations.get(`${tenantPrefix}${migrationId}`);
     if (migration === undefined || migration.state !== "active"
+      || migration.sourceSecurityEpoch <= 0 || migration.targetSecurityEpoch <= 0
+      || (migration.sourceSecurityDomainId === migration.targetSecurityDomainId
+        && migration.sourceSecurityEpoch === migration.targetSecurityEpoch)) {
+      throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+    }
+    return migration;
+  };
+  const migrationForObjectRollback = (migrationId: string): SecurityDomainMigration => {
+    const migration = state.securityMigrations.get(`${tenantPrefix}${migrationId}`);
+    if (migration === undefined || !["planned", "active", "verifying", "retryable", "recovery_required"].includes(migration.state)
       || migration.sourceSecurityEpoch <= 0 || migration.targetSecurityEpoch <= 0
       || (migration.sourceSecurityDomainId === migration.targetSecurityDomainId
         && migration.sourceSecurityEpoch === migration.targetSecurityEpoch)) {
@@ -234,7 +432,64 @@ function context(
     }
     throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
   };
-  return {
+  const collectSubtreeDepths = (projectId: string, rootNodeId: string): Map<string, number> => {
+    const nodes = [...state.nodes.values()].filter((n) => n.tenantId === tenantId && n.projectId === projectId && n.deletedAtUtc === null);
+    const byParent = new Map<string | null, string[]>();
+    for (const node of nodes) {
+      const list = byParent.get(node.parentId) ?? [];
+      list.push(node.id);
+      byParent.set(node.parentId, list);
+    }
+    const depths = new Map<string, number>();
+    depths.set(rootNodeId, 0);
+    const queue = [rootNodeId];
+    while (queue.length > 0) {
+      const next = queue.shift()!;
+      const currentDepth = depths.get(next) ?? 0;
+      for (const child of byParent.get(next) ?? []) {
+        if (!depths.has(child)) {
+          depths.set(child, currentDepth + 1);
+          queue.push(child);
+        }
+      }
+    }
+    return depths;
+  };
+  const assertActorAuthorizedForMigration = async (
+    migration: SecurityDomainMigration,
+    actorPrincipalId: PrincipalId,
+    timestampUtc: string,
+  ): Promise<void> => {
+    const principal = await context.principals.get(actorPrincipalId);
+    if (principal?.status !== "active") {
+      throw new Error("NODE_NOT_FOUND");
+    }
+    const membership = await context.memberships.get(migration.projectId, actorPrincipalId);
+    if (membership?.status !== "active" || !isProjectManager(membership)) {
+      throw new Error("NODE_NOT_FOUND");
+    }
+    const rootNode = await context.nodes.get(migration.rootNodeId);
+    if (rootNode === undefined || rootNode.projectId !== migration.projectId || rootNode.deletedAtUtc !== null) {
+      throw new Error("NODE_NOT_FOUND");
+    }
+    const authorized = await canAccessProjectObjectDuringMigration(
+      context,
+      membership,
+      actorPrincipalId,
+      {
+        projectId: migration.projectId,
+        ownerNodeId: rootNode.id,
+        securityDomainId: rootNode.securityDomainId,
+        securityEpoch: rootNode.securityEpoch,
+      },
+      "manage_access",
+      timestampUtc,
+    );
+    if (!authorized) {
+      throw new Error("NODE_NOT_FOUND");
+    }
+  };
+  const context: TransactionContext = {
     tenantId,
     nodes: {
       get: async (nodeId) => clone(state.nodes.get(`${tenantPrefix}${nodeId}`)),
@@ -297,6 +552,22 @@ function context(
         state.nodes.set(key, structuredClone(updated));
         return structuredClone(updated);
       },
+      rollbackSecurityOwnership: async (migrationId, nodeId, expectedVersion) => {
+        const migration = migrationForObjectRollback(migrationId);
+        const key = `${tenantPrefix}${nodeId}`;
+        const current = state.nodes.get(key);
+        if (current === undefined) throw new Error("NODE_NOT_FOUND");
+        if (current.version !== expectedVersion) throw new Error("NODE_VERSION_CONFLICT");
+        assertMigrationScope(migration, current.id);
+        if (current.securityDomainId !== migration.targetSecurityDomainId
+          || current.securityEpoch !== migration.targetSecurityEpoch) {
+          throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+        }
+        const updated = { ...current, securityDomainId: migration.sourceSecurityDomainId,
+          securityEpoch: migration.sourceSecurityEpoch, version: current.version + 1 };
+        state.nodes.set(key, structuredClone(updated));
+        return structuredClone(updated);
+      },
     },
     tasks: {
       get: async (taskId) => clone(state.tasks.get(`${tenantPrefix}${taskId}`)),
@@ -340,6 +611,22 @@ function context(
         }
         const updated = { ...current, securityDomainId: migration.targetSecurityDomainId,
           securityEpoch: migration.targetSecurityEpoch, version: current.version + 1 };
+        state.tasks.set(key, structuredClone(updated));
+        return structuredClone(updated);
+      },
+      rollbackSecurityOwnership: async (migrationId, taskId, expectedVersion) => {
+        const migration = migrationForObjectRollback(migrationId);
+        const key = `${tenantPrefix}${taskId}`;
+        const current = state.tasks.get(key);
+        if (current === undefined) throw new Error("TASK_NOT_FOUND");
+        if (current.version !== expectedVersion) throw new Error("TASK_VERSION_CONFLICT");
+        assertMigrationScope(migration, current.ownerNodeId);
+        if (current.projectId !== migration.projectId || current.securityDomainId !== migration.targetSecurityDomainId
+          || current.securityEpoch !== migration.targetSecurityEpoch) {
+          throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+        }
+        const updated = { ...current, securityDomainId: migration.sourceSecurityDomainId,
+          securityEpoch: migration.sourceSecurityEpoch, version: current.version + 1 };
         state.tasks.set(key, structuredClone(updated));
         return structuredClone(updated);
       },
@@ -397,6 +684,22 @@ function context(
         }
         const updated = { ...current, securityDomainId: migration.targetSecurityDomainId,
           securityEpoch: migration.targetSecurityEpoch, version: current.version + 1 };
+        state.assets.set(key, structuredClone(updated));
+        return structuredClone(updated);
+      },
+      rollbackSecurityOwnership: async (migrationId, assetId, expectedVersion) => {
+        const migration = migrationForObjectRollback(migrationId);
+        const key = `${tenantPrefix}${assetId}`;
+        const current = state.assets.get(key);
+        if (current === undefined) throw new Error("ASSET_NOT_FOUND");
+        if (current.version !== expectedVersion) throw new Error("ASSET_VERSION_CONFLICT");
+        assertMigrationScope(migration, current.ownerNodeId);
+        if (current.projectId !== migration.projectId || current.securityDomainId !== migration.targetSecurityDomainId
+          || current.securityEpoch !== migration.targetSecurityEpoch) {
+          throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+        }
+        const updated = { ...current, securityDomainId: migration.sourceSecurityDomainId,
+          securityEpoch: migration.sourceSecurityEpoch, version: current.version + 1 };
         state.assets.set(key, structuredClone(updated));
         return structuredClone(updated);
       },
@@ -709,15 +1012,524 @@ function context(
           throw new Error("SECURITY_MIGRATION_PLAN_IMMUTABLE");
         }
         assertSecurityMigrationProgressChange(current, migration);
+        if (migration.state === "committed" || migration.state === "rolled_back") {
+          throw new Error("SECURITY_MIGRATION_TERMINAL_BYPASS_FORBIDDEN");
+        }
         if (current.state === "planned" && migration.state === "active"
           && hasActiveFenceOrUnresolvedOperationInMigrationScope(state, tenantId, migration, nowUtc())) {
           throw new Error("SECURITY_MIGRATION_OUTBOUND_FENCE_ACTIVE");
         }
         state.securityMigrations.set(key, structuredClone(migration));
       },
+      saveManifestSnapshot: async (snapshot) => {
+        if (snapshot.tenantId !== tenantId) throw new Error("TENANT_CONTEXT_MISMATCH");
+        const key = `${tenantPrefix}${snapshot.migrationId}`;
+        const existing = state.manifestSnapshots.get(key);
+        if (existing !== undefined) {
+          if (
+            existing.manifestDigest !== snapshot.manifestDigest
+            || existing.itemCount !== snapshot.itemCount
+            || existing.itemCount !== snapshot.items.length
+            || existing.createdAtUtc !== snapshot.createdAtUtc
+            || JSON.stringify(existing.items) !== JSON.stringify(snapshot.items)
+          ) {
+            throw new Error("SECURITY_MIGRATION_SNAPSHOT_IMMUTABLE");
+          }
+          return;
+        }
+        const migration = state.securityMigrations.get(key);
+        const envelope = migration !== undefined ? {
+          tenantId,
+          projectId: snapshot.projectId ?? migration.projectId,
+          migrationId: snapshot.migrationId,
+          sourceSecurityDomainId: snapshot.sourceSecurityDomainId !== undefined ? snapshot.sourceSecurityDomainId : migration.sourceSecurityDomainId,
+          targetSecurityDomainId: snapshot.targetSecurityDomainId !== undefined ? snapshot.targetSecurityDomainId : migration.targetSecurityDomainId,
+          sourceSecurityEpoch: snapshot.sourceSecurityEpoch ?? migration.sourceSecurityEpoch,
+          targetSecurityEpoch: snapshot.targetSecurityEpoch ?? migration.targetSecurityEpoch,
+        } : {
+          tenantId,
+          projectId: snapshot.projectId,
+          migrationId: snapshot.migrationId,
+          sourceSecurityDomainId: snapshot.sourceSecurityDomainId ?? null,
+          targetSecurityDomainId: snapshot.targetSecurityDomainId ?? null,
+          sourceSecurityEpoch: snapshot.sourceSecurityEpoch,
+          targetSecurityEpoch: snapshot.targetSecurityEpoch,
+        };
+        validateCanonicalSnapshotItems(snapshot, envelope);
+        state.manifestSnapshots.set(key, structuredClone(snapshot));
+      },
+      getManifestSnapshot: async (migrationId) => {
+        const key = `${tenantPrefix}${migrationId}`;
+        const item = state.manifestSnapshots.get(key);
+        if (item === undefined) return undefined;
+        const migration = state.securityMigrations.get(key);
+        const envelope = migration !== undefined ? {
+          tenantId,
+          projectId: item.projectId ?? migration.projectId,
+          migrationId: item.migrationId,
+          sourceSecurityDomainId: item.sourceSecurityDomainId !== undefined ? item.sourceSecurityDomainId : migration.sourceSecurityDomainId,
+          targetSecurityDomainId: item.targetSecurityDomainId !== undefined ? item.targetSecurityDomainId : migration.targetSecurityDomainId,
+          sourceSecurityEpoch: item.sourceSecurityEpoch ?? migration.sourceSecurityEpoch,
+          targetSecurityEpoch: item.targetSecurityEpoch ?? migration.targetSecurityEpoch,
+        } : {
+          tenantId,
+          projectId: item.projectId,
+          migrationId: item.migrationId,
+          sourceSecurityDomainId: item.sourceSecurityDomainId ?? null,
+          targetSecurityDomainId: item.targetSecurityDomainId ?? null,
+          sourceSecurityEpoch: item.sourceSecurityEpoch,
+          targetSecurityEpoch: item.targetSecurityEpoch,
+        };
+        validateCanonicalSnapshotItems(item, envelope);
+        return structuredClone(item);
+      },
+      getReadinessEvidence: async (evidenceId) => {
+        const record = state.readinessEvidence.get(`${tenantPrefix}${evidenceId}`);
+        return record === undefined ? undefined : structuredClone(record);
+      },
+      commitWithReadinessEvidence: async (params) => {
+        const currentNowUtc = nowUtc();
+        const key = `${tenantPrefix}${params.migrationId}`;
+        const current = state.securityMigrations.get(key);
+        if (current === undefined) throw new Error("SECURITY_MIGRATION_NOT_FOUND");
+        if (current.version !== params.expectedVersion) throw new Error("SECURITY_MIGRATION_VERSION_CONFLICT");
+        if (current.state !== "verifying") throw new Error("SECURITY_MIGRATION_COMMIT_INVALID");
+
+        await assertActorAuthorizedForMigration(current, params.actorPrincipalId, currentNowUtc);
+
+        const evidenceKey = `${tenantPrefix}${params.evidenceId}`;
+        const evidence = state.readinessEvidence.get(evidenceKey);
+        if (evidence === undefined) throw new Error("SECURITY_MIGRATION_EVIDENCE_NOT_FOUND");
+
+        if (evidence.status !== "verified") {
+          throw new Error("SECURITY_MIGRATION_EVIDENCE_NOT_VERIFIED");
+        }
+        if (evidence.provider !== "huly") {
+          throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+        }
+        if (evidence.purpose !== "commit") {
+          throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+        }
+        if (
+          evidence.tenantId !== tenantId
+          || evidence.projectId !== current.projectId
+          || evidence.migrationId !== current.id
+          || evidence.targetSecurityDomainId !== current.targetSecurityDomainId
+          || evidence.targetSecurityEpoch !== current.targetSecurityEpoch
+          || evidence.sourceSecurityDomainId !== current.sourceSecurityDomainId
+          || evidence.sourceSecurityEpoch !== current.sourceSecurityEpoch
+        ) {
+          throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+        }
+
+        if (
+          !evidence.converged
+          || evidence.channels?.issue !== "converged"
+          || evidence.channels?.attachment !== "converged"
+          || evidence.channels?.blob !== "converged"
+        ) {
+          throw new Error("SECURITY_MIGRATION_CONVERGENCE_NOT_READY");
+        }
+
+        if (currentNowUtc > evidence.expiresAtUtc) {
+          throw new Error("SECURITY_MIGRATION_EVIDENCE_EXPIRED");
+        }
+
+        if (evidence.verifiedAtUtc === null || evidence.verifiedAtUtc > currentNowUtc) {
+          throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+        }
+
+        if (evidence.issuedAtUtc > evidence.verifiedAtUtc) {
+          throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+        }
+
+        const nonceKey = `${tenantPrefix}${evidence.nonce}`;
+        const evidenceIdKey = `${tenantPrefix}${evidence.evidenceId}`;
+        if (state.consumedReadinessEvidence.has(nonceKey) || state.consumedReadinessEvidence.has(evidenceIdKey)) {
+          throw new Error("SECURITY_MIGRATION_EVIDENCE_REPLAYED");
+        }
+
+        // TOCTOU Revalidation
+        const snapshot = state.manifestSnapshots.get(key);
+        if (snapshot === undefined) {
+          throw new Error("SECURITY_MIGRATION_MANIFEST_SNAPSHOT_NOT_FOUND");
+        }
+        if (snapshot.manifestDigest !== evidence.manifestDigest || snapshot.items.length !== evidence.itemCount) {
+          throw new Error("SECURITY_MIGRATION_MANIFEST_MISMATCH");
+        }
+
+        const liveManifest = await collectSecurityMigrationManifest(context, current);
+        assertManifestMatchesSnapshot(liveManifest, snapshot);
+
+        if (hasIncompleteInventoryObjectsInMigrationScope(state, tenantId, current)) {
+          throw new Error("SECURITY_MIGRATION_INVENTORY_INCOMPLETE");
+        }
+
+        if (hasActiveFenceOrUnresolvedOperationInMigrationScope(state, tenantId, current, currentNowUtc)) {
+          throw new Error("SECURITY_MIGRATION_OUTBOUND_FENCE_ACTIVE");
+        }
+
+        const record = {
+          evidenceId: evidence.evidenceId,
+          nonce: evidence.nonce,
+          migrationId: current.id,
+          manifestDigest: evidence.manifestDigest,
+          consumedAtUtc: currentNowUtc,
+        };
+        state.consumedReadinessEvidence.set(nonceKey, record);
+        state.consumedReadinessEvidence.set(evidenceIdKey, record);
+
+        const updatedEvidence: SecurityMigrationReadinessEvidenceRecord = {
+          ...evidence,
+          status: "consumed",
+          consumedAtUtc: currentNowUtc,
+        };
+        state.readinessEvidence.set(evidenceKey, updatedEvidence);
+
+        const committed = transitionSecurityMigration(current, "committed", currentNowUtc);
+        state.securityMigrations.set(key, structuredClone(committed));
+
+        const audit: SecurityMigrationAuditEntry = {
+          tenantId,
+          auditId: randomUUID(),
+          migrationId: committed.id,
+          projectId: committed.projectId,
+          action: "committed",
+          actorPrincipalId: params.actorPrincipalId,
+          reason: params.reason ?? "Security migration external convergence verified and committed",
+          sourceSecurityDomainId: committed.sourceSecurityDomainId,
+          targetSecurityDomainId: committed.targetSecurityDomainId,
+          sourceSecurityEpoch: committed.sourceSecurityEpoch,
+          targetSecurityEpoch: committed.targetSecurityEpoch,
+          migratedItems: committed.migratedItems,
+          occurredAtUtc: currentNowUtc,
+        };
+        await context.securityMigrationAudits.append(audit);
+
+        const projectSequence = await context.sequences.next(committed.projectId);
+        const event: DomainEvent = {
+          tenantId,
+          eventId: randomUUID(),
+          projectId: committed.projectId,
+          projectSequence,
+          aggregateType: "security_domain_migration",
+          aggregateId: committed.id,
+          aggregateVersion: committed.version,
+          eventType: "project-map.security-migration.committed",
+          schemaVersion: 1,
+          actorPrincipalId: params.actorPrincipalId,
+          occurredAtUtc: currentNowUtc,
+          correlationId: params.idempotencyKey ?? committed.id,
+          causationId: params.idempotencyKey ?? committed.id,
+          originalSecurityDomainId: committed.targetSecurityDomainId,
+          originalSecurityEpoch: committed.targetSecurityEpoch,
+          payload: {
+            migrationId: committed.id,
+            rootNodeId: committed.rootNodeId,
+            sourceSecurityDomainId: committed.sourceSecurityDomainId,
+            targetSecurityDomainId: committed.targetSecurityDomainId,
+            sourceSecurityEpoch: committed.sourceSecurityEpoch,
+            targetSecurityEpoch: committed.targetSecurityEpoch,
+            migratedItems: committed.migratedItems,
+          },
+        };
+        await context.events.append(event);
+
+        const outbox: OutboxMessage = {
+          tenantId,
+          id: `outbox:${event.eventId}`,
+          eventId: event.eventId,
+          topic: eventTopic(event),
+          payload: event,
+          state: "pending",
+          availableAtUtc: currentNowUtc,
+          attempts: 0,
+          maxAttempts: 8,
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAtUtc: null,
+          lastError: null,
+          publishedAtUtc: null,
+          createdAtUtc: currentNowUtc,
+        };
+        await context.outbox.enqueue(outbox);
+
+        const commitResult: CommitSecurityMigrationResult = {
+          migrationId: committed.id,
+          state: "committed",
+          migrationVersion: committed.version,
+          occurredAtUtc: params.occurredAtUtc,
+        };
+
+        if (params.idempotencyKey !== undefined) {
+          const scope: CommandScope = {
+            principalId: params.actorPrincipalId,
+            operation: "commit_security_migration",
+            idempotencyKey: params.idempotencyKey,
+          };
+          await context.receipts.insert({
+            scope,
+            fingerprint: createHash("sha256").update(JSON.stringify({
+              migrationId: committed.id,
+              expectedVersion: params.expectedVersion,
+              occurredAtUtc: params.occurredAtUtc,
+            })).digest("hex"),
+            result: commitResult,
+            createdAtUtc: currentNowUtc,
+          });
+        }
+
+        return commitResult;
+      },
+      rollbackWithAudit: async (params) => {
+        const currentNowUtc = nowUtc();
+        const key = `${tenantPrefix}${params.migrationId}`;
+        const current = state.securityMigrations.get(key);
+        if (current === undefined) throw new Error("SECURITY_MIGRATION_NOT_FOUND");
+        if (current.version !== params.expectedVersion) throw new Error("SECURITY_MIGRATION_VERSION_CONFLICT");
+        if (!["planned", "active", "verifying", "retryable", "recovery_required"].includes(current.state)) {
+          throw new Error("SECURITY_MIGRATION_ROLLBACK_INVALID");
+        }
+
+        await assertActorAuthorizedForMigration(current, params.actorPrincipalId, currentNowUtc);
+
+        let rolledBackItems = 0;
+        if (current.migratedItems > 0) {
+          if (params.evidenceId === undefined) {
+            throw new Error("SECURITY_MIGRATION_EVIDENCE_REQUIRED");
+          }
+          const evidenceKey = `${tenantPrefix}${params.evidenceId}`;
+          const evidence = state.readinessEvidence.get(evidenceKey);
+          if (evidence === undefined) throw new Error("SECURITY_MIGRATION_EVIDENCE_NOT_FOUND");
+
+          if (evidence.status !== "verified") {
+            throw new Error("SECURITY_MIGRATION_EVIDENCE_NOT_VERIFIED");
+          }
+          if (evidence.provider !== "huly") {
+            throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+          }
+          if (evidence.purpose !== "rollback") {
+            throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+          }
+          if (
+            evidence.tenantId !== tenantId
+            || evidence.projectId !== current.projectId
+            || evidence.migrationId !== current.id
+            || evidence.targetSecurityDomainId !== current.sourceSecurityDomainId
+            || evidence.targetSecurityEpoch !== current.sourceSecurityEpoch
+            || evidence.sourceSecurityDomainId !== current.targetSecurityDomainId
+            || evidence.sourceSecurityEpoch !== current.targetSecurityEpoch
+          ) {
+            throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+          }
+
+          if (
+            !evidence.converged
+            || evidence.channels?.issue !== "converged"
+            || evidence.channels?.attachment !== "converged"
+            || evidence.channels?.blob !== "converged"
+          ) {
+            throw new Error("SECURITY_MIGRATION_CONVERGENCE_NOT_READY");
+          }
+
+          if (currentNowUtc > evidence.expiresAtUtc) {
+            throw new Error("SECURITY_MIGRATION_EVIDENCE_EXPIRED");
+          }
+
+          if (evidence.verifiedAtUtc === null || evidence.verifiedAtUtc > currentNowUtc) {
+            throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+          }
+
+          if (evidence.issuedAtUtc > evidence.verifiedAtUtc) {
+            throw new Error("SECURITY_MIGRATION_EVIDENCE_INVALID");
+          }
+
+          const nonceKey = `${tenantPrefix}${evidence.nonce}`;
+          const evidenceIdKey = `${tenantPrefix}${evidence.evidenceId}`;
+          if (state.consumedReadinessEvidence.has(nonceKey) || state.consumedReadinessEvidence.has(evidenceIdKey)) {
+            throw new Error("SECURITY_MIGRATION_EVIDENCE_REPLAYED");
+          }
+
+          const snapshot = state.manifestSnapshots.get(key);
+          if (snapshot === undefined) {
+            throw new Error("SECURITY_MIGRATION_MANIFEST_SNAPSHOT_NOT_FOUND");
+          }
+          if (snapshot.manifestDigest !== evidence.manifestDigest || snapshot.items.length !== evidence.itemCount) {
+            throw new Error("SECURITY_MIGRATION_MANIFEST_MISMATCH");
+          }
+
+          if (hasActiveFenceOrUnresolvedOperationInMigrationScope(state, tenantId, current, currentNowUtc)) {
+            throw new Error("SECURITY_MIGRATION_OUTBOUND_FENCE_ACTIVE");
+          }
+
+          const liveManifest = await collectSecurityMigrationManifest(context, current);
+          assertManifestMatchesSnapshot(liveManifest, snapshot);
+
+          const record = {
+            evidenceId: evidence.evidenceId,
+            nonce: evidence.nonce,
+            migrationId: current.id,
+            manifestDigest: evidence.manifestDigest,
+            consumedAtUtc: currentNowUtc,
+          };
+          state.consumedReadinessEvidence.set(nonceKey, record);
+          state.consumedReadinessEvidence.set(evidenceIdKey, record);
+
+          const updatedEvidence: SecurityMigrationReadinessEvidenceRecord = {
+            ...evidence,
+            status: "consumed",
+            consumedAtUtc: currentNowUtc,
+          };
+          state.readinessEvidence.set(evidenceKey, updatedEvidence);
+
+          // Restore objects in reverse order using immutable manifest snapshot (asset -> task -> node)
+          // 1. Assets
+          for (const item of snapshot.items.filter((i) => i.kind === "asset")) {
+            const asset = await context.assets.get(item.id);
+            if (asset !== undefined && asset.securityDomainId === current.targetSecurityDomainId && asset.securityEpoch === current.targetSecurityEpoch) {
+              await context.assets.rollbackSecurityOwnership(current.id, asset.id, asset.version);
+              rolledBackItems++;
+            }
+          }
+          // 2. Tasks
+          for (const item of snapshot.items.filter((i) => i.kind === "task")) {
+            const task = await context.tasks.get(item.id);
+            if (task !== undefined && task.securityDomainId === current.targetSecurityDomainId && task.securityEpoch === current.targetSecurityEpoch) {
+              await context.tasks.rollbackSecurityOwnership(current.id, task.id, task.version);
+              rolledBackItems++;
+            }
+          }
+          // 3. Nodes in reverse depth order (leaves before root)
+          const nodeDepths = collectSubtreeDepths(current.projectId, current.rootNodeId);
+          const nodeItems = snapshot.items
+            .filter((i) => i.kind === "node")
+            .sort((a, b) => (nodeDepths.get(b.id) ?? 0) - (nodeDepths.get(a.id) ?? 0));
+          for (const item of nodeItems) {
+            const node = await context.nodes.get(item.id);
+            if (node !== undefined && node.securityDomainId === current.targetSecurityDomainId && node.securityEpoch === current.targetSecurityEpoch) {
+              await context.nodes.rollbackSecurityOwnership(current.id, node.id, node.version);
+              rolledBackItems++;
+            }
+          }
+        }
+
+        if (hasObjectsNotRevertedToSourceInMigrationScope(state, tenantId, current)) {
+          throw new Error("SECURITY_MIGRATION_ROLLBACK_INCOMPLETE");
+        }
+
+        const rolledBack = transitionSecurityMigration(current, "rolled_back", currentNowUtc);
+        state.securityMigrations.set(key, structuredClone(rolledBack));
+
+        const audit: SecurityMigrationAuditEntry = {
+          tenantId,
+          auditId: randomUUID(),
+          migrationId: rolledBack.id,
+          projectId: rolledBack.projectId,
+          action: "rolled_back",
+          actorPrincipalId: params.actorPrincipalId,
+          reason: params.reason,
+          sourceSecurityDomainId: rolledBack.sourceSecurityDomainId,
+          targetSecurityDomainId: rolledBack.targetSecurityDomainId,
+          sourceSecurityEpoch: rolledBack.sourceSecurityEpoch,
+          targetSecurityEpoch: rolledBack.targetSecurityEpoch,
+          migratedItems: rolledBackItems,
+          occurredAtUtc: currentNowUtc,
+        };
+        await context.securityMigrationAudits.append(audit);
+
+        const projectSequence = await context.sequences.next(rolledBack.projectId);
+        const event: DomainEvent = {
+          tenantId,
+          eventId: randomUUID(),
+          projectId: rolledBack.projectId,
+          projectSequence,
+          aggregateType: "security_domain_migration",
+          aggregateId: rolledBack.id,
+          aggregateVersion: rolledBack.version,
+          eventType: "project-map.security-migration.rolled_back",
+          schemaVersion: 1,
+          actorPrincipalId: params.actorPrincipalId,
+          occurredAtUtc: currentNowUtc,
+          correlationId: params.idempotencyKey ?? rolledBack.id,
+          causationId: params.idempotencyKey ?? rolledBack.id,
+          originalSecurityDomainId: rolledBack.sourceSecurityDomainId,
+          originalSecurityEpoch: rolledBack.sourceSecurityEpoch,
+          payload: {
+            migrationId: rolledBack.id,
+            rootNodeId: rolledBack.rootNodeId,
+            sourceSecurityDomainId: rolledBack.sourceSecurityDomainId,
+            targetSecurityDomainId: rolledBack.targetSecurityDomainId,
+            sourceSecurityEpoch: rolledBack.sourceSecurityEpoch,
+            targetSecurityEpoch: rolledBack.targetSecurityEpoch,
+            migratedItems: rolledBackItems,
+            reason: params.reason,
+          },
+        };
+        await context.events.append(event);
+
+        const outbox: OutboxMessage = {
+          tenantId,
+          id: `outbox:${event.eventId}`,
+          eventId: event.eventId,
+          topic: eventTopic(event),
+          payload: event,
+          state: "pending",
+          availableAtUtc: currentNowUtc,
+          attempts: 0,
+          maxAttempts: 8,
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAtUtc: null,
+          lastError: null,
+          publishedAtUtc: null,
+          createdAtUtc: currentNowUtc,
+        };
+        await context.outbox.enqueue(outbox);
+
+        const rollbackResult: RollbackSecurityMigrationResult = {
+          migrationId: rolledBack.id,
+          state: "rolled_back",
+          migrationVersion: rolledBack.version,
+          rolledBackItems,
+          occurredAtUtc: params.occurredAtUtc,
+        };
+
+        if (params.idempotencyKey !== undefined) {
+          const scope: CommandScope = {
+            principalId: params.actorPrincipalId,
+            operation: "rollback_security_migration",
+            idempotencyKey: params.idempotencyKey,
+          };
+          await context.receipts.insert({
+            scope,
+            fingerprint: createHash("sha256").update(JSON.stringify({
+              migrationId: rolledBack.id,
+              expectedVersion: params.expectedVersion,
+              reason: params.reason.trim(),
+              occurredAtUtc: params.occurredAtUtc,
+            })).digest("hex"),
+            result: rollbackResult,
+            createdAtUtc: currentNowUtc,
+          });
+        }
+
+        return rollbackResult;
+      },
       listRecoverable: async () => [...state.securityMigrations.values()]
         .filter((migration) => migration.tenantId === tenantId && !["committed", "rolled_back"].includes(migration.state))
         .map((migration) => structuredClone(migration)),
+    },
+    securityMigrationAudits: {
+      append: async (entry) => {
+        assertTenant(tenantId, entry.tenantId);
+        const key = `${tenantPrefix}${entry.auditId}`;
+        if (state.securityMigrationAudits.has(key)) throw new Error("SECURITY_AUDIT_ALREADY_EXISTS");
+        state.securityMigrationAudits.set(key, structuredClone(entry));
+      },
+      listByMigration: async (migrationId) => [...state.securityMigrationAudits.values()]
+        .filter((entry) => entry.tenantId === tenantId && entry.migrationId === migrationId)
+        .sort((left, right) => left.occurredAtUtc.localeCompare(right.occurredAtUtc) || left.auditId.localeCompare(right.auditId))
+        .map((entry) => structuredClone(entry)),
     },
     receipts: {
       get: async <T>(scope: CommandScope) => clone(state.receipts.get(receiptKey(tenantId, scope))) as CommandReceipt<T> | undefined,
@@ -791,6 +1603,7 @@ function context(
       },
     },
   };
+  return context;
 }
 
 function clone<T>(value: T | undefined): T | undefined {
@@ -1030,4 +1843,133 @@ function hasActiveFenceOrUnresolvedOperationInMigrationScope(
   }
 
   return false;
+}
+
+function collectSubtreeNodeIds(
+  state: MemoryState,
+  tenantId: TenantId,
+  projectId: string,
+  rootNodeId: string,
+): Set<string> {
+  const projectNodes = [...state.nodes.values()].filter((n) => n.tenantId === tenantId && n.projectId === projectId);
+  const byParent = new Map<string | null, string[]>();
+  for (const node of projectNodes) {
+    if (node.deletedAtUtc !== null) continue;
+    const list = byParent.get(node.parentId) ?? [];
+    list.push(node.id);
+    byParent.set(node.parentId, list);
+  }
+  const subtree = new Set<string>();
+  const queue = [rootNodeId];
+  while (queue.length > 0) {
+    const next = queue.shift()!;
+    if (subtree.has(next)) continue;
+    subtree.add(next);
+    for (const child of byParent.get(next) ?? []) {
+      queue.push(child);
+    }
+  }
+  return subtree;
+}
+
+function hasIncompleteInventoryObjectsInMigrationScope(
+  state: MemoryState,
+  tenantId: TenantId,
+  migration: SecurityDomainMigration,
+): boolean {
+  const tenantPrefix = `${tenantId}\u0000`;
+  const root = state.nodes.get(`${tenantPrefix}${migration.rootNodeId}`);
+  if (root === undefined || root.projectId !== migration.projectId || root.deletedAtUtc !== null) return true;
+  const subtree = collectSubtreeNodeIds(state, tenantId, migration.projectId, migration.rootNodeId);
+
+  for (const nodeId of subtree) {
+    const node = state.nodes.get(`${tenantPrefix}${nodeId}`);
+    if (node === undefined || node.securityDomainId !== migration.targetSecurityDomainId
+      || node.securityEpoch !== migration.targetSecurityEpoch) {
+      return true;
+    }
+  }
+
+  for (const task of state.tasks.values()) {
+    if (task.tenantId !== tenantId || task.projectId !== migration.projectId || task.deletedAtUtc !== null) continue;
+    if (subtree.has(task.ownerNodeId)) {
+      if (task.securityDomainId !== migration.targetSecurityDomainId
+        || task.securityEpoch !== migration.targetSecurityEpoch) {
+        return true;
+      }
+    }
+  }
+
+  for (const asset of state.assets.values()) {
+    if (asset.tenantId !== tenantId || asset.projectId !== migration.projectId || asset.deletedAtUtc !== null) continue;
+    if (subtree.has(asset.ownerNodeId)) {
+      if (asset.securityDomainId !== migration.targetSecurityDomainId
+        || asset.securityEpoch !== migration.targetSecurityEpoch) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function hasObjectsNotRevertedToSourceInMigrationScope(
+  state: MemoryState,
+  tenantId: TenantId,
+  migration: SecurityDomainMigration,
+): boolean {
+  const tenantPrefix = `${tenantId}\u0000`;
+  const root = state.nodes.get(`${tenantPrefix}${migration.rootNodeId}`);
+  if (root === undefined || root.projectId !== migration.projectId || root.deletedAtUtc !== null) return true;
+  const subtree = collectSubtreeNodeIds(state, tenantId, migration.projectId, migration.rootNodeId);
+
+  for (const nodeId of subtree) {
+    const node = state.nodes.get(`${tenantPrefix}${nodeId}`);
+    if (node === undefined || node.securityDomainId !== migration.sourceSecurityDomainId
+      || node.securityEpoch !== migration.sourceSecurityEpoch) {
+      return true;
+    }
+  }
+
+  for (const task of state.tasks.values()) {
+    if (task.tenantId !== tenantId || task.projectId !== migration.projectId || task.deletedAtUtc !== null) continue;
+    if (subtree.has(task.ownerNodeId)) {
+      if (task.securityDomainId !== migration.sourceSecurityDomainId
+        || task.securityEpoch !== migration.sourceSecurityEpoch) {
+        return true;
+      }
+    }
+  }
+
+  for (const asset of state.assets.values()) {
+    if (asset.tenantId !== tenantId || asset.projectId !== migration.projectId || asset.deletedAtUtc !== null) continue;
+    if (subtree.has(asset.ownerNodeId)) {
+      if (asset.securityDomainId !== migration.sourceSecurityDomainId
+        || asset.securityEpoch !== migration.sourceSecurityEpoch) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function computeNodeDepths(rootNodeId: string, nodes: readonly ProjectNode[]): Map<string, number> {
+  const byParent = new Map<string | null, string[]>();
+  for (const node of nodes) {
+    const list = byParent.get(node.parentId) ?? [];
+    list.push(node.id);
+    byParent.set(node.parentId, list);
+  }
+  const depths = new Map<string, number>();
+  depths.set(rootNodeId, 0);
+  const queue = [{ id: rootNodeId, depth: 0 }];
+  while (queue.length > 0) {
+    const { id, depth } = queue.shift()!;
+    for (const child of byParent.get(id) ?? []) {
+      depths.set(child, depth + 1);
+      queue.push({ id: child, depth: depth + 1 });
+    }
+  }
+  return depths;
 }

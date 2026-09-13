@@ -10,7 +10,15 @@ import { createProductApi, type ProductApiOptions } from "../apps/product-api/sr
 import { startProductApiServer } from "../apps/product-api/src/server.ts";
 import { decodeCommandResult, decodeSecurityGrant, decodeSecurityRoot, decodeTaskSummary } from "../packages/contracts/src/project-process-map-api.ts";
 import { resolveExternalIdentity } from "../packages/application/src/identity/resolve-external-identity.ts";
-import type { AssetContentPort, PutAssetContent } from "../packages/application/src/ports/integrations.ts";
+import { ExecuteSecurityMigrationBatchHandler } from "../packages/application/src/security/execute-security-migration-batch.ts";
+import { BeginSecurityMigrationVerificationHandler } from "../packages/application/src/security/begin-security-migration-verification.ts";
+import type {
+  AssetContentPort,
+  EpochReadinessScope,
+  ExternalCollaborationEpochReadinessPort,
+  PutAssetContent,
+  SecurityMigrationReadinessEvidence,
+} from "../packages/application/src/ports/integrations.ts";
 import { MemoryAssetContent } from "../packages/adapters/src/memory/asset-content.ts";
 import { FilesystemAssetContent } from "../packages/adapters/src/filesystem/asset-content.ts";
 import { MemoryPersistence } from "../packages/adapters/src/memory/persistence.ts";
@@ -975,6 +983,333 @@ test("ARCH-GATE-RECOVERY-002 operator recovery routes are deny-by-default", asyn
   }), "/api/operator/integration-operations");
   assert.equal(allowed.status, 200);
   assert.deepEqual(JSON.parse(allowed.body), []);
+});
+
+class ApiTestEpochReadinessAdapter implements ExternalCollaborationEpochReadinessPort {
+  converged = true;
+  async checkEpochReadiness(scope: EpochReadinessScope): Promise<SecurityMigrationReadinessEvidence> {
+    return {
+      evidenceId: scope.evidenceId,
+      nonce: scope.nonce,
+      tenantId: scope.tenantId,
+      migrationId: scope.migrationId,
+      purpose: scope.purpose,
+      projectId: scope.projectId,
+      manifestDigest: scope.manifestDigest,
+      sourceSecurityDomainId: scope.sourceSecurityDomainId,
+      targetSecurityDomainId: scope.targetSecurityDomainId,
+      sourceSecurityEpoch: scope.sourceSecurityEpoch,
+      targetSecurityEpoch: scope.targetSecurityEpoch,
+      provider: "huly",
+      converged: this.converged,
+      channels: {
+        issue: this.converged ? "converged" : "not_converged",
+        attachment: this.converged ? "converged" : "not_converged",
+        blob: this.converged ? "converged" : "not_converged",
+      },
+      verifiedAtUtc: new Date().toISOString(),
+      expiresAtUtc: scope.expiresAtUtc,
+      consumedAtUtc: null,
+      itemCount: scope.itemCount,
+      ...(this.converged ? {} : { reason: "channels pending sync" }),
+    };
+  }
+}
+
+test("TC-SEC-002K Product API exposes commit and rollback endpoints with strict validation and idempotent semantics", async () => {
+  const adapter = new ApiTestEpochReadinessAdapter();
+  const persistence = new MemoryPersistence({ verifier: adapter });
+  const handler = createProductApi({
+    collaborationMode: "disabled",
+    persistence,
+    assetContent: new MemoryAssetContent(),
+    verifyMigrationReadiness: persistence.verifyMigrationReadiness,
+  });
+
+  // Ensure baseline seeded
+  await call(handler, "/api/nodes");
+
+  // Setup verifying migration on N-03
+  await persistence.transaction(phase0Tenant, async (tx) => {
+    await tx.securityDomains.insert({
+      tenantId: phase0Tenant,
+      id: "sensitive-domain-commit",
+      projectId: "phase0-project",
+      rootNodeId: "N-03",
+      parentSecurityDomainId: null,
+      permissionVersion: 1,
+      version: 1,
+      createdByPrincipalId: principalId("phase0-user"),
+      createdAtUtc: "2026-09-11T00:00:00.000Z",
+      deletedAtUtc: null,
+    });
+    await tx.securityGrants.insert({
+      tenantId: phase0Tenant,
+      id: "grant-commit-manager",
+      securityDomainId: "sensitive-domain-commit",
+      principalId: principalId("phase0-user"),
+      capability: "manage_access",
+      status: "active",
+      expiresAtUtc: null,
+      grantedByPrincipalId: principalId("phase0-user"),
+      reason: "setup",
+      version: 1,
+      createdAtUtc: "2026-09-11T00:00:00.000Z",
+      updatedAtUtc: "2026-09-11T00:00:00.000Z",
+    });
+  });
+
+  const plannedCommit: SecurityDomainMigration = {
+    tenantId: phase0Tenant,
+    id: "migration-api-commit",
+    projectId: "phase0-project",
+    rootNodeId: "N-03",
+    sourceSecurityDomainId: null,
+    targetSecurityDomainId: "sensitive-domain-commit",
+    hierarchyRevision: 1,
+    sourceSecurityEpoch: 1,
+    targetSecurityEpoch: 2,
+    state: "planned",
+    cursor: null,
+    totalItems: 1,
+    migratedItems: 0,
+    failure: null,
+    nextAttemptAtUtc: null,
+    deadlineAtUtc: "2026-09-12T00:00:00.000Z",
+    version: 1,
+    createdAtUtc: "2026-09-11T00:00:00.000Z",
+    updatedAtUtc: "2026-09-11T00:00:00.000Z",
+  };
+  const activeCommit = transitionSecurityMigration(plannedCommit, "active", "2026-09-11T01:00:00.000Z");
+  await persistence.transaction(phase0Tenant, async (tx) => {
+    await tx.securityMigrations.insert(plannedCommit);
+    await tx.securityMigrations.saveProgressPreservingPlan(activeCommit.id, activeCommit, plannedCommit.version);
+  });
+  const batchHandler = new ExecuteSecurityMigrationBatchHandler(persistence);
+  await batchHandler.execute({
+    tenantId: phase0Tenant,
+    migrationId: plannedCommit.id,
+    expectedMigrationVersion: 2,
+    batchSize: 10,
+    occurredAtUtc: "2026-09-11T02:00:00.000Z",
+  });
+  const verifyHandler = new BeginSecurityMigrationVerificationHandler(persistence);
+  await verifyHandler.execute({
+    tenantId: phase0Tenant,
+    migrationId: plannedCommit.id,
+    expectedMigrationVersion: 3,
+    occurredAtUtc: "2026-09-11T03:00:00.000Z",
+  });
+
+  // 1. Commit route validation
+  // Invalid path identifier
+  const invalidPath = await call(handler, "/api/security-migrations/%00/actions/commit", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "commit-key-1" },
+    body: JSON.stringify({ expectedVersion: 4 }),
+  });
+  assert.equal(invalidPath.status, 422);
+  assert.equal((JSON.parse(invalidPath.body) as { code: string }).code, "VALIDATION_FAILED");
+
+  // Missing idempotency key
+  const missingKey = await call(handler, `/api/security-migrations/${plannedCommit.id}/actions/commit`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ expectedVersion: 4 }),
+  });
+  assert.equal(missingKey.status, 422);
+  assert.equal((JSON.parse(missingKey.body) as { code: string }).code, "IDEMPOTENCY_KEY_REQUIRED");
+
+  // Invalid body (missing expectedVersion)
+  const invalidBody = await call(handler, `/api/security-migrations/${plannedCommit.id}/actions/commit`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "commit-key-1" },
+    body: JSON.stringify({}),
+  });
+  assert.equal(invalidBody.status, 422);
+  assert.equal((JSON.parse(invalidBody.body) as { code: string }).code, "VALIDATION_FAILED");
+
+  // Migration not found
+  const notFound = await call(handler, "/api/security-migrations/unknown-migration/actions/commit", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "commit-key-1" },
+    body: JSON.stringify({ expectedVersion: 4 }),
+  });
+  assert.equal(notFound.status, 404);
+  assert.equal((JSON.parse(notFound.body) as { code: string }).code, "SECURITY_MIGRATION_NOT_FOUND");
+
+  // Unconfigured adapter -> 503
+  const handlerWithoutAdapter = createProductApi({
+    collaborationMode: "disabled",
+    persistence,
+    assetContent: new MemoryAssetContent(),
+  });
+  const unconfigured = await call(handlerWithoutAdapter, `/api/security-migrations/${plannedCommit.id}/actions/commit`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "commit-key-1" },
+    body: JSON.stringify({ expectedVersion: 4 }),
+  });
+  assert.equal(unconfigured.status, 503);
+  assert.equal((JSON.parse(unconfigured.body) as { code: string }).code, "HULY_ADAPTER_NOT_CONFIGURED");
+
+  // Unconverged adapter fails closed -> 409
+  adapter.converged = false;
+  const unconverged = await call(handler, `/api/security-migrations/${plannedCommit.id}/actions/commit`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "commit-key-unconverged" },
+    body: JSON.stringify({ expectedVersion: 4 }),
+  });
+  assert.equal(unconverged.status, 409);
+  assert.equal((JSON.parse(unconverged.body) as { code: string }).code, "SECURITY_MIGRATION_CONVERGENCE_NOT_READY");
+  // Verify state remains verifying (did not auto-rollback)
+  const stillVerifying = await persistence.read(phase0Tenant, async (tx) => await tx.securityMigrations.get(plannedCommit.id));
+  assert.equal(stillVerifying?.state, "verifying");
+  assert.equal(stillVerifying?.version, 4);
+
+  // Successful commit -> 200
+  adapter.converged = true;
+  const commitSuccess = await call(handler, `/api/security-migrations/${plannedCommit.id}/actions/commit`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "commit-key-success" },
+    body: JSON.stringify({ expectedVersion: 4 }),
+  });
+  assert.equal(commitSuccess.status, 200);
+  const commitBody = JSON.parse(commitSuccess.body) as { migrationId: string; state: string; migrationVersion: number; replayed?: boolean };
+  assert.equal(commitBody.migrationId, plannedCommit.id);
+  assert.equal(commitBody.state, "committed");
+  assert.equal(commitBody.migrationVersion, 5);
+
+  // Idempotent replay of commit -> 200 with replayed: true
+  const commitReplay = await call(handler, `/api/security-migrations/${plannedCommit.id}/actions/commit`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "commit-key-success" },
+    body: JSON.stringify({ expectedVersion: 4 }),
+  });
+  assert.equal(commitReplay.status, 200);
+  const replayBody = JSON.parse(commitReplay.body) as { migrationId: string; state: string; migrationVersion: number; replayed?: boolean };
+  assert.equal(replayBody.migrationId, plannedCommit.id);
+  assert.equal(replayBody.state, "committed");
+  assert.equal(replayBody.migrationVersion, 5);
+  assert.equal(replayBody.replayed, true);
+
+  // 2. Rollback route validation
+  // Rollback on committed migration is rejected -> 409
+  const rollbackCommitted = await call(handler, `/api/security-migrations/${plannedCommit.id}/actions/rollback`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "rollback-committed" },
+    body: JSON.stringify({ expectedVersion: 5, reason: "should fail on committed" }),
+  });
+  assert.equal(rollbackCommitted.status, 409);
+  assert.equal((JSON.parse(rollbackCommitted.body) as { code: string }).code, "SECURITY_MIGRATION_ROLLBACK_INVALID");
+
+  // Rollback validation: missing reason
+  const missingReason = await call(handler, `/api/security-migrations/${plannedCommit.id}/actions/rollback`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "rollback-missing-reason" },
+    body: JSON.stringify({ expectedVersion: 5 }),
+  });
+  assert.equal(missingReason.status, 422);
+  assert.equal((JSON.parse(missingReason.body) as { code: string }).code, "VALIDATION_FAILED");
+
+  // Rollback validation: missing idempotency key
+  const missingRollbackKey = await call(handler, `/api/security-migrations/${plannedCommit.id}/actions/rollback`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ expectedVersion: 5, reason: "missing key" }),
+  });
+  assert.equal(missingRollbackKey.status, 422);
+  assert.equal((JSON.parse(missingRollbackKey.body) as { code: string }).code, "IDEMPOTENCY_KEY_REQUIRED");
+
+  // Rollback not found
+  const rollbackNotFound = await call(handler, "/api/security-migrations/unknown-migration/actions/rollback", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "rollback-not-found" },
+    body: JSON.stringify({ expectedVersion: 1, reason: "not found" }),
+  });
+  assert.equal(rollbackNotFound.status, 404);
+  assert.equal((JSON.parse(rollbackNotFound.body) as { code: string }).code, "SECURITY_MIGRATION_NOT_FOUND");
+
+  // Setup second migration on N-04 in active state for valid rollback
+  await persistence.transaction(phase0Tenant, async (tx) => {
+    await tx.securityDomains.insert({
+      tenantId: phase0Tenant,
+      id: "sensitive-domain-rollback",
+      projectId: "phase0-project",
+      rootNodeId: "N-04",
+      parentSecurityDomainId: null,
+      permissionVersion: 1,
+      version: 1,
+      createdByPrincipalId: principalId("phase0-user"),
+      createdAtUtc: "2026-09-11T00:00:00.000Z",
+      deletedAtUtc: null,
+    });
+    await tx.securityGrants.insert({
+      tenantId: phase0Tenant,
+      id: "grant-rollback-manager",
+      securityDomainId: "sensitive-domain-rollback",
+      principalId: principalId("phase0-user"),
+      capability: "manage_access",
+      status: "active",
+      expiresAtUtc: null,
+      grantedByPrincipalId: principalId("phase0-user"),
+      reason: "setup",
+      version: 1,
+      createdAtUtc: "2026-09-11T00:00:00.000Z",
+      updatedAtUtc: "2026-09-11T00:00:00.000Z",
+    });
+  });
+
+  const plannedRollback: SecurityDomainMigration = {
+    tenantId: phase0Tenant,
+    id: "migration-api-rollback",
+    projectId: "phase0-project",
+    rootNodeId: "N-04",
+    sourceSecurityDomainId: null,
+    targetSecurityDomainId: "sensitive-domain-rollback",
+    hierarchyRevision: 1,
+    sourceSecurityEpoch: 1,
+    targetSecurityEpoch: 2,
+    state: "planned",
+    cursor: null,
+    totalItems: 1,
+    migratedItems: 0,
+    failure: null,
+    nextAttemptAtUtc: null,
+    deadlineAtUtc: "2026-09-12T00:00:00.000Z",
+    version: 1,
+    createdAtUtc: "2026-09-11T00:00:00.000Z",
+    updatedAtUtc: "2026-09-11T00:00:00.000Z",
+  };
+  const activeRollback = transitionSecurityMigration(plannedRollback, "active", "2026-09-11T01:00:00.000Z");
+  await persistence.transaction(phase0Tenant, async (tx) => {
+    await tx.securityMigrations.insert(plannedRollback);
+    await tx.securityMigrations.saveProgressPreservingPlan(activeRollback.id, activeRollback, plannedRollback.version);
+  });
+
+  // Successful rollback -> 200
+  const rollbackSuccess = await call(handler, `/api/security-migrations/${plannedRollback.id}/actions/rollback`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "rollback-key-success" },
+    body: JSON.stringify({ expectedVersion: 2, reason: "operator rollback request" }),
+  });
+  assert.equal(rollbackSuccess.status, 200);
+  const rollbackBody = JSON.parse(rollbackSuccess.body) as { migrationId: string; state: string; migrationVersion: number; replayed?: boolean };
+  assert.equal(rollbackBody.migrationId, plannedRollback.id);
+  assert.equal(rollbackBody.state, "rolled_back");
+  assert.equal(rollbackBody.migrationVersion, 3);
+
+  // Idempotent replay of rollback -> 200 with replayed: true
+  const rollbackReplay = await call(handler, `/api/security-migrations/${plannedRollback.id}/actions/rollback`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "rollback-key-success" },
+    body: JSON.stringify({ expectedVersion: 2, reason: "operator rollback request" }),
+  });
+  assert.equal(rollbackReplay.status, 200);
+  const replayRollbackBody = JSON.parse(rollbackReplay.body) as { migrationId: string; state: string; migrationVersion: number; replayed?: boolean };
+  assert.equal(replayRollbackBody.migrationId, plannedRollback.id);
+  assert.equal(replayRollbackBody.state, "rolled_back");
+  assert.equal(replayRollbackBody.migrationVersion, 3);
+  assert.equal(replayRollbackBody.replayed, true);
 });
 
 function createTestProductApi(options: Omit<ProductApiOptions, "persistence" | "assetContent">) {

@@ -1,6 +1,6 @@
 import type { Asset, AssetBinding } from "../../../domain/src/assets.ts";
 import type { BackgroundJob, DomainEvent, OutboxMessage } from "../../../domain/src/events.ts";
-import type { ExternalBinding } from "../../../domain/src/external-reference.ts";
+import type { ExternalBinding, ExternalReference } from "../../../domain/src/external-reference.ts";
 import type { PrincipalId, TenantId } from "../../../domain/src/identity.ts";
 import type { ExternalIdentityMapping, Principal } from "../../../domain/src/identity.ts";
 import type { IntegrationOperation, IntegrationStepAttempt } from "../../../domain/src/integration-operations.ts";
@@ -8,8 +8,9 @@ import type { ProjectNode } from "../../../domain/src/project-structure.ts";
 import type { OutboundProjectionFence } from "../../../domain/src/outbound-projection-fence.ts";
 import type { ProjectMembership, ProjectMembershipSecurityAuditEntry } from "../../../domain/src/project-access.ts";
 import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
-import type { SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
+import type { SecurityDomainMigration, SecurityMigrationAuditEntry } from "../../../domain/src/security-migration.ts";
 import type { SecurityDomain, SecurityGrant, SecurityGrantAuditEntry } from "../../../domain/src/security-access.ts";
+import type { SecurityMigrationReadinessEvidence } from "./integrations.ts";
 
 export type CommandScope = Readonly<{
   principalId: PrincipalId;
@@ -37,6 +38,7 @@ export interface ProjectNodeRepository {
     expectedVersion: number,
   ): Promise<ProjectNode>;
   migrateSecurityOwnership(migrationId: string, nodeId: string, expectedVersion: number): Promise<ProjectNode>;
+  rollbackSecurityOwnership(migrationId: string, nodeId: string, expectedVersion: number): Promise<ProjectNode>;
 }
 
 export interface CommandReceiptRepository {
@@ -52,6 +54,7 @@ export interface TaskRepository {
   insert(task: ProductTask): Promise<void>;
   savePreservingSecurityOwnership(taskId: string, task: ProductTask, expectedVersion: number): Promise<void>;
   migrateSecurityOwnership(migrationId: string, taskId: string, expectedVersion: number): Promise<ProductTask>;
+  rollbackSecurityOwnership(migrationId: string, taskId: string, expectedVersion: number): Promise<ProductTask>;
   appendReviewAction(action: TaskReviewActionRecord): Promise<void>;
   listReviewActions(taskId: string): Promise<TaskReviewActionRecord[]>;
 }
@@ -64,6 +67,7 @@ export interface AssetRepository {
   insert(asset: Asset): Promise<void>;
   savePreservingSecurityOwnership(assetId: string, asset: Asset, expectedVersion: number): Promise<void>;
   migrateSecurityOwnership(migrationId: string, assetId: string, expectedVersion: number): Promise<Asset>;
+  rollbackSecurityOwnership(migrationId: string, assetId: string, expectedVersion: number): Promise<Asset>;
   insertBinding(binding: AssetBinding): Promise<void>;
   listBindings(targetType: AssetBinding["targetType"], targetId: string): Promise<AssetBinding[]>;
 }
@@ -144,6 +148,115 @@ export interface SecurityGrantAuditRepository {
   listByDomain(securityDomainId: string): Promise<SecurityGrantAuditEntry[]>;
 }
 
+export type SecurityMigrationManifestItem = Readonly<{
+  kind: "node" | "task" | "asset";
+  id: string;
+  ownerNodeId: string;
+  version: number;
+  securityDomainId: string | null;
+  securityEpoch: number;
+  externalReference?: ExternalReference | null | undefined;
+  bindingVersion?: number | undefined;
+  desiredVersion?: number | undefined;
+  observedVersion?: number | null | undefined;
+  syncState?: string | undefined;
+  syncWatermark?: string | null | undefined;
+  externalAttachmentReference?: ExternalReference | null | undefined;
+  attachmentBindingVersion?: number | undefined;
+  attachmentDesiredVersion?: number | undefined;
+  attachmentObservedVersion?: number | null | undefined;
+  attachmentSyncState?: string | undefined;
+  attachmentSyncWatermark?: string | null | undefined;
+  externalBlobReference?: ExternalReference | null | undefined;
+  blobBindingVersion?: number | undefined;
+  blobDesiredVersion?: number | undefined;
+  blobObservedVersion?: number | null | undefined;
+  blobSyncState?: string | undefined;
+  blobSyncWatermark?: string | null | undefined;
+  externalIssueId?: string | null | undefined;
+}>;
+
+export type SecurityMigrationManifestSnapshot = Readonly<{
+  tenantId: TenantId;
+  migrationId: string;
+  projectId?: string | undefined;
+  sourceSecurityDomainId?: string | null | undefined;
+  targetSecurityDomainId?: string | null | undefined;
+  sourceSecurityEpoch?: number | undefined;
+  targetSecurityEpoch?: number | undefined;
+  manifestDigest: string;
+  itemCount: number;
+  items: readonly SecurityMigrationManifestItem[];
+  createdAtUtc: string;
+}>;
+
+export type SecurityMigrationReadinessEvidenceStatus = "issued" | "verified" | "consumed";
+
+export type SecurityMigrationReadinessEvidenceRecord = Readonly<{
+  tenantId: TenantId;
+  evidenceId: string;
+  nonce: string;
+  migrationId: string;
+  purpose: "commit" | "rollback";
+  projectId: string;
+  sourceSecurityDomainId: string | null;
+  targetSecurityDomainId: string | null;
+  sourceSecurityEpoch: number;
+  targetSecurityEpoch: number;
+  manifestDigest: string;
+  itemCount: number;
+  provider: string | null;
+  status: SecurityMigrationReadinessEvidenceStatus;
+  converged: boolean;
+  issuedAtUtc: string;
+  verifiedAtUtc: string | null;
+  expiresAtUtc: string;
+  consumedAtUtc: string | null;
+  channels: Readonly<{
+    issue: "converged" | "not_converged";
+    attachment: "converged" | "not_converged";
+    blob: "converged" | "not_converged";
+  }> | null;
+  reason?: string | null | undefined;
+}>;
+
+export type CommitWithReadinessEvidenceParams = Readonly<{
+  migrationId: string;
+  expectedVersion: number;
+  evidenceId: string;
+  actorPrincipalId: PrincipalId;
+  occurredAtUtc: string;
+  reason?: string | undefined;
+  idempotencyKey?: string | undefined;
+}>;
+
+export type RollbackWithAuditParams = Readonly<{
+  migrationId: string;
+  expectedVersion: number;
+  evidenceId?: string | undefined;
+  actorPrincipalId: PrincipalId;
+  reason: string;
+  occurredAtUtc: string;
+  idempotencyKey?: string | undefined;
+}>;
+
+export type CommitSecurityMigrationResult = Readonly<{
+  migrationId: string;
+  state: "committed";
+  migrationVersion: number;
+  occurredAtUtc?: string | undefined;
+  replayed?: boolean | undefined;
+}>;
+
+export type RollbackSecurityMigrationResult = Readonly<{
+  migrationId: string;
+  state: "rolled_back" | "recovery_required";
+  migrationVersion: number;
+  rolledBackItems?: number | undefined;
+  occurredAtUtc?: string | undefined;
+  replayed?: boolean | undefined;
+}>;
+
 export interface SecurityDomainMigrationRepository {
   get(migrationId: string): Promise<SecurityDomainMigration | undefined>;
   insert(migration: SecurityDomainMigration): Promise<void>;
@@ -152,7 +265,21 @@ export interface SecurityDomainMigrationRepository {
     migration: SecurityDomainMigration,
     expectedVersion: number,
   ): Promise<void>;
+  saveManifestSnapshot(snapshot: SecurityMigrationManifestSnapshot): Promise<void>;
+  getManifestSnapshot(migrationId: string): Promise<SecurityMigrationManifestSnapshot | undefined>;
+  getReadinessEvidence(evidenceId: string): Promise<SecurityMigrationReadinessEvidenceRecord | undefined>;
+  commitWithReadinessEvidence(
+    params: CommitWithReadinessEvidenceParams,
+  ): Promise<CommitSecurityMigrationResult>;
+  rollbackWithAudit(
+    params: RollbackWithAuditParams,
+  ): Promise<RollbackSecurityMigrationResult>;
   listRecoverable(): Promise<SecurityDomainMigration[]>;
+}
+
+export interface SecurityMigrationAuditRepository {
+  append(entry: SecurityMigrationAuditEntry): Promise<void>;
+  listByMigration(migrationId: string): Promise<SecurityMigrationAuditEntry[]>;
 }
 
 export interface ProjectSequenceRepository {
@@ -189,6 +316,7 @@ export type TransactionContext = Readonly<{
   securityGrants: SecurityGrantRepository;
   securityGrantAudits: SecurityGrantAuditRepository;
   securityMigrations: SecurityDomainMigrationRepository;
+  securityMigrationAudits: SecurityMigrationAuditRepository;
   receipts: CommandReceiptRepository;
   sequences: ProjectSequenceRepository;
   events: DomainEventWriter;
@@ -197,6 +325,7 @@ export type TransactionContext = Readonly<{
 }>;
 
 export interface Persistence {
+  nowUtc(): string;
   transaction<T>(tenantId: TenantId, work: (transaction: TransactionContext) => Promise<T>): Promise<T>;
   read<T>(tenantId: TenantId, work: (transaction: TransactionContext) => Promise<T>): Promise<T>;
   close(): Promise<void>;

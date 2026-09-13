@@ -11,11 +11,14 @@ import type {
   TaskFileProjectionRecord,
   TaskProjectionPort,
   TaskProjectionRecord,
+  EpochReadinessScope,
+  ExternalCollaborationEpochReadinessPort,
+  SecurityMigrationReadinessEvidence,
 } from "../../application/src/ports/integrations.ts";
 import { IntegrationCallError } from "../../application/src/ports/integrations.ts";
 import { externalReference, type ExternalReference } from "../../domain/src/external-reference.ts";
 
-const HULY_IDS = {
+export const HULY_IDS = {
   issueClass: "tracker:class:Issue",
   projectClass: "tracker:class:Project",
   taskTypeClass: "task:class:TaskType",
@@ -113,10 +116,17 @@ class HulyRestConnection {
   }
 
   async blobExists(blobId: string): Promise<boolean> {
-    const response = await this.fetchResponse(this.fileUrl(blobId), { method: "HEAD", headers: this.authHeaders(false) }, true);
-    if (response.status === 404) return false;
-    if (!response.ok) throw new Error(`HULY_FILE_HEAD_FAILED:${response.status}`);
-    return true;
+    try {
+      const response = await this.fetchResponse(
+        this.fileUrl(blobId),
+        { method: "HEAD", headers: this.authHeaders(false), redirect: "error" },
+        true,
+      );
+      if (response.status !== 200) return false;
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async removeBlob(blobId: string): Promise<void> {
@@ -492,6 +502,211 @@ export class HulyRestTaskFileProjectionAdapter implements TaskFileProjectionPort
       contentType: attachment.type,
       size: attachment.size,
       syncWatermark: String(attachment.modifiedOn ?? "0"),
+    };
+  }
+}
+
+export class HulyRestCollaborationEpochReadinessAdapter implements ExternalCollaborationEpochReadinessPort {
+  readonly #connection: HulyRestConnection;
+  readonly #now: () => Date;
+
+  constructor(config: HulyRestConfig, now?: () => Date) {
+    this.#connection = new HulyRestConnection(config);
+    this.#now = now ?? (() => new Date());
+  }
+
+  async checkEpochReadiness(scope: EpochReadinessScope): Promise<SecurityMigrationReadinessEvidence> {
+    const verifiedAtUtc = this.#now().toISOString();
+    let issueConverged = true;
+    let attachmentConverged = true;
+    let blobConverged = true;
+    let failureReason: string | undefined;
+
+    try {
+      for (const task of scope.tasks) {
+        if (task.externalReference === null) {
+          issueConverged = false;
+          failureReason = `Null external reference for task: ${task.taskId}`;
+          break;
+        }
+        if (
+          task.externalReference.provider !== "huly"
+          || task.externalReference.kind !== "task"
+          || typeof task.externalReference.externalId !== "string"
+          || task.externalReference.externalId.trim().length === 0
+        ) {
+          issueConverged = false;
+          failureReason = `Invalid external reference on task ${task.taskId}: provider=${task.externalReference.provider}, kind=${task.externalReference.kind}`;
+          break;
+        }
+        const issue = await this.#connection.findOne(HULY_IDS.issueClass, { _id: task.externalReference.externalId });
+        if (issue === undefined) {
+          issueConverged = false;
+          failureReason = `Huly issue not found: ${task.externalReference.externalId}`;
+          break;
+        }
+        if (issue._class !== HULY_IDS.issueClass) {
+          issueConverged = false;
+          failureReason = `Huly issue class mismatch for task ${task.taskId}: expected ${HULY_IDS.issueClass}, got ${String(issue._class)}`;
+          break;
+        }
+        if (issue._id !== task.externalReference.externalId) {
+          issueConverged = false;
+          failureReason = `Huly issue ID mismatch for task ${task.taskId}: expected ${task.externalReference.externalId}, got ${String(issue._id)}`;
+          break;
+        }
+        if (typeof issue.space !== "string" || issue.space.trim().length === 0 || issue.space !== this.#connection.config.projectId) {
+          issueConverged = false;
+          failureReason = `Huly issue space mismatch for task ${task.taskId}: expected ${this.#connection.config.projectId}, got ${String(issue.space)}`;
+          break;
+        }
+
+        const issueEpoch = (issue as Record<string, unknown>).securityEpoch;
+        if (typeof issueEpoch === "number" && issueEpoch !== scope.targetSecurityEpoch) {
+          issueConverged = false;
+          failureReason = `Huly issue epoch mismatch for task ${task.taskId}: expected ${scope.targetSecurityEpoch}, got ${String(issueEpoch)}`;
+          break;
+        }
+      }
+
+      if (failureReason === undefined) {
+        for (const asset of scope.assets) {
+          if (asset.externalAttachmentReference === null) {
+            attachmentConverged = false;
+            failureReason = `Null external attachment reference for asset: ${asset.assetId}`;
+            break;
+          }
+          if (
+            asset.externalAttachmentReference.provider !== "huly"
+            || asset.externalAttachmentReference.kind !== "attachment"
+            || typeof asset.externalAttachmentReference.externalId !== "string"
+            || asset.externalAttachmentReference.externalId.trim().length === 0
+          ) {
+            attachmentConverged = false;
+            failureReason = `Invalid external attachment reference on asset ${asset.assetId}: provider=${asset.externalAttachmentReference.provider}, kind=${asset.externalAttachmentReference.kind}`;
+            break;
+          }
+          const attachment = await this.#connection.findOne(HULY_IDS.attachmentClass, { _id: asset.externalAttachmentReference.externalId });
+          if (attachment === undefined) {
+            attachmentConverged = false;
+            failureReason = `Huly attachment not found: ${asset.externalAttachmentReference.externalId}`;
+            break;
+          }
+          if (attachment._class !== HULY_IDS.attachmentClass) {
+            attachmentConverged = false;
+            failureReason = `Huly attachment class mismatch for asset ${asset.assetId}: expected ${HULY_IDS.attachmentClass}, got ${String(attachment._class)}`;
+            break;
+          }
+          if (attachment._id !== asset.externalAttachmentReference.externalId) {
+            attachmentConverged = false;
+            failureReason = `Huly attachment ID mismatch for asset ${asset.assetId}: expected ${asset.externalAttachmentReference.externalId}, got ${String(attachment._id)}`;
+            break;
+          }
+          if (typeof attachment.space !== "string" || attachment.space.trim().length === 0 || attachment.space !== this.#connection.config.projectId) {
+            attachmentConverged = false;
+            failureReason = `Huly attachment space mismatch for asset ${asset.assetId}: expected ${this.#connection.config.projectId}, got ${String(attachment.space)}`;
+            break;
+          }
+          if (typeof asset.externalIssueId === "string" && asset.externalIssueId.trim().length > 0) {
+            const attachedTo = (attachment as Record<string, unknown>).attachedTo;
+            if (typeof attachedTo !== "string" || attachedTo !== asset.externalIssueId) {
+              attachmentConverged = false;
+              failureReason = `Huly attachment attachedTo mismatch for asset ${asset.assetId}: expected ${asset.externalIssueId}, got ${String(attachedTo)}`;
+              break;
+            }
+          }
+
+          if (asset.externalBlobReference === null) {
+            blobConverged = false;
+            failureReason = `Null external blob reference for asset: ${asset.assetId}`;
+            break;
+          }
+          if (
+            asset.externalBlobReference.provider !== "huly"
+            || asset.externalBlobReference.kind !== "blob"
+            || typeof asset.externalBlobReference.externalId !== "string"
+            || asset.externalBlobReference.externalId.trim().length === 0
+          ) {
+            blobConverged = false;
+            failureReason = `Invalid external blob reference on asset ${asset.assetId}: provider=${asset.externalBlobReference.provider}, kind=${asset.externalBlobReference.kind}`;
+            break;
+          }
+
+          const blobId = asset.externalBlobReference.externalId;
+          const attachmentFile = (attachment as Record<string, unknown>).file
+            ?? ((attachment as Record<string, unknown>).attributes as Record<string, unknown> | undefined)?.file;
+          if (typeof attachmentFile !== "string" || attachmentFile !== blobId) {
+            attachmentConverged = false;
+            failureReason = `Huly attachment file mismatch for asset ${asset.assetId}: expected ${blobId}, got ${String(attachmentFile)}`;
+            break;
+          }
+
+          const blobExists = await this.#connection.blobExists(blobId);
+          if (!blobExists) {
+            blobConverged = false;
+            failureReason = `Huly blob not found: ${blobId}`;
+            break;
+          }
+        }
+      }
+
+      if (failureReason === undefined) {
+        issueConverged = false;
+        failureReason = "HULY_EPOCH_CONVERGENCE_UNSUPPORTED: Current Huly REST API does not observe migration securityEpoch or domain ACL; external convergence cannot be verified";
+      }
+    } catch (error) {
+      return {
+        evidenceId: scope.evidenceId,
+        nonce: scope.nonce,
+        tenantId: scope.tenantId,
+        migrationId: scope.migrationId,
+        purpose: scope.purpose,
+        projectId: scope.projectId,
+        manifestDigest: scope.manifestDigest,
+        sourceSecurityDomainId: scope.sourceSecurityDomainId,
+        targetSecurityDomainId: scope.targetSecurityDomainId,
+        sourceSecurityEpoch: scope.sourceSecurityEpoch,
+        targetSecurityEpoch: scope.targetSecurityEpoch,
+        provider: "huly",
+        converged: false,
+        channels: {
+          issue: "not_converged",
+          attachment: "not_converged",
+          blob: "not_converged",
+        },
+        verifiedAtUtc,
+        expiresAtUtc: scope.expiresAtUtc,
+        consumedAtUtc: null,
+        itemCount: scope.itemCount,
+        reason: errorMessage(error),
+      };
+    }
+
+    const converged = issueConverged && attachmentConverged && blobConverged;
+    return {
+      evidenceId: scope.evidenceId,
+      nonce: scope.nonce,
+      tenantId: scope.tenantId,
+      migrationId: scope.migrationId,
+      purpose: scope.purpose,
+      projectId: scope.projectId,
+      manifestDigest: scope.manifestDigest,
+      sourceSecurityDomainId: scope.sourceSecurityDomainId,
+      targetSecurityDomainId: scope.targetSecurityDomainId,
+      sourceSecurityEpoch: scope.sourceSecurityEpoch,
+      targetSecurityEpoch: scope.targetSecurityEpoch,
+      provider: "huly",
+      converged,
+      channels: {
+        issue: issueConverged ? "converged" : "not_converged",
+        attachment: attachmentConverged ? "converged" : "not_converged",
+        blob: blobConverged ? "converged" : "not_converged",
+      },
+      verifiedAtUtc,
+      expiresAtUtc: scope.expiresAtUtc,
+      consumedAtUtc: null,
+      itemCount: scope.itemCount,
+      ...(failureReason !== undefined ? { reason: failureReason } : {}),
     };
   }
 }

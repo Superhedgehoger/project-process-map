@@ -12,7 +12,8 @@ import {
   HulyRestTaskProjectionAdapter,
   type HulyRestConfig,
 } from "../../../packages/adapters/src/huly-rest.ts";
-import { SqlitePersistence } from "../../../packages/adapters/src/sqlite/persistence.ts";
+import { createProductionSqliteBundle } from "../../../packages/adapters/src/sqlite/production-bundle.ts";
+import type { VerifyMigrationReadiness } from "../../../packages/application/src/security/security-migration-coordinator.ts";
 import type { BackgroundJob } from "../../../packages/domain/src/events.ts";
 import { tenantId } from "../../../packages/domain/src/identity.ts";
 import { principalId } from "../../../packages/domain/src/identity.ts";
@@ -29,20 +30,28 @@ export type ProductApiRuntime = {
 export type ProductApiDependencies = Readonly<{
   persistence: Persistence;
   assetContent: AssetContentPort;
+  verifyMigrationReadiness?: VerifyMigrationReadiness | undefined;
 }>;
 
 export type NativeProductApiDependencies = Readonly<{
   persistence: Persistence & { readonly outboxConsumer: OutboxConsumer; readonly jobConsumer: JobConsumer };
   assetContent: AssetContentPort;
+  verifyMigrationReadiness?: VerifyMigrationReadiness | undefined;
 }>;
 
 export function createNativeDependencies(environment: NodeJS.ProcessEnv = process.env): NativeProductApiDependencies {
   const dataDirectory = resolve(environment.PROJECT_DATA_DIR?.trim() || "data");
   const databasePath = resolve(environment.DATABASE_PATH?.trim() || resolve(dataDirectory, "project-process-map.sqlite"));
   const assetDirectory = resolve(environment.ASSET_CONTENT_DIR?.trim() || resolve(dataDirectory, "assets"));
+  const workerConfig = hulyWorkerConfig(environment);
+  const bundle = createProductionSqliteBundle({
+    databasePath,
+    hulyConfig: workerConfig,
+  });
   return {
-    persistence: new SqlitePersistence({ path: databasePath }),
+    persistence: bundle.persistence,
     assetContent: new FilesystemAssetContent(assetDirectory),
+    verifyMigrationReadiness: bundle.verifyMigrationReadiness,
   };
 }
 
@@ -72,13 +81,19 @@ export async function startProductApiServer(
   if (!isLoopbackHost(host)) throw new Error("PUBLIC_BIND_REQUIRES_P0_07");
   const runtimeDependencies = dependencies ?? createNativeDependencies(environment);
   const identityVerifier = hulyIdentityVerifier(environment);
+  const workerConfig = hulyWorkerConfig(environment);
+  const verifyMigrationReadiness = runtimeDependencies.verifyMigrationReadiness
+    ?? (("verifyMigrationReadiness" in runtimeDependencies.persistence)
+      ? (runtimeDependencies.persistence as any).verifyMigrationReadiness
+      : undefined);
   const options: ProductApiOptions = {
     collaborationMode: configuredCollaborationMode(environment),
     persistence: runtimeDependencies.persistence,
     assetContent: runtimeDependencies.assetContent,
     tenantId: tenantId(environment.PRODUCT_TENANT_ID?.trim() || "phase0-tenant"),
     ...(identityVerifier === undefined ? {} : { externalIdentityVerifier: identityVerifier }),
-    collaborationProjectionConfigured: hulyWorkerConfig(environment) !== undefined,
+    collaborationProjectionConfigured: workerConfig !== undefined,
+    ...(verifyMigrationReadiness === undefined ? {} : { verifyMigrationReadiness }),
     ...(environment.PRODUCT_UI_ORIGIN === undefined ? {} : { allowedOrigin: environment.PRODUCT_UI_ORIGIN }),
     recoveryOperatorPrincipalIds: (environment.RECOVERY_OPERATOR_PRINCIPAL_IDS ?? "")
       .split(",")
