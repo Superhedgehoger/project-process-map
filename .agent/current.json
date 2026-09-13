@@ -1,0 +1,15 @@
+{
+  "goal": "持续完成 project-process-map Phase 0 Backlog",
+  "gate": "P0-07 敏感 ACL",
+  "task": "P0-07/TC-SEC-004A",
+  "status": "TASK_PACKET_READY",
+  "risk": "R2",
+  "worker": "Antigravity/Gemini 3.8 Flash High",
+  "branch": "main",
+  "commit": "6305b78a998196e4f07fca6a1ed64462dce2d463",
+  "tests": [],
+  "evidence": [
+    "docs/agent-tasks/P0-07-TC-SEC-004A.md"
+  ],
+  "next_action": "在新的 Antigravity 实现 Conversation 中执行 TC-SEC-004A；完成 Mechanical Gate 后进行 R2 Codex 短上下文独立 Review。"
+}

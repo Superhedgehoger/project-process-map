@@ -1,0 +1,14 @@
+{
+  "gate": "P0-07 敏感 ACL",
+  "task": "P0-07/TC-SEC-004A",
+  "status": "TASK_PACKET_READY",
+  "risk": "R2",
+  "worker": "Antigravity/Gemini 3.8 Flash High",
+  "branch": "main",
+  "commit": "6305b78a998196e4f07fca6a1ed64462dce2d463",
+  "tests": [],
+  "evidence": [
+    "docs/agent-tasks/P0-07-TC-SEC-004A.md"
+  ],
+  "next_action": "实现 ProjectNode Node Owner/U2 领域模型、敏感域权限交集、404 隐蔽矩阵和 SQLite v10 升级；不得实现 U7/U8 或 P0-05A-T1b。"
+}
