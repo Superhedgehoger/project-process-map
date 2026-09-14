@@ -39,16 +39,26 @@
 8. **事件与审计最小信封**：
    - 节点负责人指定/变更形成事件，不得在事件 payload 夹带非公开敏感信息或越权突破安全域信封。
 
-## 允许修改的文件
+## 允许修改与新建的文件
 
 - `packages/domain/src/project-structure.ts`（`ProjectNode` 增加 `leaderPrincipalId` 字段与守卫辅助函数）
-- `packages/application/src/ports/persistence.ts`（节点仓库契约支持 `leaderPrincipalId`）
-- `packages/application/src/create-node.ts`（创建节点时支持并校验 `leaderPrincipalId`）
-- `packages/application/src/access/project-security.ts`（增加/加固针对 Node Owner 的权限交集判定）
-- `packages/adapters/src/memory/persistence.ts`（MemoryPersistence 支持 `leaderPrincipalId`）
-- `packages/adapters/src/sqlite/persistence.ts`（SQLite schema 升级至 v10，row/JSON 映射与 CAS 支持 `leaderPrincipalId`）
-- `tests/` 下直接相关的单元/集成测试（如 `tests/node-owner.test.ts`，或扩充 `tests/product-api.test.ts`、`tests/persistence.test.ts`）
-- 状态与检查点文档：`docs/phase0-status.md`、`docs/handoff/GOAL-CHECKPOINT.md`、`docs/reports/P0-07-TC-SEC-004A-node-owner-guard.md`
+- `packages/domain/src/event-schema-registry.ts`（ADR-008 事件 Schema 注册中心、校验及敏感字段防泄漏）
+- `packages/contracts/src/project-process-map-api.ts`（API 合约契约支持 `leaderPrincipalId`）
+- `packages/application/src/ports/persistence.ts`（节点仓库契约支持 `leaderPrincipalId` 与 `NodeLeaderMutationRepository` 窄仓储契约）
+- `packages/adapters/src/sqlite/production-bundle.ts`（生产 SQLite 组装根暴露受保护的 `NodeLeaderMutationRepository`）
+- `packages/application/src/errors.ts`（增加 `INVALID_NODE_LEADER` 等应用错误码）
+- `packages/application/src/create-node.ts`（创建节点与负责人变更，原子事件/Outbox，防重放与故障注入点）
+- `packages/application/src/access/project-security.ts`（加固 Node Owner 权限交集判定及迁移判定）
+- `packages/application/src/tasks/act-on-task.ts`（重载权威属主节点，软删除/陈旧一致性守卫与 404 隐蔽）
+- `packages/application/src/assets/attach-task-asset.ts`（重载权威属主节点，软删除/陈旧一致性守卫与 404 隐蔽）
+- `apps/product-api/src/routes/project.ts`（生产 HTTP 路由加固 U1/U2 职责与 404 隐蔽，assign-leader 端点）
+- `apps/product-api/src/app.ts`（错误码映射与 HTTP 状态码）
+- `packages/adapters/src/memory/persistence.ts`（MemoryPersistence 支持 `leaderPrincipalId`、capability 校验与 ADR-008 边界校验）
+- `packages/adapters/src/sqlite/persistence.ts`（SQLite schema 升级至 v10，BEGIN IMMEDIATE 事务串行化，capability 校验与 ADR-008 边界校验）
+- `tests/fixtures/node-events-v1.json`（ADR-008 静态事件契约 fixture）
+- `tests/node-owner.test.ts`（TC-SEC-004A 全量测试矩阵与 review findings 回归测试）
+- 测试适配及断言加固：`tests/security-*.test.ts`、`tests/collaboration-projection.test.ts`、`tests/task-upgrade-compatibility.test.ts`
+- 状态与检查点文档：`.agent/tasks/P0-07-TC-SEC-004A.json`、`docs/phase0-status.md`、`docs/handoff/GOAL-CHECKPOINT.md`、`docs/reports/P0-07-TC-SEC-004A-node-owner-guard.md`
 
 ## 禁止修改的文件
 
@@ -98,4 +108,6 @@
 
 ## next_action
 
-- 提交本 Task Packet 经审阅确认后，在干净的工作树和独立上下文中启动 P0-07 / TC-SEC-004A 的具体编码与测试实现。
+- 状态：ACCEPTED / DONE（Codex R2 Cycle 6 Final Verdict: PASS）。
+- next_action：选择下一个 Ready Task（TC-SEC-004B 模板角色槽位与项目角色绑定 / P0-05A-T1b 任务验收人三级解析），在全新独立短工时会话中启动实施。
+- 架构事实说明：生产 Huly 协同收敛保持 fail-closed（超出本切片范围，由既有架构守卫妥善隔离）。

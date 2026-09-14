@@ -45,6 +45,7 @@ function node(id: string, parentId: string | null, overrides: Partial<ProjectNod
     id,
     projectId,
     parentId,
+    leaderPrincipalId: null,
     title: id,
     kind: "work_package",
     securityDomainId: sourceDomainId,

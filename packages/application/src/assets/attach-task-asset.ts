@@ -363,6 +363,11 @@ async function requiredAsset(transaction: TransactionContext, assetId: string): 
 async function authorizedTask(transaction: TransactionContext, command: AttachTaskAssetCommand, authorizationAtUtc: string) {
   const task = await transaction.tasks.get(command.taskId);
   if (task === undefined || task.deletedAtUtc !== null) throw new Error("TASK_NOT_FOUND");
+  const ownerNode = await transaction.nodes.get(task.ownerNodeId);
+  if (ownerNode === undefined || ownerNode.deletedAtUtc !== null) throw new Error("TASK_NOT_FOUND");
+  if (ownerNode.projectId !== task.projectId || ownerNode.securityDomainId !== task.securityDomainId || ownerNode.securityEpoch !== task.securityEpoch) {
+    throw new Error("TASK_NOT_FOUND");
+  }
   const membership = await transaction.memberships.get(task.projectId, command.principalId);
   if (!await canAccessProjectObjectDuringMigration(
     transaction, membership, command.principalId, {

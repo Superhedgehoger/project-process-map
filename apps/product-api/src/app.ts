@@ -4,7 +4,15 @@ import { ApplicationError, asApplicationError } from "../../../packages/applicat
 import { resolveExternalIdentity } from "../../../packages/application/src/identity/resolve-external-identity.ts";
 import { IntegrationRecoveryService } from "../../../packages/application/src/integrations/recover-integration.ts";
 import type { AssetContentPort, ExternalIdentityVerifier } from "../../../packages/application/src/ports/integrations.ts";
-import type { Persistence } from "../../../packages/application/src/ports/persistence.ts";
+import type {
+  AssignNodeLeaderCommand,
+  AssignNodeLeaderFailurePoint,
+  AssignNodeLeaderResult,
+  CreateNodeCommand,
+  CreateNodeFailurePoint,
+  CreateNodeResult,
+  Persistence,
+} from "../../../packages/application/src/ports/persistence.ts";
 import type { VerifyMigrationReadiness } from "../../../packages/application/src/security/security-migration-coordinator.ts";
 import { principalId, tenantId, type PrincipalId, type TenantId } from "../../../packages/domain/src/identity.ts";
 import type { ProjectNode } from "../../../packages/domain/src/project-structure.ts";
@@ -17,6 +25,8 @@ import { productWebHtml } from "./web.ts";
 export type ProductApiOptions = {
   collaborationMode: "disabled" | "huly";
   persistence: Persistence;
+  createNode?: ((command: CreateNodeCommand, failurePoint?: CreateNodeFailurePoint) => Promise<CreateNodeResult>) | undefined;
+  assignNodeLeader?: ((command: AssignNodeLeaderCommand, failurePoint?: AssignNodeLeaderFailurePoint) => Promise<AssignNodeLeaderResult>) | undefined;
   assetContent: AssetContentPort;
   tenantId?: TenantId;
   externalIdentityVerifier?: ExternalIdentityVerifier | undefined;
@@ -62,6 +72,8 @@ export function createProductApi(options: ProductApiOptions) {
       if (await routeRecoveryRequest(request, response, url, identity, recovery)) return;
       if (await routeProjectRequest(request, response, url, identity, {
         persistence,
+        createNode: options.createNode,
+        assignNodeLeader: options.assignNodeLeader,
         assetContent,
         scheduleCollaborationProjection: collaborationConfigured,
         verifyMigrationReadiness: options.verifyMigrationReadiness,
@@ -74,7 +86,10 @@ export function createProductApi(options: ProductApiOptions) {
   };
 }
 
-export async function seedPhase0Nodes(persistence: Persistence, productTenantId: TenantId): Promise<void> {
+export async function seedPhase0Nodes(
+  persistence: Persistence,
+  productTenantId: TenantId,
+): Promise<void> {
   const seededAtUtc = "2026-09-03T00:00:00.000Z";
   await persistence.transaction(productTenantId, async (transaction) => {
     for (const id of [principalId("phase0-system"), principalId("phase0-user")]) {
@@ -168,6 +183,9 @@ function httpStatus(error: ApplicationError): number {
     FORBIDDEN: 403,
     NOT_FOUND: 404,
     NODE_NOT_FOUND: 404,
+    PARENT_NODE_NOT_FOUND: 404,
+    INVALID_NODE_LEADER: 422,
+    NODE_LEADER_DIRECT_INSERT_FORBIDDEN: 422,
     TASK_NOT_FOUND: 404,
     INTEGRATION_OPERATION_NOT_FOUND: 404,
     TASK_ALREADY_EXISTS: 409,

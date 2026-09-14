@@ -52,6 +52,7 @@ function node(
     id,
     projectId,
     parentId,
+    leaderPrincipalId: null,
     title: id,
     kind: "work_package",
     securityDomainId,

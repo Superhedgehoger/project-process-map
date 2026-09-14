@@ -253,6 +253,7 @@ async function insertTargetDomain(
     id: rootNodeId,
     projectId,
     parentId: null,
+    leaderPrincipalId: null,
     title: "target root",
     kind: "work_package",
     securityDomainId: domainId,
@@ -780,6 +781,7 @@ test("TC-SEC-002J strengthened formal domain validation fails closed", async () 
             id: "node-1",
             projectId: "project-1",
             parentId: null,
+            leaderPrincipalId: null,
             title: "node",
             kind: "work_package",
             securityDomainId: null,
@@ -804,6 +806,7 @@ test("TC-SEC-002J strengthened formal domain validation fails closed", async () 
               id: "node-2",
               projectId: "project-1",
               parentId: "node-1",
+              leaderPrincipalId: null,
               title: "nested node",
               kind: "work_package",
               securityDomainId: "nested-domain",
@@ -831,6 +834,7 @@ test("TC-SEC-002J strengthened formal domain validation fails closed", async () 
               id: "node-deleted",
               projectId: "project-1",
               parentId: null,
+              leaderPrincipalId: null,
               title: "deleted root",
               kind: "work_package",
               securityDomainId: null,
@@ -864,6 +868,7 @@ test("TC-SEC-002J strengthened formal domain validation fails closed", async () 
           } else if (scenario === "deleted-formal-root") {
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-del-root", projectId: "project-1", parentId: null,
+              leaderPrincipalId: null,
               title: "del root", kind: "work_package", securityDomainId: "del-domain", securityEpoch: 1,
               version: 1, deletedAtUtc: now.toISOString(),
             });
@@ -877,6 +882,7 @@ test("TC-SEC-002J strengthened formal domain validation fails closed", async () 
           } else if (scenario === "cross-project-formal-root") {
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-other-proj", projectId: "project-other", parentId: null,
+              leaderPrincipalId: null,
               title: "other proj node", kind: "work_package", securityDomainId: "cross-domain", securityEpoch: 1,
               version: 1, deletedAtUtc: null,
             });
@@ -889,6 +895,7 @@ test("TC-SEC-002J strengthened formal domain validation fails closed", async () 
           } else if (scenario === "unrelated-formal-root") {
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-unrelated-root", projectId: "project-1", parentId: null,
+              leaderPrincipalId: null,
               title: "unrelated root", kind: "work_package", securityDomainId: "unrelated-domain", securityEpoch: 1,
               version: 1, deletedAtUtc: null,
             });
@@ -910,6 +917,7 @@ test("TC-SEC-002J strengthened formal domain validation fails closed", async () 
           } else if (scenario === "wrong-epoch-on-root") {
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-epoch-root", projectId: "project-1", parentId: null,
+              leaderPrincipalId: null,
               title: "epoch root", kind: "work_package", securityDomainId: "epoch-domain", securityEpoch: 3,
               version: 1, deletedAtUtc: null,
             });
@@ -924,11 +932,13 @@ test("TC-SEC-002J strengthened formal domain validation fails closed", async () 
           } else if (scenario === "corrupt-ancestor-cycle") {
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-cycle-a", projectId: "project-1", parentId: "node-cycle-b",
+              leaderPrincipalId: null,
               title: "cycle a", kind: "work_package", securityDomainId: null, securityEpoch: 1,
               version: 1, deletedAtUtc: null,
             });
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-cycle-b", projectId: "project-1", parentId: "node-cycle-a",
+              leaderPrincipalId: null,
               title: "cycle b", kind: "work_package", securityDomainId: null, securityEpoch: 1,
               version: 1, deletedAtUtc: null,
             });
@@ -936,11 +946,13 @@ test("TC-SEC-002J strengthened formal domain validation fails closed", async () 
           } else if (scenario === "corrupt-ancestor-deleted") {
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-parent-del", projectId: "project-1", parentId: null,
+              leaderPrincipalId: null,
               title: "parent del", kind: "work_package", securityDomainId: null, securityEpoch: 1,
               version: 1, deletedAtUtc: now.toISOString(),
             });
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-child-live", projectId: "project-1", parentId: "node-parent-del",
+              leaderPrincipalId: null,
               title: "child live", kind: "work_package", securityDomainId: null, securityEpoch: 1,
               version: 1, deletedAtUtc: null,
             });
@@ -948,11 +960,13 @@ test("TC-SEC-002J strengthened formal domain validation fails closed", async () 
           } else if (scenario === "corrupt-ancestor-cross-project") {
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-parent-other", projectId: "project-other", parentId: null,
+              leaderPrincipalId: null,
               title: "parent other", kind: "work_package", securityDomainId: null, securityEpoch: 1,
               version: 1, deletedAtUtc: null,
             });
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-child-proj1", projectId: "project-1", parentId: "node-parent-other",
+              leaderPrincipalId: null,
               title: "child proj1", kind: "work_package", securityDomainId: null, securityEpoch: 1,
               version: 1, deletedAtUtc: null,
             });
@@ -1031,6 +1045,7 @@ test("TC-SEC-002J intermediate formal-domain continuity fails closed for public-
         await fixture.persistence.transaction(tenant, async (transaction) => {
           await transaction.nodes.insert({
             tenantId: tenant, id: "node-root", projectId: "project-1", parentId: null,
+            leaderPrincipalId: null,
             title: "formal root", kind: "work_package", securityDomainId: "domain-formal", securityEpoch: 2,
             version: 1, deletedAtUtc: null,
           });
@@ -1039,6 +1054,7 @@ test("TC-SEC-002J intermediate formal-domain continuity fails closed for public-
           if (scenario === "other-domain-middle") {
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-other-root", projectId: "project-1", parentId: null,
+              leaderPrincipalId: null,
               title: "other root", kind: "work_package", securityDomainId: "domain-other", securityEpoch: 2,
               version: 1, deletedAtUtc: null,
             });
@@ -1060,12 +1076,14 @@ test("TC-SEC-002J intermediate formal-domain continuity fails closed for public-
 
           await transaction.nodes.insert({
             tenantId: tenant, id: "node-mid", projectId: "project-1", parentId: "node-root",
+            leaderPrincipalId: null,
             title: "middle node", kind: "work_package", securityDomainId: midDomain, securityEpoch: midEpoch,
             version: 1, deletedAtUtc: null,
           });
 
           await transaction.nodes.insert({
             tenantId: tenant, id: "node-leaf", projectId: "project-1", parentId: "node-mid",
+            leaderPrincipalId: null,
             title: "leaf node", kind: "work_package", securityDomainId: "domain-formal", securityEpoch: 2,
             version: 1, deletedAtUtc: null,
           });
@@ -1169,7 +1187,20 @@ test("TC-SEC-002J cross-project retryable operation does not block disjoint proj
       await fixture.persistence.transaction(tenant, async (transaction) => {
         await transaction.nodes.insert({
           tenantId: tenant, id: "node-A", projectId: "project-A", parentId: null,
+          leaderPrincipalId: null,
           title: "node A", kind: "work_package", securityDomainId: null, securityEpoch: 1,
+          version: 1, deletedAtUtc: null,
+        });
+        await transaction.nodes.insert({
+          tenantId: tenant, id: "node-A2", projectId: "project-A", parentId: null,
+          leaderPrincipalId: null,
+          title: "node A2", kind: "work_package", securityDomainId: null, securityEpoch: 1,
+          version: 1, deletedAtUtc: null,
+        });
+        await transaction.nodes.insert({
+          tenantId: tenant, id: "node-A3", projectId: "project-A", parentId: null,
+          leaderPrincipalId: null,
+          title: "node A3", kind: "work_package", securityDomainId: null, securityEpoch: 1,
           version: 1, deletedAtUtc: null,
         });
         await insertDomain(transaction, "domain-A-target", "node-A", "project-A");
@@ -1184,6 +1215,7 @@ test("TC-SEC-002J cross-project retryable operation does not block disjoint proj
       await fixture.persistence.transaction(tenant, async (transaction) => {
         await transaction.nodes.insert({
           tenantId: tenant, id: "node-B", projectId: "project-B", parentId: null,
+          leaderPrincipalId: null,
           title: "node B", kind: "work_package", securityDomainId: null, securityEpoch: 1,
           version: 1, deletedAtUtc: null,
         });
@@ -1256,11 +1288,6 @@ test("TC-SEC-002J cross-project retryable operation does not block disjoint proj
 
       // Setup another planned migration in Project A
       await fixture.persistence.transaction(tenant, async (transaction) => {
-        await transaction.nodes.insert({
-          tenantId: tenant, id: "node-A2", projectId: "project-A", parentId: null,
-          title: "node A2", kind: "work_package", securityDomainId: null, securityEpoch: 1,
-          version: 1, deletedAtUtc: null,
-        });
         await insertDomain(transaction, "domain-A2-target", "node-A2", "project-A");
         const plannedA2 = {
           ...migrationPlan("migration-A2", "node-A2", null, "domain-A2-target", 1, 2),
@@ -1293,11 +1320,6 @@ test("TC-SEC-002J cross-project retryable operation does not block disjoint proj
           version: 1,
           createdAtUtc: now.toISOString(),
           updatedAtUtc: now.toISOString(),
-        });
-        await transaction.nodes.insert({
-          tenantId: tenant, id: "node-A3", projectId: "project-A", parentId: null,
-          title: "node A3", kind: "work_package", securityDomainId: null, securityEpoch: 1,
-          version: 1, deletedAtUtc: null,
         });
         await insertDomain(transaction, "domain-A3-target", "node-A3", "project-A");
         const plannedA3 = {
@@ -1333,6 +1355,7 @@ test("TC-SEC-002J invalid/unsupported subject type blocks planned->active migrat
       await fixture.persistence.transaction(tenant, async (transaction) => {
         await transaction.nodes.insert({
           tenantId: tenant, id: "node-A", projectId: "project-A", parentId: null,
+          leaderPrincipalId: null,
           title: "node A", kind: "work_package", securityDomainId: null, securityEpoch: 1,
           version: 1, deletedAtUtc: null,
         });
@@ -1426,6 +1449,7 @@ test("TC-SEC-002J SQLite relational vs operation_json drift and parse corruption
     await fixture.persistence.transaction(tenant, async (transaction) => {
       await transaction.nodes.insert({
         tenantId: tenant, id: "node-A", projectId: "project-A", parentId: null,
+        leaderPrincipalId: null,
         title: "node A", kind: "work_package", securityDomainId: null, securityEpoch: 1,
         version: 1, deletedAtUtc: null,
       });
@@ -1581,6 +1605,7 @@ test("TC-SEC-002J SQLite state-prefilter bypass regression: terminal vs nontermi
     await fixture.persistence.transaction(tenant, async (transaction) => {
       await transaction.nodes.insert({
         tenantId: tenant, id: "node-A", projectId: "project-A", parentId: null,
+        leaderPrincipalId: null,
         title: "node A", kind: "work_package", securityDomainId: null, securityEpoch: 1,
         version: 1, deletedAtUtc: null,
       });
@@ -1778,6 +1803,7 @@ test("TC-SEC-002J missing, deleted, or corrupt subjects block activation in Memo
       await fixture.persistence.transaction(tenant, async (transaction) => {
         await transaction.nodes.insert({
           tenantId: tenant, id: "node-A", projectId: "project-A", parentId: null,
+          leaderPrincipalId: null,
           title: "node A", kind: "work_package", securityDomainId: null, securityEpoch: 1,
           version: 1, deletedAtUtc: null,
         });
@@ -2030,6 +2056,7 @@ test("TC-SEC-002J same-job concurrent retry fencing preserves generation ownersh
       await fixture.persistence.transaction(tenant, async (transaction) => {
         await transaction.nodes.insert({
           tenantId: tenant, id: "node-1", projectId: "project-1", parentId: null,
+          leaderPrincipalId: null,
           title: "root", kind: "work_package", securityDomainId: null, securityEpoch: 1,
           version: 1, deletedAtUtc: null,
         });
@@ -3002,6 +3029,7 @@ test("TC-SEC-002J direct Asset matrix: formal root and intermediate corruption f
         await fixture.persistence.transaction(tenant, async (transaction) => {
           await transaction.nodes.insert({
             tenantId: tenant, id: "node-1", projectId: "project-1", parentId: null,
+            leaderPrincipalId: null,
             title: "node", kind: "work_package", securityDomainId: null, securityEpoch: 1,
             version: 1, deletedAtUtc: null,
           });
@@ -3018,6 +3046,7 @@ test("TC-SEC-002J direct Asset matrix: formal root and intermediate corruption f
             await insertDomain(transaction, "parent-domain", "node-1");
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-2", projectId: "project-1", parentId: "node-1",
+              leaderPrincipalId: null,
               title: "nested node", kind: "work_package", securityDomainId: "nested-domain", securityEpoch: 1,
               version: 1, deletedAtUtc: null,
             });
@@ -3031,6 +3060,7 @@ test("TC-SEC-002J direct Asset matrix: formal root and intermediate corruption f
           } else if (scenario === "invalid-migration-root") {
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-deleted", projectId: "project-1", parentId: null,
+              leaderPrincipalId: null,
               title: "deleted root", kind: "work_package", securityDomainId: null, securityEpoch: 1,
               version: 1, deletedAtUtc: now.toISOString(),
             });
@@ -3060,6 +3090,7 @@ test("TC-SEC-002J direct Asset matrix: formal root and intermediate corruption f
           } else if (scenario === "deleted-formal-root") {
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-del-root", projectId: "project-1", parentId: null,
+              leaderPrincipalId: null,
               title: "del root", kind: "work_package", securityDomainId: "del-domain", securityEpoch: 1,
               version: 1, deletedAtUtc: now.toISOString(),
             });
@@ -3073,6 +3104,7 @@ test("TC-SEC-002J direct Asset matrix: formal root and intermediate corruption f
           } else if (scenario === "cross-project-formal-root") {
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-other-proj", projectId: "project-other", parentId: null,
+              leaderPrincipalId: null,
               title: "other proj node", kind: "work_package", securityDomainId: "cross-domain", securityEpoch: 1,
               version: 1, deletedAtUtc: null,
             });
@@ -3085,6 +3117,7 @@ test("TC-SEC-002J direct Asset matrix: formal root and intermediate corruption f
           } else if (scenario === "unrelated-formal-root") {
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-unrelated-root", projectId: "project-1", parentId: null,
+              leaderPrincipalId: null,
               title: "unrelated root", kind: "work_package", securityDomainId: "unrelated-domain", securityEpoch: 1,
               version: 1, deletedAtUtc: null,
             });
@@ -3106,6 +3139,7 @@ test("TC-SEC-002J direct Asset matrix: formal root and intermediate corruption f
           } else if (scenario === "wrong-epoch-on-root") {
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-epoch-root", projectId: "project-1", parentId: null,
+              leaderPrincipalId: null,
               title: "epoch root", kind: "work_package", securityDomainId: "epoch-domain", securityEpoch: 3,
               version: 1, deletedAtUtc: null,
             });
@@ -3120,11 +3154,13 @@ test("TC-SEC-002J direct Asset matrix: formal root and intermediate corruption f
           } else if (scenario === "corrupt-ancestor-cycle") {
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-cycle-a", projectId: "project-1", parentId: "node-cycle-b",
+              leaderPrincipalId: null,
               title: "cycle a", kind: "work_package", securityDomainId: null, securityEpoch: 1,
               version: 1, deletedAtUtc: null,
             });
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-cycle-b", projectId: "project-1", parentId: "node-cycle-a",
+              leaderPrincipalId: null,
               title: "cycle b", kind: "work_package", securityDomainId: null, securityEpoch: 1,
               version: 1, deletedAtUtc: null,
             });
@@ -3132,11 +3168,13 @@ test("TC-SEC-002J direct Asset matrix: formal root and intermediate corruption f
           } else if (scenario === "corrupt-ancestor-deleted") {
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-parent-del", projectId: "project-1", parentId: null,
+              leaderPrincipalId: null,
               title: "parent del", kind: "work_package", securityDomainId: null, securityEpoch: 1,
               version: 1, deletedAtUtc: now.toISOString(),
             });
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-child-live", projectId: "project-1", parentId: "node-parent-del",
+              leaderPrincipalId: null,
               title: "child live", kind: "work_package", securityDomainId: null, securityEpoch: 1,
               version: 1, deletedAtUtc: null,
             });
@@ -3144,11 +3182,13 @@ test("TC-SEC-002J direct Asset matrix: formal root and intermediate corruption f
           } else if (scenario === "corrupt-ancestor-cross-project") {
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-parent-other", projectId: "project-other", parentId: null,
+              leaderPrincipalId: null,
               title: "parent other", kind: "work_package", securityDomainId: null, securityEpoch: 1,
               version: 1, deletedAtUtc: null,
             });
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-child-proj1", projectId: "project-1", parentId: "node-parent-other",
+              leaderPrincipalId: null,
               title: "child proj1", kind: "work_package", securityDomainId: null, securityEpoch: 1,
               version: 1, deletedAtUtc: null,
             });
@@ -3156,17 +3196,20 @@ test("TC-SEC-002J direct Asset matrix: formal root and intermediate corruption f
           } else if (scenario === "intermediate-public-middle") {
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-cont-root", projectId: "project-1", parentId: null,
+              leaderPrincipalId: null,
               title: "cont root", kind: "work_package", securityDomainId: "domain-cont", securityEpoch: 2,
               version: 1, deletedAtUtc: null,
             });
             await insertDomain(transaction, "domain-cont", "node-cont-root");
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-mid-public", projectId: "project-1", parentId: "node-cont-root",
+              leaderPrincipalId: null,
               title: "mid public", kind: "work_package", securityDomainId: null, securityEpoch: 2,
               version: 1, deletedAtUtc: null,
             });
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-leaf-asset", projectId: "project-1", parentId: "node-mid-public",
+              leaderPrincipalId: null,
               title: "leaf asset", kind: "work_package", securityDomainId: "domain-cont", securityEpoch: 2,
               version: 1, deletedAtUtc: null,
             });
@@ -3176,23 +3219,27 @@ test("TC-SEC-002J direct Asset matrix: formal root and intermediate corruption f
           } else if (scenario === "intermediate-other-domain") {
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-cont-root", projectId: "project-1", parentId: null,
+              leaderPrincipalId: null,
               title: "cont root", kind: "work_package", securityDomainId: "domain-cont-1", securityEpoch: 2,
               version: 1, deletedAtUtc: null,
             });
             await insertDomain(transaction, "domain-cont-1", "node-cont-root");
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-other-root", projectId: "project-1", parentId: null,
+              leaderPrincipalId: null,
               title: "other root", kind: "work_package", securityDomainId: "domain-cont-2", securityEpoch: 2,
               version: 1, deletedAtUtc: null,
             });
             await insertDomain(transaction, "domain-cont-2", "node-other-root");
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-mid-other", projectId: "project-1", parentId: "node-cont-root",
+              leaderPrincipalId: null,
               title: "mid other", kind: "work_package", securityDomainId: "domain-cont-2", securityEpoch: 2,
               version: 1, deletedAtUtc: null,
             });
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-leaf-asset", projectId: "project-1", parentId: "node-mid-other",
+              leaderPrincipalId: null,
               title: "leaf asset", kind: "work_package", securityDomainId: "domain-cont-1", securityEpoch: 2,
               version: 1, deletedAtUtc: null,
             });
@@ -3202,17 +3249,20 @@ test("TC-SEC-002J direct Asset matrix: formal root and intermediate corruption f
           } else if (scenario === "intermediate-mismatched-epoch") {
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-cont-root", projectId: "project-1", parentId: null,
+              leaderPrincipalId: null,
               title: "cont root", kind: "work_package", securityDomainId: "domain-cont", securityEpoch: 2,
               version: 1, deletedAtUtc: null,
             });
             await insertDomain(transaction, "domain-cont", "node-cont-root");
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-mid-mismatch", projectId: "project-1", parentId: "node-cont-root",
+              leaderPrincipalId: null,
               title: "mid mismatch", kind: "work_package", securityDomainId: "domain-cont", securityEpoch: 1,
               version: 1, deletedAtUtc: null,
             });
             await transaction.nodes.insert({
               tenantId: tenant, id: "node-leaf-asset", projectId: "project-1", parentId: "node-mid-mismatch",
+              leaderPrincipalId: null,
               title: "leaf asset", kind: "work_package", securityDomainId: "domain-cont", securityEpoch: 2,
               version: 1, deletedAtUtc: null,
             });

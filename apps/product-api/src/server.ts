@@ -3,7 +3,17 @@ import type { AddressInfo } from "node:net";
 import { resolve } from "node:path";
 import { CollaborationProjectionProcessor } from "../../../packages/application/src/integrations/project-collaboration.ts";
 import type { AssetContentPort } from "../../../packages/application/src/ports/integrations.ts";
-import type { JobConsumer, OutboxConsumer, Persistence } from "../../../packages/application/src/ports/persistence.ts";
+import type {
+  AssignNodeLeaderCommand,
+  AssignNodeLeaderFailurePoint,
+  AssignNodeLeaderResult,
+  CreateNodeCommand,
+  CreateNodeFailurePoint,
+  CreateNodeResult,
+  JobConsumer,
+  OutboxConsumer,
+  Persistence,
+} from "../../../packages/application/src/ports/persistence.ts";
 import { FilesystemAssetContent } from "../../../packages/adapters/src/filesystem/asset-content.ts";
 import {
   HulyRestBlobProjectionAdapter,
@@ -30,12 +40,16 @@ export type ProductApiRuntime = {
 export type ProductApiDependencies = Readonly<{
   persistence: Persistence;
   assetContent: AssetContentPort;
+  createNode?: ((command: CreateNodeCommand, failurePoint?: CreateNodeFailurePoint) => Promise<CreateNodeResult>) | undefined;
+  assignNodeLeader?: ((command: AssignNodeLeaderCommand, failurePoint?: AssignNodeLeaderFailurePoint) => Promise<AssignNodeLeaderResult>) | undefined;
   verifyMigrationReadiness?: VerifyMigrationReadiness | undefined;
 }>;
 
 export type NativeProductApiDependencies = Readonly<{
   persistence: Persistence & { readonly outboxConsumer: OutboxConsumer; readonly jobConsumer: JobConsumer };
   assetContent: AssetContentPort;
+  createNode: (command: CreateNodeCommand, failurePoint?: CreateNodeFailurePoint) => Promise<CreateNodeResult>;
+  assignNodeLeader: (command: AssignNodeLeaderCommand, failurePoint?: AssignNodeLeaderFailurePoint) => Promise<AssignNodeLeaderResult>;
   verifyMigrationReadiness?: VerifyMigrationReadiness | undefined;
 }>;
 
@@ -51,6 +65,8 @@ export function createNativeDependencies(environment: NodeJS.ProcessEnv = proces
   return {
     persistence: bundle.persistence,
     assetContent: new FilesystemAssetContent(assetDirectory),
+    createNode: bundle.createNode,
+    assignNodeLeader: bundle.assignNodeLeader,
     verifyMigrationReadiness: bundle.verifyMigrationReadiness,
   };
 }
@@ -90,6 +106,8 @@ export async function startProductApiServer(
     collaborationMode: configuredCollaborationMode(environment),
     persistence: runtimeDependencies.persistence,
     assetContent: runtimeDependencies.assetContent,
+    ...(runtimeDependencies.createNode === undefined ? {} : { createNode: runtimeDependencies.createNode }),
+    ...(runtimeDependencies.assignNodeLeader === undefined ? {} : { assignNodeLeader: runtimeDependencies.assignNodeLeader }),
     tenantId: tenantId(environment.PRODUCT_TENANT_ID?.trim() || "phase0-tenant"),
     ...(identityVerifier === undefined ? {} : { externalIdentityVerifier: identityVerifier }),
     collaborationProjectionConfigured: workerConfig !== undefined,

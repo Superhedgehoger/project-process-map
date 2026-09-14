@@ -2,6 +2,7 @@ import { ApplicationError } from "../errors.ts";
 import type { TransactionContext } from "../ports/persistence.ts";
 import type { PrincipalId } from "../../../domain/src/identity.ts";
 import type { ProjectMembership } from "../../../domain/src/project-access.ts";
+import { isNodeLeader, type ProjectNode } from "../../../domain/src/project-structure.ts";
 import type { SecurityDomainMigration } from "../../../domain/src/security-migration.ts";
 import { grantAllows, type SecurityCapability } from "../../../domain/src/security-access.ts";
 
@@ -45,6 +46,18 @@ export async function canAccessProjectObjectDuringMigration(
 ): Promise<boolean> {
   const principal = await transaction.principals.get(principalId);
   if (principal?.status !== "active") return false;
+
+  const ownerNode = await transaction.nodes.get(object.ownerNodeId);
+  if (ownerNode === undefined || ownerNode.deletedAtUtc !== null) return false;
+  if (ownerNode.projectId !== object.projectId) return false;
+  if (ownerNode.securityDomainId !== object.securityDomainId || ownerNode.securityEpoch !== object.securityEpoch) return false;
+
+  if (ownerNode.leaderPrincipalId !== null && (requiredCapability === "edit" || requiredCapability === "contribute")) {
+    const isManager = membership?.role === "project_manager";
+    const isLeader = isNodeLeader(ownerNode, principalId);
+    if (!isManager && !isLeader) return false;
+  }
+
   const migrations = (await transaction.securityMigrations.listRecoverable())
     .filter((migration) => migration.projectId === object.projectId && dualDomainState(migration));
   const relevant: SecurityDomainMigration[] = [];
@@ -83,6 +96,119 @@ export async function canViewProjectObjectDuringMigration(
 ): Promise<boolean> {
   return await canAccessProjectObjectDuringMigration(
     transaction, membership, principalId, object, "view", atUtc,
+  );
+}
+
+export async function canAccessProjectNode(
+  transaction: TransactionContext,
+  membership: ProjectMembership | undefined,
+  principalId: PrincipalId,
+  nodeOrId: ProjectNode | string,
+  requiredCapability: SecurityCapability,
+  atUtc: string,
+): Promise<boolean> {
+  const principal = await transaction.principals.get(principalId);
+  if (principal?.status !== "active" || principal.kind !== "user") return false;
+
+  const nodeId = typeof nodeOrId === "string" ? nodeOrId : nodeOrId.id;
+  const node = await transaction.nodes.get(nodeId);
+  if (node === undefined || node.deletedAtUtc !== null) return false;
+  if (typeof nodeOrId === "object") {
+    if (
+      nodeOrId.projectId !== node.projectId ||
+      nodeOrId.securityDomainId !== node.securityDomainId ||
+      nodeOrId.securityEpoch !== node.securityEpoch ||
+      nodeOrId.leaderPrincipalId !== node.leaderPrincipalId ||
+      nodeOrId.version !== node.version ||
+      nodeOrId.deletedAtUtc !== node.deletedAtUtc
+    ) {
+      return false;
+    }
+  }
+
+  if (membership?.status !== "active" || membership.projectId !== node.projectId) return false;
+
+  if (requiredCapability === "manage_access") {
+    if (membership.role !== "project_manager") return false;
+  } else if (requiredCapability === "edit") {
+    const isManager = membership.role === "project_manager";
+    const isLeader = isNodeLeader(node, principalId);
+    if (!isManager && !isLeader) return false;
+  } else if (requiredCapability === "contribute") {
+    if (node.leaderPrincipalId !== null) {
+      const isManager = membership.role === "project_manager";
+      const isLeader = isNodeLeader(node, principalId);
+      if (!isManager && !isLeader) return false;
+    }
+  }
+
+  if (node.securityDomainId === null) return true;
+  return await canAccessProjectObject(
+    transaction,
+    membership,
+    principalId,
+    node.projectId,
+    node.securityDomainId,
+    requiredCapability,
+    atUtc,
+  );
+}
+
+export async function canAccessProjectNodeDuringMigration(
+  transaction: TransactionContext,
+  membership: ProjectMembership | undefined,
+  principalId: PrincipalId,
+  nodeOrId: ProjectNode | string,
+  requiredCapability: SecurityCapability,
+  atUtc: string,
+): Promise<boolean> {
+  const principal = await transaction.principals.get(principalId);
+  if (principal?.status !== "active" || principal.kind !== "user") return false;
+
+  const nodeId = typeof nodeOrId === "string" ? nodeOrId : nodeOrId.id;
+  const node = await transaction.nodes.get(nodeId);
+  if (node === undefined || node.deletedAtUtc !== null) return false;
+  if (typeof nodeOrId === "object") {
+    if (
+      nodeOrId.projectId !== node.projectId ||
+      nodeOrId.securityDomainId !== node.securityDomainId ||
+      nodeOrId.securityEpoch !== node.securityEpoch ||
+      nodeOrId.leaderPrincipalId !== node.leaderPrincipalId ||
+      nodeOrId.version !== node.version ||
+      nodeOrId.deletedAtUtc !== node.deletedAtUtc
+    ) {
+      return false;
+    }
+  }
+
+  if (membership?.status !== "active" || membership.projectId !== node.projectId) return false;
+
+  if (requiredCapability === "manage_access") {
+    if (membership.role !== "project_manager") return false;
+  } else if (requiredCapability === "edit") {
+    const isManager = membership.role === "project_manager";
+    const isLeader = isNodeLeader(node, principalId);
+    if (!isManager && !isLeader) return false;
+  } else if (requiredCapability === "contribute") {
+    if (node.leaderPrincipalId !== null) {
+      const isManager = membership.role === "project_manager";
+      const isLeader = isNodeLeader(node, principalId);
+      if (!isManager && !isLeader) return false;
+    }
+  }
+
+  return await canAccessProjectObjectDuringMigration(
+    transaction,
+    membership,
+    principalId,
+    {
+      projectId: node.projectId,
+      ownerNodeId: node.id,
+      securityDomainId: node.securityDomainId,
+      securityEpoch: node.securityEpoch,
+    },
+    requiredCapability,
+    atUtc,
   );
 }
 

@@ -1,0 +1,40 @@
+[
+  {
+    "eventType": "project-map.node.created",
+    "schemaVersion": 1,
+    "payload": {
+      "nodeId": "node-1",
+      "parentId": null,
+      "title": "root node",
+      "kind": "stage"
+    }
+  },
+  {
+    "eventType": "project-map.node.created",
+    "schemaVersion": 1,
+    "payload": {
+      "nodeId": "node-2",
+      "parentId": "node-1",
+      "title": "child node",
+      "kind": "work_package"
+    }
+  },
+  {
+    "eventType": "project-map.node.leader_assigned",
+    "schemaVersion": 1,
+    "payload": {
+      "nodeId": "node-1",
+      "previousLeaderPrincipalId": null,
+      "leaderPrincipalId": "usr:u2"
+    }
+  },
+  {
+    "eventType": "project-map.node.leader_assigned",
+    "schemaVersion": 1,
+    "payload": {
+      "nodeId": "node-1",
+      "previousLeaderPrincipalId": "usr:u2",
+      "leaderPrincipalId": null
+    }
+  }
+]

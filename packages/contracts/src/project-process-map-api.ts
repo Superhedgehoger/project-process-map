@@ -4,6 +4,7 @@ export type ApiNode = Readonly<{
   id: string;
   projectId: string;
   parentId: string | null;
+  leaderPrincipalId?: string | null;
   title: string;
   kind: "stage" | "work_package" | "milestone";
   version: number;
@@ -237,6 +238,9 @@ function decodeNode(value: unknown): ApiNode {
     id: string(record.id, "node.id"),
     projectId: string(record.projectId, "node.projectId"),
     parentId: record.parentId === null ? null : string(record.parentId, "node.parentId"),
+    leaderPrincipalId: record.leaderPrincipalId === undefined || record.leaderPrincipalId === null
+      ? null
+      : string(record.leaderPrincipalId, "node.leaderPrincipalId"),
     title: string(record.title, "node.title"),
     kind: oneOf(record.kind, ["stage", "work_package", "milestone"] as const, "node.kind"),
     version: positiveInteger(record.version, "node.version"),

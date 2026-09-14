@@ -64,7 +64,12 @@ export class ActOnTaskHandler {
     return await this.#persistence.transaction(command.tenantId, async (transaction) => {
       const authorizationAtUtc = new Date().toISOString();
       const task = await transaction.tasks.get(command.taskId);
-      if (task === undefined || task.deletedAtUtc !== null) throw new ApplicationError("TASK_NOT_FOUND", "Task not found");
+      if (task === undefined || task.deletedAtUtc !== null) throw new ApplicationError("TASK_NOT_FOUND", `Task not found: ${command.taskId}`);
+      const ownerNode = await transaction.nodes.get(task.ownerNodeId);
+      if (ownerNode === undefined || ownerNode.deletedAtUtc !== null) throw new ApplicationError("TASK_NOT_FOUND", `Task not found: ${command.taskId}`);
+      if (ownerNode.projectId !== task.projectId || ownerNode.securityDomainId !== task.securityDomainId || ownerNode.securityEpoch !== task.securityEpoch) {
+        throw new ApplicationError("TASK_NOT_FOUND", `Task not found: ${command.taskId}`);
+      }
       const actorMembership = await transaction.memberships.get(task.projectId, command.principalId);
       if (!await canAccessProjectObjectDuringMigration(
         transaction, actorMembership, command.principalId, {
@@ -73,7 +78,7 @@ export class ActOnTaskHandler {
           securityDomainId: task.securityDomainId,
           securityEpoch: task.securityEpoch,
         }, actionCapability(command.action), authorizationAtUtc,
-      )) throw new ApplicationError("TASK_NOT_FOUND", "Task not found");
+      )) throw new ApplicationError("TASK_NOT_FOUND", `Task not found: ${command.taskId}`);
       await assertProjectSecurityStable(transaction, task.projectId);
       const manager = isProjectManager(actorMembership);
       assertAuthorized(task, command, manager);

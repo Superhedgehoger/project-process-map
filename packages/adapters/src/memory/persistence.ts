@@ -17,13 +17,22 @@ import {
   type SecurityMigrationAuditEntry,
 } from "../../../domain/src/security-migration.ts";
 import { grantAllows, isCanonicalUtcTimestamp, isPermanentSecurityAdministrator, type SecurityDomain, type SecurityGrant, type SecurityGrantAuditEntry } from "../../../domain/src/security-access.ts";
+import { assertNoSensitiveFields, validateEventAgainstSchema } from "../../../domain/src/event-schema-registry.ts";
 import {
+  type AssignNodeLeaderCommand,
+  type AssignNodeLeaderFailurePoint,
+  type AssignNodeLeaderResult,
   type ClaimOptions,
   type CommandReceipt,
   type CommandScope,
   type CommitSecurityMigrationResult,
   type CommitWithReadinessEvidenceParams,
+  type CreateNodeCommand,
+  type CreateNodeFailurePoint,
+  type CreateNodeResult,
   type JobConsumer,
+  type NodeCreatedPayload,
+  type NodeLeaderAssignedPayload,
   type OutboxConsumer,
   type Persistence,
   type RollbackSecurityMigrationResult,
@@ -35,6 +44,16 @@ import {
   type TransactionContext,
 } from "../../../application/src/ports/persistence.ts";
 import {
+  assertEligibleNodeLeader,
+  hash,
+  inject,
+  resolveInheritance,
+  validate,
+  validateAssignLeader,
+} from "../../../application/src/create-node.ts";
+import { ApplicationError } from "../../../application/src/errors.ts";
+import { assertProjectSecurityStable, canAccessProjectObjectDuringMigration } from "../../../application/src/access/project-security.ts";
+import {
   createVerificationOperation,
   type InternalIssueChallengeParams,
   type InternalRecordVerifiedEvidenceParams,
@@ -42,7 +61,6 @@ import {
 } from "../security-migration-coordinator.ts";
 import type { VerifyMigrationReadiness } from "../../../application/src/security/security-migration-coordinator.ts";
 import type { ExternalCollaborationEpochReadinessPort } from "../../../application/src/ports/integrations.ts";
-import { canAccessProjectObjectDuringMigration } from "../../../application/src/access/project-security.ts";
 import {
   assertManifestMatchesSnapshot,
   collectSecurityMigrationManifest,
@@ -158,15 +176,19 @@ export type MemoryPersistenceOptions = Readonly<{
   now?: (() => Date) | undefined;
   verifier?: ExternalCollaborationEpochReadinessPort | undefined;
   attachTestHarness?: ((harness: TestReadinessHarness) => void) | undefined;
+  snapshot?: MemoryPersistenceSnapshot | undefined;
 }>;
 
+const transactionStateRegistry = new WeakMap<TransactionContext, MemoryState>();
+
 export class MemoryPersistence implements Persistence {
-  #state = emptyState();
+  #state: MemoryState;
   #tail: Promise<void> = Promise.resolve();
   readonly #now: () => Date;
   readonly #verifyMigrationReadiness?: VerifyMigrationReadiness | undefined;
 
   constructor(options?: MemoryPersistenceOptions) {
+    this.#state = options?.snapshot !== undefined ? cloneState(options.snapshot) : emptyState();
     this.#now = options?.now ?? (() => new Date());
     if (options?.verifier !== undefined) {
       this.#verifyMigrationReadiness = createVerificationOperation({
@@ -272,6 +294,434 @@ export class MemoryPersistence implements Persistence {
     } finally {
       unlock();
     }
+  }
+
+  #mutateNodeLeader(
+    transaction: TransactionContext,
+    nodeId: string,
+    projectId: string,
+    leaderPrincipalId: PrincipalId | null,
+    expectedVersion: number,
+  ): ProjectNode {
+    const state = transactionStateRegistry.get(transaction);
+    if (state === undefined) throw new Error("Invalid or unmanaged transaction context");
+    const tenantId = transaction.tenantId;
+    const tenantPrefix = `${tenantId}\u0000`;
+    const key = `${tenantPrefix}${nodeId}`;
+    const current = state.nodes.get(key);
+    if (current === undefined || current.deletedAtUtc !== null) throw new ApplicationError("NODE_NOT_FOUND", "Node not found");
+    if (current.projectId !== projectId) throw new ApplicationError("PROJECT_MISMATCH", "Project mismatch");
+    if (current.version !== expectedVersion) throw new ApplicationError("NODE_VERSION_CONFLICT", "Node version conflict");
+    const updated: ProjectNode = {
+      ...current,
+      leaderPrincipalId,
+      version: current.version + 1,
+    };
+    state.nodes.set(key, structuredClone(updated));
+    return structuredClone(updated);
+  }
+
+  async executeCreateNode(
+    command: CreateNodeCommand,
+    failurePoint?: CreateNodeFailurePoint,
+  ): Promise<CreateNodeResult> {
+    validate(command);
+    if (command.securityDomainId !== null) {
+      throw new ApplicationError(
+        "SECURITY_DOMAIN_ASSIGNMENT_REQUIRES_COMMAND",
+        "A sensitive root must be created through the security-domain command",
+      );
+    }
+    const scope: CommandScope = {
+      principalId: command.principalId,
+      operation: "create_node",
+      idempotencyKey: command.idempotencyKey,
+    };
+    const v9Fingerprint = hash({
+      projectId: command.projectId,
+      nodeId: command.nodeId,
+      parentId: command.parentId,
+      title: command.title,
+      kind: command.kind ?? "work_package",
+      securityDomainId: command.securityDomainId,
+    });
+    const fingerprint = (command.leaderPrincipalId === null || command.leaderPrincipalId === undefined)
+      ? v9Fingerprint
+      : hash({
+          projectId: command.projectId,
+          nodeId: command.nodeId,
+          parentId: command.parentId,
+          leaderPrincipalId: command.leaderPrincipalId,
+          title: command.title,
+          kind: command.kind ?? "work_package",
+          securityDomainId: command.securityDomainId,
+        });
+
+    return await this.transaction(command.tenantId, async (transaction) => {
+      const nowUtc = this.nowUtc();
+      const inheritance = await resolveInheritance(transaction, command, nowUtc);
+      const actorPrincipal = await transaction.principals.get(command.principalId);
+      const actorMembership = await transaction.memberships.get(command.projectId, command.principalId);
+      if (actorPrincipal !== undefined && (actorPrincipal.status !== "active" || actorPrincipal.tenantId !== command.tenantId)) {
+        throw new ApplicationError("FORBIDDEN", "Principal is not active");
+      }
+      if (actorMembership !== undefined && (actorMembership.status !== "active" || actorMembership.tenantId !== command.tenantId)) {
+        throw new ApplicationError("FORBIDDEN", "Membership is not active");
+      }
+      if (command.leaderPrincipalId !== null && command.leaderPrincipalId !== undefined) {
+        if (
+          actorPrincipal === undefined ||
+          actorPrincipal.tenantId !== command.tenantId ||
+          actorPrincipal.status !== "active" ||
+          actorPrincipal.kind !== "user" ||
+          actorMembership === undefined ||
+          actorMembership.tenantId !== command.tenantId ||
+          actorMembership.projectId !== command.projectId ||
+          actorMembership.status !== "active" ||
+          !isProjectManager(actorMembership)
+        ) {
+          throw new ApplicationError("FORBIDDEN", "Only active project managers can assign node leaders");
+        }
+        await assertEligibleNodeLeader(transaction, command.tenantId, command.projectId, command.leaderPrincipalId);
+      }
+      const previous = await transaction.receipts.get<Omit<CreateNodeResult, "replayed">>(scope);
+      if (previous !== undefined) {
+        const allowV9Fallback = command.leaderPrincipalId === null || command.leaderPrincipalId === undefined;
+        if (previous.fingerprint !== fingerprint && (!allowV9Fallback || previous.fingerprint !== v9Fingerprint)) {
+          throw new ApplicationError("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD", "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD");
+        }
+        if (previous.result.node.securityDomainId !== inheritance.securityDomainId
+          || previous.result.node.securityEpoch !== inheritance.securityEpoch) {
+          throw new ApplicationError("PARENT_NODE_NOT_FOUND", "Parent node not found");
+        }
+        const existingNode = await transaction.nodes.get(command.nodeId);
+        if (existingNode === undefined || existingNode.deletedAtUtc !== null) {
+          throw new ApplicationError("NODE_NOT_FOUND", "Node not found");
+        }
+        if (
+          existingNode.tenantId !== command.tenantId ||
+          existingNode.projectId !== command.projectId ||
+          existingNode.parentId !== command.parentId ||
+          existingNode.title !== command.title ||
+          existingNode.kind !== (command.kind ?? "work_package") ||
+          existingNode.securityDomainId !== inheritance.securityDomainId ||
+          existingNode.securityEpoch !== inheritance.securityEpoch
+        ) {
+          throw new ApplicationError("NODE_NOT_FOUND", "Node state has drifted");
+        }
+        return {
+          ...structuredClone(previous.result),
+          node: {
+            ...structuredClone(existingNode),
+            leaderPrincipalId: existingNode.leaderPrincipalId ?? null,
+          },
+          replayed: true,
+        };
+      }
+
+      if (await transaction.nodes.get(command.nodeId) !== undefined) {
+        throw new Error(`Aggregate already exists: ${command.nodeId}`);
+      }
+
+      const projectSequence = await transaction.sequences.next(command.projectId);
+      let node: ProjectNode = {
+        tenantId: command.tenantId,
+        id: command.nodeId,
+        projectId: command.projectId,
+        parentId: command.parentId,
+        leaderPrincipalId: null,
+        title: command.title,
+        kind: command.kind ?? "work_package",
+        securityDomainId: inheritance.securityDomainId,
+        securityEpoch: inheritance.securityEpoch,
+        version: 1,
+        deletedAtUtc: null,
+      };
+      await transaction.nodes.insert(node);
+      inject(failurePoint, "after_aggregate");
+
+      const event: DomainEvent<NodeCreatedPayload> = {
+        tenantId: command.tenantId,
+        eventId: `evt:${command.commandId}`,
+        projectId: command.projectId,
+        projectSequence,
+        aggregateType: "project_node",
+        aggregateId: node.id,
+        aggregateVersion: node.version,
+        eventType: "project-map.node.created",
+        schemaVersion: 1,
+        actorPrincipalId: command.principalId,
+        occurredAtUtc: command.occurredAtUtc,
+        correlationId: command.correlationId,
+        causationId: command.commandId,
+        originalSecurityDomainId: node.securityDomainId,
+        originalSecurityEpoch: node.securityEpoch,
+        payload: { nodeId: node.id, parentId: node.parentId, title: node.title, kind: node.kind },
+      };
+      await transaction.events.append(event);
+      inject(failurePoint, "after_event");
+
+      const outbox: OutboxMessage = {
+        tenantId: command.tenantId,
+        id: `outbox:${event.eventId}`,
+        eventId: event.eventId,
+        topic: eventTopic(event),
+        payload: event,
+        state: "pending",
+        availableAtUtc: command.occurredAtUtc,
+        attempts: 0,
+        maxAttempts: 8,
+        leaseOwner: null,
+        leaseToken: null,
+        leaseExpiresAtUtc: null,
+        lastError: null,
+        publishedAtUtc: null,
+        createdAtUtc: command.occurredAtUtc,
+      };
+      await transaction.outbox.enqueue(outbox);
+      inject(failurePoint, "after_outbox");
+
+      let leaderAssignedEvent: DomainEvent<NodeLeaderAssignedPayload> | undefined;
+      let leaderAssignedOutbox: OutboxMessage | undefined;
+
+      if (command.leaderPrincipalId !== null && command.leaderPrincipalId !== undefined) {
+        node = this.#mutateNodeLeader(
+          transaction,
+          command.nodeId,
+          command.projectId,
+          command.leaderPrincipalId,
+          1,
+        );
+
+        const leaderSequence = await transaction.sequences.next(command.projectId);
+        leaderAssignedEvent = {
+          tenantId: command.tenantId,
+          eventId: `evt:${command.commandId}:leader`,
+          projectId: command.projectId,
+          projectSequence: leaderSequence,
+          aggregateType: "project_node",
+          aggregateId: node.id,
+          aggregateVersion: node.version,
+          eventType: "project-map.node.leader_assigned",
+          schemaVersion: 1,
+          actorPrincipalId: command.principalId,
+          occurredAtUtc: command.occurredAtUtc,
+          correlationId: command.correlationId,
+          causationId: command.commandId,
+          originalSecurityDomainId: node.securityDomainId,
+          originalSecurityEpoch: node.securityEpoch,
+          payload: {
+            nodeId: node.id,
+            previousLeaderPrincipalId: null,
+            leaderPrincipalId: command.leaderPrincipalId,
+          },
+        };
+        await transaction.events.append(leaderAssignedEvent);
+        inject(failurePoint, "after_leader_assigned");
+
+        leaderAssignedOutbox = {
+          tenantId: command.tenantId,
+          id: `outbox:${leaderAssignedEvent.eventId}`,
+          eventId: leaderAssignedEvent.eventId,
+          topic: eventTopic(leaderAssignedEvent),
+          payload: leaderAssignedEvent,
+          state: "pending",
+          availableAtUtc: command.occurredAtUtc,
+          attempts: 0,
+          maxAttempts: 8,
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAtUtc: null,
+          lastError: null,
+          publishedAtUtc: null,
+          createdAtUtc: command.occurredAtUtc,
+        };
+        await transaction.outbox.enqueue(leaderAssignedOutbox);
+        inject(failurePoint, "after_leader_outbox");
+      }
+
+      const result: CreateNodeResult = {
+        node,
+        event,
+        outbox,
+        ...(leaderAssignedEvent !== undefined ? { leaderAssignedEvent } : {}),
+        ...(leaderAssignedOutbox !== undefined ? { leaderAssignedOutbox } : {}),
+        replayed: false,
+      };
+      await transaction.receipts.insert({
+        scope,
+        fingerprint,
+        result: {
+          node,
+          event,
+          outbox,
+          ...(leaderAssignedEvent !== undefined ? { leaderAssignedEvent } : {}),
+          ...(leaderAssignedOutbox !== undefined ? { leaderAssignedOutbox } : {}),
+        },
+        createdAtUtc: command.occurredAtUtc,
+      });
+      inject(failurePoint, "after_idempotency");
+      return result;
+    });
+  }
+
+  async executeAssignNodeLeader(
+    command: AssignNodeLeaderCommand,
+    failurePoint?: AssignNodeLeaderFailurePoint,
+  ): Promise<AssignNodeLeaderResult> {
+    validateAssignLeader(command);
+    const scope: CommandScope = {
+      principalId: command.principalId,
+      operation: "assign_node_leader",
+      idempotencyKey: command.idempotencyKey,
+    };
+    const fingerprint = hash({
+      projectId: command.projectId,
+      nodeId: command.nodeId,
+      expectedVersion: command.expectedVersion,
+      leaderPrincipalId: command.leaderPrincipalId,
+    });
+
+    return await this.transaction(command.tenantId, async (transaction) => {
+      const currentNode = await transaction.nodes.get(command.nodeId);
+      if (currentNode === undefined || currentNode.deletedAtUtc !== null) {
+        throw new ApplicationError("NODE_NOT_FOUND", "Node not found");
+      }
+      if (currentNode.projectId !== command.projectId) {
+        throw new ApplicationError("PROJECT_MISMATCH", "Project mismatch");
+      }
+
+      const actorPrincipal = await transaction.principals.get(command.principalId);
+      const actorMembership = await transaction.memberships.get(command.projectId, command.principalId);
+      if (
+        actorPrincipal === undefined ||
+        actorPrincipal.tenantId !== command.tenantId ||
+        actorPrincipal.status !== "active" ||
+        actorPrincipal.kind !== "user" ||
+        actorMembership === undefined ||
+        actorMembership.tenantId !== command.tenantId ||
+        actorMembership.projectId !== command.projectId ||
+        actorMembership.status !== "active" ||
+        !isProjectManager(actorMembership)
+      ) {
+        if (currentNode.securityDomainId !== null) {
+          throw new ApplicationError("NODE_NOT_FOUND", "Node not found");
+        }
+        throw new ApplicationError("FORBIDDEN", "Only active project managers can assign node leaders");
+      }
+
+      const nowUtc = this.nowUtc();
+      if (currentNode.securityDomainId !== null) {
+        const canAccess = await canAccessProjectObjectDuringMigration(
+          transaction,
+          actorMembership,
+          command.principalId,
+          {
+            projectId: command.projectId,
+            ownerNodeId: currentNode.id,
+            securityDomainId: currentNode.securityDomainId,
+            securityEpoch: currentNode.securityEpoch,
+          },
+          "edit",
+          nowUtc,
+        );
+        if (!canAccess) {
+          throw new ApplicationError("NODE_NOT_FOUND", "Node not found");
+        }
+      }
+
+      await assertProjectSecurityStable(transaction, command.projectId);
+
+      if (command.leaderPrincipalId !== null) {
+        await assertEligibleNodeLeader(transaction, command.tenantId, command.projectId, command.leaderPrincipalId);
+      }
+
+      const previous = await transaction.receipts.get<Omit<AssignNodeLeaderResult, "replayed">>(scope);
+      if (previous !== undefined) {
+        if (previous.fingerprint !== fingerprint) {
+          throw new Error("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD");
+        }
+        return { ...structuredClone(previous.result), replayed: true };
+      }
+
+      if (currentNode.version !== command.expectedVersion) {
+        throw new ApplicationError("NODE_VERSION_CONFLICT", "Node version conflict");
+      }
+
+      const updatedNode = this.#mutateNodeLeader(
+        transaction,
+        command.nodeId,
+        command.projectId,
+        command.leaderPrincipalId,
+        command.expectedVersion,
+      );
+      inject(failurePoint, "after_aggregate");
+
+      const projectSequence = await transaction.sequences.next(command.projectId);
+      const event: DomainEvent<NodeLeaderAssignedPayload> = {
+        tenantId: command.tenantId,
+        eventId: `evt:${command.commandId}`,
+        projectId: command.projectId,
+        projectSequence,
+        aggregateType: "project_node",
+        aggregateId: updatedNode.id,
+        aggregateVersion: updatedNode.version,
+        eventType: "project-map.node.leader_assigned",
+        schemaVersion: 1,
+        actorPrincipalId: command.principalId,
+        occurredAtUtc: command.occurredAtUtc,
+        correlationId: command.correlationId,
+        causationId: command.commandId,
+        originalSecurityDomainId: updatedNode.securityDomainId,
+        originalSecurityEpoch: updatedNode.securityEpoch,
+        payload: {
+          nodeId: updatedNode.id,
+          previousLeaderPrincipalId: currentNode.leaderPrincipalId,
+          leaderPrincipalId: updatedNode.leaderPrincipalId,
+        },
+      };
+      await transaction.events.append(event);
+      inject(failurePoint, "after_event");
+
+      const outbox: OutboxMessage = {
+        tenantId: command.tenantId,
+        id: `outbox:${event.eventId}`,
+        eventId: event.eventId,
+        topic: eventTopic(event),
+        payload: event,
+        state: "pending",
+        availableAtUtc: command.occurredAtUtc,
+        attempts: 0,
+        maxAttempts: 8,
+        leaseOwner: null,
+        leaseToken: null,
+        leaseExpiresAtUtc: null,
+        lastError: null,
+        publishedAtUtc: null,
+        createdAtUtc: command.occurredAtUtc,
+      };
+      await transaction.outbox.enqueue(outbox);
+      inject(failurePoint, "after_outbox");
+
+      const result: AssignNodeLeaderResult = {
+        node: updatedNode,
+        event,
+        outbox,
+        replayed: false,
+      };
+      await transaction.receipts.insert({
+        scope,
+        fingerprint,
+        result: {
+          node: updatedNode,
+          event,
+          outbox,
+        },
+        createdAtUtc: command.occurredAtUtc,
+      });
+      inject(failurePoint, "after_idempotency");
+      return result;
+    });
   }
 
   async #issueReadinessChallenge(
@@ -504,6 +954,13 @@ function context(
       ),
       insert: async (node) => {
         if (node.tenantId !== tenantId) throw new Error("TENANT_CONTEXT_MISMATCH");
+        const migrationActive = [...state.securityMigrations.values()].some(
+          (m) => m.tenantId === tenantId && m.projectId === node.projectId && ["active", "verifying", "retryable", "recovery_required"].includes(m.state),
+        );
+        if (migrationActive) throw new Error("SECURITY_MIGRATION_IN_PROGRESS");
+        if (node.leaderPrincipalId !== null) {
+          throw new ApplicationError("NODE_LEADER_DIRECT_INSERT_FORBIDDEN", "Direct insert of node with non-null leader is forbidden; use createNode command");
+        }
         const key = `${tenantPrefix}${node.id}`;
         if (state.nodes.has(key)) throw new Error(`Aggregate already exists: ${node.id}`);
         state.nodes.set(key, structuredClone(node));
@@ -1551,6 +2008,7 @@ function context(
     events: {
       append: async (event) => {
         assertTenant(tenantId, event.tenantId);
+        validateEventAgainstSchema(event);
         const eventKey = `${tenantPrefix}${event.eventId}`;
         const aggregateKey = `${tenantPrefix}${event.aggregateType}\u0000${event.aggregateId}\u0000${event.aggregateVersion}`;
         const sequenceKey = `${tenantPrefix}${event.projectId}\u0000${event.projectSequence}`;
@@ -1565,6 +2023,13 @@ function context(
     outbox: {
       enqueue: async (message) => {
         assertTenant(tenantId, message.tenantId);
+        if (message.payload !== null && typeof message.payload === "object") {
+          assertNoSensitiveFields(message.payload);
+          const event = message.payload as Record<string, unknown>;
+          if (typeof event.eventType === "string" && typeof event.schemaVersion === "number") {
+            validateEventAgainstSchema(event as unknown as DomainEvent);
+          }
+        }
         const key = `${tenantPrefix}${message.id}`;
         if (state.outbox.has(key) || [...state.outbox.values()].some((item) => item.tenantId === tenantId && item.eventId === message.eventId)) {
           throw new Error("OUTBOX_EVENT_ALREADY_EXISTS");
@@ -1603,6 +2068,7 @@ function context(
       },
     },
   };
+  transactionStateRegistry.set(context, state);
   return context;
 }
 

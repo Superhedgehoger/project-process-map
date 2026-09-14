@@ -53,6 +53,7 @@ function node(id: string, parentId: string | null): ProjectNode {
     id,
     projectId,
     parentId,
+    leaderPrincipalId: null,
     title: id,
     kind: "work_package",
     securityDomainId: sourceDomainId,
@@ -383,6 +384,8 @@ function failingPersistence(base: Persistence, failure: "node" | "task" | "asset
       return await work(decorated);
     }),
     read: async (tenantId, work) => await base.read(tenantId, work),
+    executeCreateNode: async (cmd, fp) => await base.executeCreateNode(cmd, fp),
+    executeAssignNodeLeader: async (cmd, fp) => await base.executeAssignNodeLeader(cmd, fp),
     close: async () => {},
   };
 }

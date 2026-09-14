@@ -28,6 +28,7 @@ test("ARCH-GATE-SECURITY-002 migration cursor survives restart and stale workers
         id: "node-root",
         projectId: "project-1",
         parentId: null,
+        leaderPrincipalId: null,
         title: "敏感阶段",
         kind: "work_package",
         securityDomainId: "domain-old",
@@ -146,6 +147,7 @@ async function prepareMigration(
       id: planned.rootNodeId,
       projectId: planned.projectId,
       parentId: null,
+      leaderPrincipalId: null,
       title: planned.rootNodeId,
       kind: "work_package",
       securityDomainId: planned.sourceSecurityDomainId,
@@ -310,18 +312,21 @@ test("TC-SEC-002C SQLite rejects relational and JSON migration-plan drift", asyn
     const firstPlan = migration();
     const secondPlan = migration({
       id: "migration-2",
+      projectId: "project-2",
       rootNodeId: "node-root-2",
       sourceSecurityDomainId: "domain-old-2",
       targetSecurityDomainId: "domain-new-2",
     });
     const thirdPlan = migration({
       id: "migration-3",
+      projectId: "project-3",
       rootNodeId: "node-root-3",
       sourceSecurityDomainId: "domain-old-3",
       targetSecurityDomainId: "domain-new-3",
     });
     const fourthPlan = migration({
       id: "migration-4",
+      projectId: "project-4",
       rootNodeId: "node-root-4",
       sourceSecurityDomainId: "domain-old-4",
       targetSecurityDomainId: "domain-new-4",
@@ -334,8 +339,9 @@ test("TC-SEC-002C SQLite rejects relational and JSON migration-plan drift", asyn
       await transaction.nodes.insert({
         tenantId: tenant,
         id: "node-root-drift",
-        projectId: secondPlan.projectId,
+        projectId: "project-drift",
         parentId: null,
+        leaderPrincipalId: null,
         title: "node-root-drift",
         kind: "work_package",
         securityDomainId: secondPlan.sourceSecurityDomainId,

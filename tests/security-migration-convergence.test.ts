@@ -249,6 +249,7 @@ function node(id = "root", parentId: string | null = null, domain: string | null
     id,
     projectId,
     parentId,
+    leaderPrincipalId: null,
     title: id,
     kind: "work_package",
     securityDomainId: domain,

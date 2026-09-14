@@ -1,14 +1,18 @@
 {
   "gate": "P0-07 敏感 ACL",
   "task": "P0-07/TC-SEC-004A",
-  "status": "TASK_PACKET_READY",
-  "risk": "R2",
+  "status": "DONE",
+  "risk": "R2 PASS",
   "worker": "Antigravity/Gemini 3.8 Flash High",
   "branch": "main",
-  "commit": "6305b78a998196e4f07fca6a1ed64462dce2d463",
-  "tests": [],
-  "evidence": [
-    "docs/agent-tasks/P0-07-TC-SEC-004A.md"
+  "commit": "ab1c18658984be25fdd09cd763eb78b029bb9e39",
+  "tests": [
+    "tests/node-owner.test.ts",
+    "tests/task-upgrade-compatibility.test.ts"
   ],
-  "next_action": "实现 ProjectNode Node Owner/U2 领域模型、敏感域权限交集、404 隐蔽矩阵和 SQLite v10 升级；不得实现 U7/U8 或 P0-05A-T1b。"
+  "evidence": [
+    "docs/agent-tasks/P0-07-TC-SEC-004A.md",
+    "docs/reports/P0-07-TC-SEC-004A-node-owner-guard.md"
+  ],
+  "next_action": "选择下一个 Ready Task（TC-SEC-004B 模板角色槽位与项目角色绑定 / P0-05A-T1b 任务验收人三级解析）；生产 Huly 协同收敛保持 fail-closed/out-of-scope。"
 }

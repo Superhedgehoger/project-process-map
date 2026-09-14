@@ -52,6 +52,7 @@ function node(): ProjectNode {
     id: "root",
     projectId,
     parentId: null,
+    leaderPrincipalId: null,
     title: "root",
     kind: "work_package",
     securityDomainId: sourceDomainId,

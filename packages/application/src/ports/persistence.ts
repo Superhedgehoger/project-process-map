@@ -25,6 +25,74 @@ export type CommandReceipt<TResult = unknown> = Readonly<{
   createdAtUtc: string;
 }>;
 
+export type AssignNodeLeaderCommand = Readonly<{
+  tenantId: TenantId;
+  commandId: string;
+  idempotencyKey: string;
+  correlationId: string;
+  principalId: PrincipalId;
+  projectId: string;
+  nodeId: string;
+  expectedVersion: number;
+  leaderPrincipalId: PrincipalId | null;
+  occurredAtUtc: string;
+}>;
+
+export type NodeLeaderAssignedPayload = Readonly<{
+  nodeId: string;
+  previousLeaderPrincipalId: PrincipalId | null;
+  leaderPrincipalId: PrincipalId | null;
+}>;
+
+export type AssignNodeLeaderResult = Readonly<{
+  node: ProjectNode;
+  event: DomainEvent<NodeLeaderAssignedPayload>;
+  outbox: OutboxMessage;
+  replayed: boolean;
+}>;
+
+export type AssignNodeLeaderFailurePoint = "after_aggregate" | "after_event" | "after_outbox" | "after_idempotency";
+
+export type CreateNodeCommand = Readonly<{
+  tenantId: TenantId;
+  commandId: string;
+  idempotencyKey: string;
+  correlationId: string;
+  principalId: PrincipalId;
+  projectId: string;
+  nodeId: string;
+  parentId: string | null;
+  leaderPrincipalId?: PrincipalId | null;
+  title: string;
+  kind?: ProjectNode["kind"];
+  securityDomainId: string | null;
+  occurredAtUtc: string;
+}>;
+
+export type NodeCreatedPayload = Readonly<{
+  nodeId: string;
+  parentId: string | null;
+  title: string;
+  kind: ProjectNode["kind"];
+}>;
+
+export type CreateNodeResult = Readonly<{
+  node: ProjectNode;
+  event: DomainEvent<NodeCreatedPayload>;
+  outbox: OutboxMessage;
+  leaderAssignedEvent?: DomainEvent<NodeLeaderAssignedPayload> | undefined;
+  leaderAssignedOutbox?: OutboxMessage | undefined;
+  replayed: boolean;
+}>;
+
+export type CreateNodeFailurePoint =
+  | "after_aggregate"
+  | "after_event"
+  | "after_outbox"
+  | "after_leader_assigned"
+  | "after_leader_outbox"
+  | "after_idempotency";
+
 export interface ProjectNodeRepository {
   get(nodeId: string): Promise<ProjectNode | undefined>;
   listByProject(projectId: string): Promise<ProjectNode[]>;
@@ -329,6 +397,14 @@ export interface Persistence {
   transaction<T>(tenantId: TenantId, work: (transaction: TransactionContext) => Promise<T>): Promise<T>;
   read<T>(tenantId: TenantId, work: (transaction: TransactionContext) => Promise<T>): Promise<T>;
   close(): Promise<void>;
+  executeCreateNode(
+    command: CreateNodeCommand,
+    failurePoint?: CreateNodeFailurePoint,
+  ): Promise<CreateNodeResult>;
+  executeAssignNodeLeader(
+    command: AssignNodeLeaderCommand,
+    failurePoint?: AssignNodeLeaderFailurePoint,
+  ): Promise<AssignNodeLeaderResult>;
 }
 
 export type ClaimOptions = Readonly<{

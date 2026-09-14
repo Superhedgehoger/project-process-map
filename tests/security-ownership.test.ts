@@ -89,6 +89,7 @@ async function prepare(persistence: Persistence): Promise<void> {
       id,
       projectId: "ownership-project",
       parentId: null,
+      leaderPrincipalId: null,
       title: id,
       kind: "work_package",
       securityDomainId: null,

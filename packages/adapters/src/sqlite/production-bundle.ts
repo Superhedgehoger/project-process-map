@@ -1,3 +1,11 @@
+import type {
+  AssignNodeLeaderCommand,
+  AssignNodeLeaderFailurePoint,
+  AssignNodeLeaderResult,
+  CreateNodeCommand,
+  CreateNodeFailurePoint,
+  CreateNodeResult,
+} from "../../../application/src/ports/persistence.ts";
 import type { VerifyMigrationReadiness } from "../../../application/src/security/security-migration-coordinator.ts";
 import { HulyRestCollaborationEpochReadinessAdapter, type HulyRestConfig } from "../huly-rest.ts";
 import { SqlitePersistence } from "./persistence.ts";
@@ -12,6 +20,8 @@ export type ProductionSqliteBundleOptions = Readonly<{
 export type ProductionSqliteBundle = Readonly<{
   persistence: SqlitePersistence;
   verifyMigrationReadiness?: VerifyMigrationReadiness | undefined;
+  createNode: (command: CreateNodeCommand, failurePoint?: CreateNodeFailurePoint) => Promise<CreateNodeResult>;
+  assignNodeLeader: (command: AssignNodeLeaderCommand, failurePoint?: AssignNodeLeaderFailurePoint) => Promise<AssignNodeLeaderResult>;
 }>;
 
 export function createProductionSqliteBundle(options: ProductionSqliteBundleOptions): ProductionSqliteBundle {
@@ -27,5 +37,7 @@ export function createProductionSqliteBundle(options: ProductionSqliteBundleOpti
   return {
     persistence,
     verifyMigrationReadiness: persistence.verifyMigrationReadiness,
+    createNode: (command, failurePoint) => persistence.executeCreateNode(command, failurePoint),
+    assignNodeLeader: (command, failurePoint) => persistence.executeAssignNodeLeader(command, failurePoint),
   };
 }

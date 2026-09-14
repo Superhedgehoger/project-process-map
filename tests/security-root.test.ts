@@ -299,7 +299,7 @@ test("TC-SEC-001 empty-leaf and legacy-ID guards fail closed without partial wri
         }));
       } else {
         await persistence.transaction(tenant, async (transaction) => await transaction.nodes.insert({
-          tenantId: tenant, id: "legacy-node", projectId: "legacy-project", parentId: null, title: "旧敏感节点",
+          tenantId: tenant, id: "legacy-node", projectId: "legacy-project", parentId: null, leaderPrincipalId: null, title: "旧敏感节点",
           kind: "work_package", securityDomainId: command().securityDomainId, securityEpoch: 1,
           version: 1, deletedAtUtc: null,
         }));
@@ -530,6 +530,7 @@ test("TC-SEC-002A legacy, nested and migrating parent scopes fail closed", async
           id: "legacy-sensitive-parent",
           projectId: "project-security",
           parentId: null,
+          leaderPrincipalId: null,
           title: "Legacy parent",
           kind: "work_package",
           securityDomainId: "legacy-only-domain",
@@ -542,6 +543,7 @@ test("TC-SEC-002A legacy, nested and migrating parent scopes fail closed", async
           id: "nested-sensitive-parent",
           projectId: "project-security",
           parentId: null,
+          leaderPrincipalId: null,
           title: "Nested parent",
           kind: "work_package",
           securityDomainId: "nested-sensitive-domain",
@@ -554,6 +556,7 @@ test("TC-SEC-002A legacy, nested and migrating parent scopes fail closed", async
           id: "stale-epoch-parent",
           projectId: "project-security",
           parentId: null,
+          leaderPrincipalId: null,
           title: "Stale epoch parent",
           kind: "work_package",
           securityDomainId: command().securityDomainId,
@@ -566,6 +569,7 @@ test("TC-SEC-002A legacy, nested and migrating parent scopes fail closed", async
           id: "deleted-formal-root",
           projectId: "project-security",
           parentId: null,
+          leaderPrincipalId: null,
           title: "Deleted formal root",
           kind: "work_package",
           securityDomainId: "deleted-root-domain",
@@ -578,6 +582,7 @@ test("TC-SEC-002A legacy, nested and migrating parent scopes fail closed", async
           id: "live-parent-with-deleted-root",
           projectId: "project-security",
           parentId: null,
+          leaderPrincipalId: null,
           title: "Live parent with deleted root",
           kind: "work_package",
           securityDomainId: "deleted-root-domain",
@@ -661,6 +666,7 @@ test("TC-SEC-002A legacy, nested and migrating parent scopes fail closed", async
           id: "public-parent-during-migration",
           projectId: "project-security",
           parentId: null,
+          leaderPrincipalId: null,
           title: "Public parent during migration",
           kind: "work_package",
           securityDomainId: null,

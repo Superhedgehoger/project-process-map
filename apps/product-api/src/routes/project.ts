@@ -5,12 +5,20 @@ import { DownloadAssetContentHandler } from "../../../../packages/application/sr
 import { ApplicationError } from "../../../../packages/application/src/errors.ts";
 import {
   assertProjectSecurityStable,
+  canAccessProjectNodeDuringMigration,
   canAccessProjectObjectDuringMigration,
   canViewProjectObjectDuringMigration,
 } from "../../../../packages/application/src/access/project-security.ts";
+import { executeAssignNodeLeader } from "../../../../packages/application/src/create-node.ts";
 import type { AssetContentPort } from "../../../../packages/application/src/ports/integrations.ts";
 import type {
+  AssignNodeLeaderCommand,
+  AssignNodeLeaderFailurePoint,
+  AssignNodeLeaderResult,
   CommitSecurityMigrationResult,
+  CreateNodeCommand,
+  CreateNodeFailurePoint,
+  CreateNodeResult,
   Persistence,
   RollbackSecurityMigrationResult,
 } from "../../../../packages/application/src/ports/persistence.ts";
@@ -24,13 +32,15 @@ import type { VerifyMigrationReadiness } from "../../../../packages/application/
 
 import type { ApiNode } from "../../../../packages/contracts/src/project-process-map-api.ts";
 import { principalId, type PrincipalId, type TenantId } from "../../../../packages/domain/src/identity.ts";
-import type { ProjectNode } from "../../../../packages/domain/src/project-structure.ts";
+import { isNodeLeader, type ProjectNode } from "../../../../packages/domain/src/project-structure.ts";
 import { isCanonicalUtcTimestamp } from "../../../../packages/domain/src/security-access.ts";
 import { deterministicPublicId, optionalBodyBoolean, optionalBodyString, readJson, requiredHeader, requiredPositiveInteger, requiredString, sendBytes, sendJson } from "../http.ts";
 
 export type ProductRequestIdentity = Readonly<{ tenantId: TenantId; principalId: PrincipalId }>;
 export type ProjectRouteDependencies = Readonly<{
   persistence: Persistence;
+  createNode?: ((command: CreateNodeCommand, failurePoint?: CreateNodeFailurePoint) => Promise<CreateNodeResult>) | undefined;
+  assignNodeLeader?: ((command: AssignNodeLeaderCommand, failurePoint?: AssignNodeLeaderFailurePoint) => Promise<AssignNodeLeaderResult>) | undefined;
   assetContent: AssetContentPort;
   scheduleCollaborationProjection: boolean;
   verifyMigrationReadiness?: VerifyMigrationReadiness | undefined;
@@ -61,13 +71,9 @@ export async function routeProjectRequest(
       const visible: ProjectNode[] = [];
       const atUtc = new Date().toISOString();
       for (const node of await transaction.nodes.listByProject("phase0-project")) {
-        if (await canViewProjectObjectDuringMigration(
-          transaction, membership, identity.principalId, {
-            projectId: node.projectId,
-            ownerNodeId: node.id,
-            securityDomainId: node.securityDomainId,
-            securityEpoch: node.securityEpoch,
-          }, atUtc,
+        if (node.deletedAtUtc !== null) continue;
+        if (await canAccessProjectNodeDuringMigration(
+          transaction, membership, identity.principalId, node, "view", atUtc,
         )) visible.push(node);
       }
       return visible;
@@ -80,21 +86,16 @@ export async function routeProjectRequest(
     const nodeId = decodeURIComponent(detailMatch[1]);
     const detail = await persistence.read(identity.tenantId, async (transaction) => {
       const node = await transaction.nodes.get(nodeId);
-      if (node === undefined) throw new ApplicationError("NODE_NOT_FOUND", `Node not found: ${nodeId}`);
+      if (node === undefined || node.deletedAtUtc !== null) throw new ApplicationError("NODE_NOT_FOUND", `Node not found: ${nodeId}`);
       const membership = await transaction.memberships.get(node.projectId, identity.principalId);
       const atUtc = new Date().toISOString();
-      if (!await canViewProjectObjectDuringMigration(
-        transaction, membership, identity.principalId, {
-          projectId: node.projectId,
-          ownerNodeId: node.id,
-          securityDomainId: node.securityDomainId,
-          securityEpoch: node.securityEpoch,
-        }, atUtc,
+      if (!await canAccessProjectNodeDuringMigration(
+        transaction, membership, identity.principalId, node, "view", atUtc,
       )) throw new ApplicationError("NODE_NOT_FOUND", `Node not found: ${nodeId}`);
       const tasks = await listTasksForNodeInTransaction(
         transaction,
         nodeId,
-        async (task) => await canViewProjectObjectDuringMigration(
+        async (task) => task.deletedAtUtc === null && await canViewProjectObjectDuringMigration(
           transaction, membership, identity.principalId, {
             projectId: task.projectId,
             ownerNodeId: task.ownerNodeId,
@@ -126,6 +127,40 @@ export async function routeProjectRequest(
     return true;
   }
   const taskMatch = url.pathname.match(/^\/api\/nodes\/([^/]+)\/tasks$/);
+  const assignLeaderMatch = url.pathname.match(/^\/api\/nodes\/([^/]+)\/actions\/assign-leader$/);
+  if (request.method === "POST" && assignLeaderMatch?.[1] !== undefined) {
+    const nodeId = decodeURIComponent(assignLeaderMatch[1]);
+    const body = await readJson(request);
+    assertExactFields(body, ["expectedVersion", "leaderPrincipalId"]);
+    const expectedVersion = requiredPositiveInteger(body, "expectedVersion");
+    const rawLeader = body.leaderPrincipalId;
+    let targetLeader: PrincipalId | null = null;
+    if (rawLeader !== null && rawLeader !== undefined) {
+      if (typeof rawLeader !== "string" || rawLeader.trim().length === 0) {
+        throw new ApplicationError("VALIDATION_FAILED", "leaderPrincipalId must be a non-empty string or null");
+      }
+      targetLeader = principalId(rawLeader.trim());
+    }
+    const idempotencyKey = requiredHeader(request, "idempotency-key");
+    const principalKey = commandKey(identity, idempotencyKey);
+    const command: AssignNodeLeaderCommand = {
+      tenantId: identity.tenantId,
+      commandId: deterministicPublicId("cmd-assign-leader", principalKey),
+      idempotencyKey,
+      correlationId: request.headers["x-correlation-id"]?.toString() ?? randomUUID(),
+      principalId: identity.principalId,
+      projectId: "phase0-project",
+      nodeId,
+      leaderPrincipalId: targetLeader,
+      expectedVersion,
+      occurredAtUtc: new Date().toISOString(),
+    };
+    const result = await (dependencies.assignNodeLeader
+      ? dependencies.assignNodeLeader(command)
+      : executeAssignNodeLeader(persistence, command));
+    sendJson(response, 200, { value: publicNode(result.node), replayed: result.replayed });
+    return true;
+  }
   const securityRootMatch = url.pathname.match(/^\/api\/nodes\/([^/]+)\/security-domain$/);
   const securityGrantActionMatch = url.pathname.match(
     /^\/api\/security-domains\/([^/]+)\/grants\/([^/]+)\/actions\/([^/]+)$/,
@@ -187,20 +222,36 @@ export async function routeProjectRequest(
   }
   if (request.method === "POST" && taskMatch?.[1] !== undefined) {
     const nodeId = decodeURIComponent(taskMatch[1]);
-    const node = await persistence.read(identity.tenantId, async (transaction) => {
+    const nodeLookup = await persistence.read(identity.tenantId, async (transaction) => {
       const candidate = await transaction.nodes.get(nodeId);
-      if (candidate === undefined) return undefined;
+      if (candidate === undefined || candidate.deletedAtUtc !== null) return { status: "not_found" as const };
       const membership = await transaction.memberships.get(candidate.projectId, identity.principalId);
-      return await canAccessProjectObjectDuringMigration(
-        transaction, membership, identity.principalId, {
-          projectId: candidate.projectId,
-          ownerNodeId: candidate.id,
-          securityDomainId: candidate.securityDomainId,
-          securityEpoch: candidate.securityEpoch,
-        }, "contribute", new Date().toISOString(),
-      ) ? candidate : undefined;
+      if (membership?.status !== "active") return { status: "not_found" as const };
+
+      const isManager = membership.role === "project_manager";
+      const isLeader = isNodeLeader(candidate, identity.principalId);
+      const hasResponsibility = candidate.leaderPrincipalId === null ? true : (isManager || isLeader);
+
+      if (candidate.securityDomainId !== null) {
+        if (!hasResponsibility) return { status: "concealed_not_found" as const };
+        const allowed = await canAccessProjectNodeDuringMigration(
+          transaction, membership, identity.principalId, candidate, "contribute", new Date().toISOString(),
+        );
+        if (!allowed) return { status: "concealed_not_found" as const };
+        return { status: "ok" as const, node: candidate };
+      }
+
+      if (!hasResponsibility) return { status: "forbidden" as const };
+      return { status: "ok" as const, node: candidate };
     });
-    if (node === undefined) throw new ApplicationError("NODE_NOT_FOUND", `Node not found: ${nodeId}`);
+
+    if (nodeLookup.status === "not_found" || nodeLookup.status === "concealed_not_found") {
+      throw new ApplicationError("NODE_NOT_FOUND", `Node not found: ${nodeId}`);
+    }
+    if (nodeLookup.status === "forbidden") {
+      throw new ApplicationError("FORBIDDEN", "Forbidden: only project manager or node leader can create tasks under this node");
+    }
+    const node = nodeLookup.node;
     const body = await readJson(request);
     const idempotencyKey = requiredHeader(request, "idempotency-key");
     const principalKey = commandKey(identity, idempotencyKey);
@@ -262,7 +313,10 @@ export async function routeProjectRequest(
     const taskId = decodeURIComponent(fileMatch[1]);
     const task = await persistence.read(identity.tenantId, async (transaction) => {
       const candidate = await transaction.tasks.get(taskId);
-      if (candidate === undefined) return undefined;
+      if (candidate === undefined || candidate.deletedAtUtc !== null) return undefined;
+      const ownerNode = await transaction.nodes.get(candidate.ownerNodeId);
+      if (ownerNode === undefined || ownerNode.deletedAtUtc !== null) return undefined;
+      if (ownerNode.projectId !== candidate.projectId || ownerNode.securityDomainId !== candidate.securityDomainId || ownerNode.securityEpoch !== candidate.securityEpoch) return undefined;
       const membership = await transaction.memberships.get(candidate.projectId, identity.principalId);
       return await canAccessProjectObjectDuringMigration(
         transaction, membership, identity.principalId, {
@@ -436,5 +490,13 @@ function commandKey(identity: ProductRequestIdentity, idempotencyKey: string): s
 }
 
 function publicNode(node: ProjectNode): ApiNode {
-  return { id: node.id, projectId: node.projectId, parentId: node.parentId, title: node.title, kind: node.kind, version: node.version };
+  return {
+    id: node.id,
+    projectId: node.projectId,
+    parentId: node.parentId,
+    leaderPrincipalId: node.leaderPrincipalId,
+    title: node.title,
+    kind: node.kind,
+    version: node.version,
+  };
 }
