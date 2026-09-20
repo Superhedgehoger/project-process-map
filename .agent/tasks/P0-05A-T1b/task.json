@@ -1,0 +1,38 @@
+{
+  "taskId": "P0-05A-T1b",
+  "contextId": "4963b6b2-a016-472f-bec5-67ea953120b0",
+  "fc": ["FC-006", "A4-03A"],
+  "testId": ["TC-TASK-005"],
+  "riskClass": "R2",
+  "goal": "Resolve the Task reviewer through explicit reviewer, project template role slot, then node owner while preserving current authorization and atomic Task semantics.",
+  "expectedScope": [
+    "Task reviewer resolution application service",
+    "create and reviewer-assignment integration",
+    "Memory and SQLite parity only if new durable state is required",
+    "security, idempotency, concurrency and restart tests",
+    "task report and evidence"
+  ],
+  "nonGoals": [
+    "UI or public role-binding administration API",
+    "template-version upgrades",
+    "new Membership, Grant or ACL capabilities",
+    "U7, U8 or nested security domains",
+    "Huly changes"
+  ],
+  "acceptanceCriteria": [
+    "explicit eligible reviewer wins",
+    "Task creation accepts an optional reviewerRoleSlotKey that explicitly identifies the intended project slot",
+    "when multiple slot candidates are eligible, the canonical smallest Principal ID is selected deterministically",
+    "missing or ineligible slot candidates fall through to the current node owner",
+    "a final missing or ineligible candidate rejects atomically with REVIEWER_REQUIRED",
+    "every selected reviewer is revalidated against active principal, active project membership and the target object's current security-domain access",
+    "idempotent replay, migration behavior, CAS and transaction boundaries remain fail-closed",
+    "targeted and full mechanical gates pass",
+    "independent Codex R2 review passes before commit"
+  ],
+  "worker": "antigravity",
+  "status": "ACCEPTED",
+  "branch": "main",
+  "commit": "9cadf1c72140e0f0bf572efab0e18d27abc77a30",
+  "nextAction": "Commit and push the accepted worktree, then select the next Ready Task."
+}

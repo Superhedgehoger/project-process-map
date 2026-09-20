@@ -1,12 +1,11 @@
 {
-  "goal": "持续完成 project-process-map Phase 0 Backlog",
   "gate": "P0-05A Task acceptance / P0-07 responsibility resolution",
   "task": "P0-05A-T1b",
-  "status": "READY_TO_SELECT_NEXT_TASK",
+  "status": "DONE",
   "risk": "R2",
   "worker": "Antigravity/Gemini 3.8 Flash High",
   "branch": "main",
-  "commit": "9cadf1c72140e0f0bf572efab0e18d27abc77a30",
+  "base_commit": "9cadf1c72140e0f0bf572efab0e18d27abc77a30",
   "tests": [
     "tests/task-reviewer-resolution.test.ts",
     "tests/product-api.test.ts",
@@ -23,5 +22,5 @@
     ".agent/tasks/P0-05A-T1b/artifacts/test-result.json",
     ".agent/tasks/P0-05A-T1b/artifacts/evidence.json"
   ],
-  "next_action": "Commit and push P0-05A-T1b, then select the next Ready Task from the authoritative backlog."
+  "next_action": "Commit and push the accepted worktree, then select the next Ready Task."
 }

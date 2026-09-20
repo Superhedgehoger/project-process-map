@@ -9,6 +9,7 @@ import { Script } from "node:vm";
 import { createProductApi, type ProductApiOptions } from "../apps/product-api/src/app.ts";
 import { startProductApiServer } from "../apps/product-api/src/server.ts";
 import { decodeCommandResult, decodeSecurityGrant, decodeSecurityRoot, decodeTaskSummary } from "../packages/contracts/src/project-process-map-api.ts";
+import { ApplicationError } from "../packages/application/src/errors.ts";
 import { resolveExternalIdentity } from "../packages/application/src/identity/resolve-external-identity.ts";
 import { ExecuteSecurityMigrationBatchHandler } from "../packages/application/src/security/execute-security-migration-batch.ts";
 import { BeginSecurityMigrationVerificationHandler } from "../packages/application/src/security/begin-security-migration-verification.ts";
@@ -170,6 +171,46 @@ test("P0-05A-T1a Product API exposes an idempotent two-cycle task review path", 
   assert.deepEqual(body.value.reviewHistory.map((entry) => [entry.cycleNumber, entry.action]), [
     [1, "submitted"], [1, "rejected"], [2, "submitted"], [2, "accepted"],
   ]);
+});
+
+test("TC-TASK-005 Product API validates reviewerRoleSlotKey format, wrong type and requiresAcceptance=false", async () => {
+  const handler = createTestProductApi({ collaborationMode: "disabled" });
+
+  // 1. Wrong type: number
+  const wrongType = await call(handler, "/api/nodes/N-03/tasks", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "slot-wrong-type" },
+    body: JSON.stringify({ title: "Wrong Type", requiresAcceptance: true, reviewerRoleSlotKey: 12345 }),
+  });
+  assert.equal(wrongType.status, 422);
+  assert.equal((JSON.parse(wrongType.body) as { code: string }).code, "VALIDATION_FAILED");
+
+  // 2. Malformed key: spaces or invalid characters
+  const malformedKey = await call(handler, "/api/nodes/N-03/tasks", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "slot-malformed" },
+    body: JSON.stringify({ title: "Malformed Key", requiresAcceptance: true, reviewerRoleSlotKey: "invalid slot with spaces!" }),
+  });
+  assert.equal(malformedKey.status, 422);
+  assert.equal((JSON.parse(malformedKey.body) as { code: string }).code, "VALIDATION_FAILED");
+
+  // 3. Malformed key: exceeds 64 chars
+  const tooLongKey = await call(handler, "/api/nodes/N-03/tasks", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "slot-too-long" },
+    body: JSON.stringify({ title: "Too Long Key", requiresAcceptance: true, reviewerRoleSlotKey: "a".repeat(65) }),
+  });
+  assert.equal(tooLongKey.status, 422);
+  assert.equal((JSON.parse(tooLongKey.body) as { code: string }).code, "VALIDATION_FAILED");
+
+  // 4. requiresAcceptance=false with reviewerRoleSlotKey
+  const nonAcceptanceWithSlot = await call(handler, "/api/nodes/N-03/tasks", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "slot-non-acceptance" },
+    body: JSON.stringify({ title: "No Acceptance", requiresAcceptance: false, reviewerRoleSlotKey: "reviewer_qa" }),
+  });
+  assert.equal(nonAcceptanceWithSlot.status, 422);
+  assert.equal((JSON.parse(nonAcceptanceWithSlot.body) as { code: string }).code, "REVIEWER_NOT_ALLOWED");
 });
 
 test("P0-05A-T1a Product API rejects drifted command fields and supports explicit assignment", async () => {
@@ -1310,6 +1351,93 @@ test("TC-SEC-002K Product API exposes commit and rollback endpoints with strict 
   assert.equal(replayRollbackBody.state, "rolled_back");
   assert.equal(replayRollbackBody.migrationVersion, 3);
   assert.equal(replayRollbackBody.replayed, true);
+});
+
+test("TC-SEC-002K Product API error map preserves SECURITY_MIGRATION_MANIFEST_MISMATCH at 409", async () => {
+  const adapter = new ApiTestEpochReadinessAdapter();
+  adapter.checkEpochReadiness = async () => {
+    throw new ApplicationError("SECURITY_MIGRATION_MANIFEST_MISMATCH", "Manifest digest mismatch");
+  };
+  const persistence = new MemoryPersistence({ verifier: adapter });
+  const handler = createProductApi({
+    collaborationMode: "disabled",
+    persistence,
+    assetContent: new MemoryAssetContent(),
+    verifyMigrationReadiness: persistence.verifyMigrationReadiness,
+  });
+
+  await call(handler, "/api/nodes");
+
+  const migrationId = "mig-manifest-test";
+  await persistence.transaction(phase0Tenant, async (tx) => {
+    await tx.securityDomains.insert({
+      tenantId: phase0Tenant,
+      id: "sec-manifest-test",
+      projectId: "phase0-project",
+      rootNodeId: "N-03",
+      parentSecurityDomainId: null,
+      permissionVersion: 1,
+      version: 1,
+      createdByPrincipalId: principalId("phase0-user"),
+      createdAtUtc: "2026-09-11T00:00:00.000Z",
+      deletedAtUtc: null,
+    });
+    await tx.securityGrants.insert({
+      tenantId: phase0Tenant,
+      id: "grant-manifest-manager",
+      securityDomainId: "sec-manifest-test",
+      principalId: principalId("phase0-user"),
+      capability: "manage_access",
+      status: "active",
+      expiresAtUtc: null,
+      grantedByPrincipalId: principalId("phase0-user"),
+      reason: "setup",
+      version: 1,
+      createdAtUtc: "2026-09-11T00:00:00.000Z",
+      updatedAtUtc: "2026-09-11T00:00:00.000Z",
+    });
+    const plannedManifest: SecurityDomainMigration = {
+      tenantId: phase0Tenant,
+      id: migrationId,
+      projectId: "phase0-project",
+      rootNodeId: "N-03",
+      sourceSecurityDomainId: null,
+      targetSecurityDomainId: "sec-manifest-test",
+      hierarchyRevision: 1,
+      sourceSecurityEpoch: 1,
+      targetSecurityEpoch: 2,
+      state: "planned",
+      cursor: null,
+      totalItems: 1,
+      migratedItems: 0,
+      failure: null,
+      nextAttemptAtUtc: null,
+      deadlineAtUtc: "2026-09-15T00:00:00.000Z",
+      version: 1,
+      createdAtUtc: "2026-09-11T00:00:00.000Z",
+      updatedAtUtc: "2026-09-11T00:00:00.000Z",
+    };
+    const activeManifest = transitionSecurityMigration(plannedManifest, "active", "2026-09-11T01:00:00.000Z");
+    await tx.securityMigrations.insert(plannedManifest);
+    await tx.securityMigrations.saveProgressPreservingPlan(activeManifest.id, activeManifest, plannedManifest.version);
+  });
+
+  const batchHandler = new ExecuteSecurityMigrationBatchHandler(persistence);
+  await batchHandler.execute({
+    tenantId: phase0Tenant,
+    migrationId,
+    expectedMigrationVersion: 2,
+    batchSize: 10,
+    occurredAtUtc: "2026-09-11T02:00:00.000Z",
+  });
+
+  const res = await call(handler, `/api/security-migrations/${migrationId}/actions/rollback`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "rollback-manifest-key" },
+    body: JSON.stringify({ expectedVersion: 3, reason: "manifest mismatch rollback" }),
+  });
+  assert.equal(res.status, 409);
+  assert.equal((JSON.parse(res.body) as { code: string }).code, "SECURITY_MIGRATION_MANIFEST_MISMATCH");
 });
 
 function createTestProductApi(options: Omit<ProductApiOptions, "persistence" | "assetContent">) {

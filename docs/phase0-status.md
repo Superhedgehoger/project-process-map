@@ -1,6 +1,6 @@
 # Phase 0 状态
 
-更新日期：2026-09-14
+更新日期：2026-09-21
 
 | 任务 | 状态 | 当前证据 | 下一闸门 |
 |---|---|---|---|
@@ -9,10 +9,10 @@
 | P0-03 API/Worker/Adapter | 完成 | API `/health`、独立 Worker、应用层端口、SQLite/文件持久适配器、持久身份映射与契约测试 | 作为后续纵向链路的稳定接入边界 |
 | P0-04 Huly Shell 与 Node 原型 | 完成 | 四个独立插件包、五处可审计 composition 接入；Front/Transactor/Workspace 三镜像真实运行；Shell 内入口、六节点页面和 N-04 详情切换通过浏览器验收 | P0-05 Node → Task → File 纵向链路 |
 | P0-05 Node → Product Task/Asset → Huly 投影 | 完成 | Product Task/Asset 为权威事实；Huly 作为异步投影；确定性请求、超时回查、部分成功续跑、死信恢复与真实 wire envelope 均有契约测试 | P0-05A 任务验收与交付物守卫；P0-07 敏感 ACL |
-| P0-07 敏感 ACL | 进行中 | `TC-SEC-001` 首根链路；`TC-SEC-002A～K` 已覆盖继承、归属守卫、持久计划、inventory、条件换域、原子批次、进入 verifying、核心 API、单 Asset 下载交集、外部协作出站冻结与全通道纪元就绪守卫；`TC-SEC-003A/B/C` Grant 与 Membership 原子守卫；`TC-SEC-004A` Node Owner/U2 与 `TC-SEC-004B` TemplateRoleSlot/ProjectRoleBinding 均经 Codex R2 PASS，状态 `ACCEPTED / DONE` | 真实 U7/U8 固定身份、Task 验收人三级解析、嵌套域 |
+| P0-07 敏感 ACL | 进行中 | `TC-SEC-001` 首根链路；`TC-SEC-002A～K` 已覆盖继承、归属守卫、持久计划、inventory、条件换域、原子批次、进入 verifying、核心 API、单 Asset 下载交集、外部协作出站冻结与全通道纪元就绪守卫；`TC-SEC-003A/B/C` Grant 与 Membership 原子守卫；`TC-SEC-004A` Node Owner/U2 与 `TC-SEC-004B` TemplateRoleSlot/ProjectRoleBinding 均经 Codex R2 PASS，状态 `ACCEPTED / DONE` | 真实 U7/U8 固定身份、嵌套域 |
 | P0-ND-01 无 Docker 原生发行可行性 | 完成 | 自包含浏览器入口、Product API 与 Worker 原生启动；版本化 Node 24 tarball、SHA-256；临时目录冒烟确认未调用 Docker，并完成页面 → 节点 → 任务 → Asset → 重启回读 | P0-ND-02 干净 Linux、备份恢复与升级/回滚 |
 | ARCH-GATE-01 架构修正 | 完成 | CR-003、ADR-003～ADR-008；42 项行为/故障测试；无 Docker 原生发行与重启恢复冒烟通过 | 恢复按单条纵向切片开发，从 P0-05A 开始 |
-| P0-05A 任务验收与交付物守卫 | 进行中 | `T1a` 已完成显式验收人快照、两轮验收、最小持久成员/安全域授权、负责人/验收人改派、旧库回放兼容、事件/Outbox 和 SQLite 重启恢复；57 项测试通过 | 补 P0-07 成员配置与角色槽位解析，再进入 Deliverable 与节点完成守卫 |
+| P0-05A 任务验收与交付物守卫 | 进行中 | `T1a` 已完成验收周期底座；`T1b` 已完成显式验收人 → 项目角色槽位 → 节点负责人三级解析、确定性多人仲裁、当前权限重校验和三代回执 fail-closed 兼容；Codex R2 Cycle 5 PASS，64/64 定向与 313/313 全量测试通过 | 进入 Deliverable / Evidence 与节点完成守卫 |
 
 ## 启动条件
 
@@ -29,7 +29,7 @@ P0-01 至 P0-06 已按依赖顺序通过。产品运行骨架当前使用 SQLite
 
 CR-003 架构修正闸门已于 2026-09-04 通过。被否决的内存生产 Store、Huly Task 权威、同步跨系统事务和进程内 Saga 已从当前骨架移除；现在可以恢复 P0-05A，但仍须一次只实现一条小型纵向切片。
 
-P0-05A 是依赖 P0-07 的复合项，不能因 `T1a` 通过而整体关闭。`T1a` 覆盖显式验收人的核心周期、最小持久成员/安全域授权和项目经理改派；模板角色槽位、节点负责人回退、正式成员管理与授权审计、全通道敏感 ACL、验收 UI、Deliverable/Evidence 与节点完成守卫仍待后续切片。安全域迁移期间当前 API 整体冻结，待 P0-07 实现旧域与新域权限交集。详见 `docs/reports/P0-05A-T1a-task-review.md`。
+P0-05A 是依赖 P0-07 的复合项，不能因 `T1a` 或 `T1b` 通过而整体关闭。`T1a` 覆盖验收周期底座、最小持久成员/安全域授权和项目经理改派；`T1b` 已接通显式验收人、项目模板角色槽位与节点负责人三级解析，并在创建回放时重新校验当前 Principal、Membership、Grant、权威 Task 与安全域纪元。正式成员管理与授权审计、全通道敏感 ACL、验收 UI、Deliverable/Evidence 与节点完成守卫仍待后续切片。详见 `docs/reports/P0-05A-T1a-task-review.md` 与 `docs/reports/P0-05A-T1b-reviewer-resolution.md`。
 
 P0-07 的 `TC-SEC-001` 子切片已经建立正式 SecurityDomain/SecurityGrant 与首管理员原子创建链路，但 P0-07 总项保持进行中。为避免非空子树在迁移前泄漏，本期只接受空叶节点；创建后 Task/Asset 继承安全域，并拒绝创建可能保持公开的普通后代。v3 遗留域只保留查看兼容，且旧对象引用过的域 ID 不可被新正式域复用。详见 `docs/reports/P0-07-TC-SEC-001-first-security-root.md`。
 
@@ -61,6 +61,8 @@ P0-07 的 `TC-SEC-001` 子切片已经建立正式 SecurityDomain/SecurityGrant 
 
 `TC-SEC-004A` 已在 `ProjectNode` 聚合上建立权威的节点负责人（Node Owner / U2）领域模型（`leaderPrincipalId: PrincipalId | null`）。严格执行单向 PM 分配权限与候选人资格校验（同租户 active user + 同项目 active membership）；实现 `executeAssignNodeLeader` CAS 版本并发保护、事件、Outbox 与故障注入原子回滚；修复 v9 创建回执非空负责人重放漏洞（严格限制 v9Fingerprint 回退仅对 null/omitted 生效，非空负责人重放拒绝 IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD，且节点/事件/Outbox/回执/序列号零变更）；修复可信时间漏洞（鉴权使用 `this.nowUtc()`，回拨时间安全拦截 404）；修复迁移 Oracle 漏洞（隐蔽操作者身份与 Grant 判定置于迁移检查之前，U0/U1/U2/U3 均返回等价 404）；修复创建节点幂等重放陈旧节点漏洞（严格核验节点存在、未软删除、属性无漂移及操作者未降级）；强化故障注入原子回滚断言（验证 node、receipt、event count、outbox count 与 sequence 零残留）；确认 U2 身份绝对不能满足或突破敏感域最后管理员不变量；彻底消除所有公共底层变更权限（删除 mutator 导出函数，移除 bundle 的 raw repository 属性，方法收敛于 Persistence 私有闭包，杜绝跨实例 A/B 上下文破坏）；泛型 `nodes.insert` 拦截非空负责人（`NODE_LEADER_DIRECT_INSERT_FORBIDDEN`）；完成 SQLite schema v10 平滑升级、历史数据 null 回填与重启持久化。Codex R2 Cycle 6 最终评审 PASS，状态为 `ACCEPTED / DONE`，生产 Huly 协同收敛保持 fail-closed/out-of-scope。详见 `docs/reports/P0-07-TC-SEC-004A-node-owner-guard.md`。
 
-`TC-SEC-004B` 已建立多人候选的 `TemplateRoleSlot` 与 `ProjectRoleBinding` 底座：项目快照绑定单一模板版本且 write-once，只有当前 active Project Manager 可初始化或维护绑定，绑定本身不授予 Membership、Grant 或 ACL。Memory/SQLite schema v11 在可信时间、CAS、幂等历史回放、并发/重启、迁移冻结、完整事件/Outbox/Audit/Receipt 原子链与损坏数据 fail-closed 上保持一致；Cycle 7 独立 R2 Review PASS，72/72 定向与 284/284 全量测试通过。Task 验收人三级解析仍为后续独立切片。详见 `docs/reports/P0-07-TC-SEC-004B-role-binding-foundation.md`。
+`TC-SEC-004B` 已建立多人候选的 `TemplateRoleSlot` 与 `ProjectRoleBinding` 底座：项目快照绑定单一模板版本且 write-once，只有当前 active Project Manager 可初始化或维护绑定，绑定本身不授予 Membership、Grant 或 ACL。Memory/SQLite schema v11 在可信时间、CAS、幂等历史回放、并发/重启、迁移冻结、完整事件/Outbox/Audit/Receipt 原子链与损坏数据 fail-closed 上保持一致；Cycle 7 独立 R2 Review PASS，72/72 定向与 284/284 全量测试通过。详见 `docs/reports/P0-07-TC-SEC-004B-role-binding-foundation.md`。
 
-P0-01 风险详见 `docs/reports/P0-01-source-audit.md`；Docker 开发环境复跑见 `docs/reports/P0-02-selfhost-replay.md`；Shell 验收见 `docs/reports/P0-04-huly-shell.md`；纵向链路见 `docs/reports/P0-05-node-task-file.md`；任务验收见 `docs/reports/P0-05A-T1a-task-review.md`；敏感根见 `docs/reports/P0-07-TC-SEC-001-first-security-root.md`；Grant 写守卫见 `docs/reports/P0-07-TC-SEC-003A-grant-write.md`；事件原子性见 `docs/reports/P0-06a-local-event-outbox.md`；架构修正验收见 `docs/reports/ARCH-GATE-01-architecture-correction.md`；无 Docker 交付边界见 `docs/change-records/CR-002-docker-free-saas.md` 与 `docs/adr/ADR-002-docker-free-runtime.md`；出站投影冻结见 `docs/reports/P0-07-TC-SEC-002J-collaboration-projection-freeze.md`；纪元就绪守卫见 `docs/reports/P0-07-TC-SEC-002K-migration-epoch-readiness.md`；节点负责人守卫见 `docs/reports/P0-07-TC-SEC-004A-node-owner-guard.md`。
+`P0-05A-T1b` 已将 Task 创建时的验收人解析固定为：合格的显式验收人 → 创建命令显式指定的项目角色槽位 → 当前节点负责人 → 原子 `REVIEWER_REQUIRED`。多人槽位先按 active user Principal、同项目 active Membership 与目标安全域当前 `view` 权限过滤，再按 ECMAScript code-unit 顺序选择最小 Principal ID。幂等回放绑定权威 Task/Node/Domain/Epoch、可信当前时间与 resolved reviewer，三代 receipt 仅保留明确的 older-legacy 兼容范围；Cycle 5 独立 R2 Review PASS，64/64 定向与 313/313 全量测试通过。详见 `docs/reports/P0-05A-T1b-reviewer-resolution.md`。
+
+P0-01 风险详见 `docs/reports/P0-01-source-audit.md`；Docker 开发环境复跑见 `docs/reports/P0-02-selfhost-replay.md`；Shell 验收见 `docs/reports/P0-04-huly-shell.md`；纵向链路见 `docs/reports/P0-05-node-task-file.md`；任务验收见 `docs/reports/P0-05A-T1a-task-review.md` 与 `docs/reports/P0-05A-T1b-reviewer-resolution.md`；敏感根见 `docs/reports/P0-07-TC-SEC-001-first-security-root.md`；Grant 写守卫见 `docs/reports/P0-07-TC-SEC-003A-grant-write.md`；事件原子性见 `docs/reports/P0-06a-local-event-outbox.md`；架构修正验收见 `docs/reports/ARCH-GATE-01-architecture-correction.md`；无 Docker 交付边界见 `docs/change-records/CR-002-docker-free-saas.md` 与 `docs/adr/ADR-002-docker-free-runtime.md`；出站投影冻结见 `docs/reports/P0-07-TC-SEC-002J-collaboration-projection-freeze.md`；纪元就绪守卫见 `docs/reports/P0-07-TC-SEC-002K-migration-epoch-readiness.md`；节点负责人守卫见 `docs/reports/P0-07-TC-SEC-004A-node-owner-guard.md`。

@@ -119,6 +119,9 @@ export function asApplicationError(error: unknown): ApplicationError {
   if (error instanceof Error && error.message.startsWith("Aggregate already exists:")) {
     return new ApplicationError("CONFLICT", error.message);
   }
+  if (error instanceof Error && (error.message.startsWith("INVALID_ROLE_SLOT_KEY:") || error.message === "TASK_RECEIPT_INVALID")) {
+    return new ApplicationError("VALIDATION_FAILED", error.message);
+  }
   return new ApplicationError("UPSTREAM_FAILURE", error instanceof Error ? error.message : String(error));
 }
 

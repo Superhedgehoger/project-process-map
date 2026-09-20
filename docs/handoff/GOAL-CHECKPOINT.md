@@ -19,10 +19,11 @@
   6. 彻底消除所有公共底层变更权限，泛型 insert 拦截非空负责人。
 - 架构事实说明：生产 Huly 协同收敛保持 fail-closed（超出本切片范围，由既有架构守卫妥善隔离）。
 - 当前 Gate：P0-07 敏感 ACL（总项继续进行中）
-- 当前切片：P0-07 / TC-SEC-004B 模板角色槽位与项目角色绑定底座。
-- 当前状态：ACCEPTED / DONE；Codex R2 Cycle 7 最终结论 PASS。Cycle 6 针对 Memory durable outbox value-side ID 一致性校验已闭环，变异探针证明回归测试可捕获守卫移除。72/72 切片测试与 284/284 全量工程测试通过，typecheck、Huly 14/4、`git diff --check`、JSON 与凭据扫描 clean。
-- 验收报告：`docs/reports/P0-07-TC-SEC-004B-role-binding-foundation.md`
-- next_action：提交并推送 TC-SEC-004B，然后从 Disk State 选择下一个 Ready Task。
+- 最新完成切片：P0-07 / TC-SEC-004B 模板角色槽位与项目角色绑定底座，提交 `9cadf1c72140e0f0bf572efab0e18d27abc77a30` 已推送并与 `origin/main` 一致。
+- 当前切片：P0-05A-T1b Task 验收人三级解析。
+- 当前状态：ACCEPTED / DONE；Codex R2 Review Cycle 5 PASS（0 findings，safeToAcceptCommitAndPush: true）。3 项非行为性证据用词修正已全部完成。机械门禁（64/64 定向、`pnpm check` 313/313、`git diff --check` clean、凭据/私钥扫描 0 匹配）已全部通过。
+- 验收报告：`docs/reports/P0-05A-T1b-reviewer-resolution.md`
+- next_action：提交并推送 P0-05A-T1b，然后从权威 Backlog 选择下一个 Ready Task。
 
 旧会话 `e8e244ee-0c02-4769-8bd0-37f1ca8bd485` 仅是该 Git 工作树所在目录，不得作为聊天执行上下文恢复。原绑定的“project-process-map Goal 恢复”和“用量恢复后继续任务”自动任务已于 2026-09-05 暂停；后续不得把本 Goal 的恢复投递到该旧会话。
 

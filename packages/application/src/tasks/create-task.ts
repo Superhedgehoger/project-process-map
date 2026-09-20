@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
 import { eventTopic, type BackgroundJob, type DomainEvent, type OutboxMessage } from "../../../domain/src/events.ts";
 import type { PrincipalId, TenantId } from "../../../domain/src/identity.ts";
+import { assertValidSlotKey } from "../../../domain/src/role-slots.ts";
 import { taskLifecycle, type ProductTask, type TaskLifecycleState, type TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import { ApplicationError } from "../errors.ts";
 import { assertProjectSecurityStable, canAccessProjectObject, canAccessProjectObjectDuringMigration } from "../access/project-security.ts";
 import type { CommandScope, Persistence, TransactionContext } from "../ports/persistence.ts";
+import { isCandidateEligible, resolveTaskReviewer } from "./resolve-task-reviewer.ts";
 
 export type CreateTaskCommand = Readonly<{
   tenantId: TenantId;
@@ -19,6 +21,7 @@ export type CreateTaskCommand = Readonly<{
   assigneePrincipalId: PrincipalId | null;
   requiresAcceptance: boolean;
   reviewerPrincipalId: PrincipalId | null;
+  reviewerRoleSlotKey?: string | null | undefined;
   occurredAtUtc: string;
 }>;
 
@@ -74,10 +77,11 @@ export class CreateTaskHandler {
       assigneePrincipalId: command.assigneePrincipalId,
       requiresAcceptance: command.requiresAcceptance,
       reviewerPrincipalId: command.reviewerPrincipalId,
+      reviewerRoleSlotKey: command.reviewerRoleSlotKey ?? null,
     });
 
     return await this.#persistence.transaction(command.tenantId, async (transaction) => {
-      const authorizationAtUtc = new Date().toISOString();
+      const authorizationAtUtc = this.#persistence.nowUtc();
       const node = await transaction.nodes.get(command.nodeId);
       if (node === undefined) throw new Error("NODE_NOT_FOUND");
       if (node.projectId !== command.projectId) throw new Error("PROJECT_MISMATCH");
@@ -93,21 +97,196 @@ export class CreateTaskHandler {
       await assertProjectSecurityStable(transaction, command.projectId);
       const previous = await transaction.receipts.get<unknown>(scope);
       if (previous !== undefined) {
-        const legacy = isLegacyTaskView(previous.result) && command.reviewerPrincipalId === null
-          && legacyFingerprints(command).includes(previous.fingerprint);
-        if (previous.fingerprint !== fingerprint && !legacy) throw new ApplicationError(
-          "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD",
-          "The idempotency key was already used with a different payload",
-        );
-        return { value: taskViewFromReceipt(previous.result), replayed: true };
+        if (typeof previous.result !== "object" || previous.result === null) {
+          throw new ApplicationError("VALIDATION_FAILED", "Task receipt is invalid");
+        }
+        const raw = previous.result as Record<string, unknown>;
+
+        let generation: "current" | "base" | "older_legacy" | null = null;
+        if (previous.fingerprint === fingerprint) {
+          generation = "current";
+        } else if (
+          (command.reviewerRoleSlotKey === null || command.reviewerRoleSlotKey === undefined)
+          && previous.fingerprint === baseFingerprint(command)
+        ) {
+          generation = "base";
+        } else if (
+          (command.reviewerRoleSlotKey === null || command.reviewerRoleSlotKey === undefined)
+          && isOlderLegacyReceipt(raw) && command.reviewerPrincipalId === null
+          && legacyFingerprints(command).includes(previous.fingerprint)
+        ) {
+          generation = "older_legacy";
+        }
+        if (generation === null) {
+          throw new ApplicationError(
+            "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD",
+            "The idempotency key was already used with a different payload",
+          );
+        }
+
+        // Reject invalid or non-string projectId when present
+        if ("projectId" in raw && raw.projectId !== undefined) {
+          if (typeof raw.projectId !== "string" || raw.projectId !== command.projectId) {
+            throw new ApplicationError("VALIDATION_FAILED", "Receipt project ID is invalid or does not match command");
+          }
+        }
+
+        // Validate immutable creation receipt identity fields
+        if (typeof raw.id !== "string" || raw.id.trim().length === 0 || raw.id !== command.taskId) {
+          throw new ApplicationError("VALIDATION_FAILED", "Receipt task ID does not match command");
+        }
+        if (typeof raw.nodeId !== "string" || raw.nodeId.trim().length === 0 || raw.nodeId !== command.nodeId) {
+          throw new ApplicationError("VALIDATION_FAILED", "Receipt node ID does not match command");
+        }
+        if (typeof raw.title !== "string" || raw.title.trim().length === 0 || raw.title !== command.title) {
+          throw new ApplicationError("VALIDATION_FAILED", "Receipt title does not match command");
+        }
+        if (typeof raw.requiresAcceptance !== "boolean" || raw.requiresAcceptance !== command.requiresAcceptance) {
+          throw new ApplicationError("VALIDATION_FAILED", "Receipt requiresAcceptance does not match command");
+        }
+
+        // Creation snapshot status and version invariants:
+        // A create_task receipt always represents the initial creation snapshot.
+        if (raw.version !== 1) {
+          throw new ApplicationError("VALIDATION_FAILED", "Receipt version must be 1 for a creation snapshot");
+        }
+        if (raw.status !== "todo") {
+          throw new ApplicationError("VALIDATION_FAILED", "Receipt status must be todo for a creation snapshot");
+        }
+
+        // Generation-aware field validation:
+        // For current and immediate-base receipts, require creation fields that are part of those formats
+        // to be explicitly present with correct types.
+        if (generation === "current" || generation === "base") {
+          // assigneePrincipalId must be explicitly present and either null or a non-empty string
+          if (!("assigneePrincipalId" in raw) || raw.assigneePrincipalId === undefined) {
+            throw new ApplicationError("VALIDATION_FAILED", "Receipt assigneePrincipalId must be explicitly present");
+          }
+          if (raw.assigneePrincipalId !== null && (typeof raw.assigneePrincipalId !== "string" || raw.assigneePrincipalId.trim().length === 0)) {
+            throw new ApplicationError("VALIDATION_FAILED", "Receipt assigneePrincipalId must be null or a non-empty string");
+          }
+          if (raw.assigneePrincipalId !== command.assigneePrincipalId) {
+            throw new ApplicationError("VALIDATION_FAILED", "Receipt assignee does not match command");
+          }
+
+          // reviewerPrincipalId must be explicitly present
+          if (!("reviewerPrincipalId" in raw) || raw.reviewerPrincipalId === undefined) {
+            throw new ApplicationError("VALIDATION_FAILED", "Receipt reviewerPrincipalId must be explicitly present");
+          }
+          if (command.requiresAcceptance) {
+            if (typeof raw.reviewerPrincipalId !== "string" || raw.reviewerPrincipalId.trim().length === 0) {
+              throw new ApplicationError("VALIDATION_FAILED", "Task receipt reviewer snapshot is corrupt or missing");
+            }
+            if (command.reviewerPrincipalId !== null && raw.reviewerPrincipalId !== command.reviewerPrincipalId) {
+              throw new ApplicationError("VALIDATION_FAILED", "Receipt reviewer does not match explicitly requested reviewer");
+            }
+          } else {
+            if (raw.reviewerPrincipalId !== null) {
+              throw new ApplicationError("VALIDATION_FAILED", "Task receipt reviewer must be null when requiresAcceptance is false");
+            }
+          }
+
+          // reviewHistory must be explicitly present as an array with length 0
+          if (!("reviewHistory" in raw) || raw.reviewHistory === undefined) {
+            throw new ApplicationError("VALIDATION_FAILED", "Receipt reviewHistory must be explicitly present");
+          }
+          if (!Array.isArray(raw.reviewHistory)) {
+            throw new ApplicationError("VALIDATION_FAILED", "Receipt reviewHistory must be an array");
+          }
+          for (const item of raw.reviewHistory) {
+            assertValidTaskReviewActionView(item);
+          }
+          if (raw.reviewHistory.length !== 0) {
+            throw new ApplicationError("VALIDATION_FAILED", "Receipt reviewHistory must be empty for a creation snapshot");
+          }
+        } else {
+          // generation === "older_legacy"
+          // Confine missing-field normalization only to the documented older-legacy generation.
+          if ("assigneePrincipalId" in raw && raw.assigneePrincipalId !== undefined && raw.assigneePrincipalId !== null) {
+            throw new ApplicationError("VALIDATION_FAILED", "Older legacy receipt assignee must be null or omitted");
+          }
+          if ("reviewerPrincipalId" in raw && raw.reviewerPrincipalId !== undefined && raw.reviewerPrincipalId !== null) {
+            throw new ApplicationError("VALIDATION_FAILED", "Older legacy receipt reviewer must be null or omitted");
+          }
+          if ("reviewHistory" in raw && raw.reviewHistory !== undefined) {
+            if (!Array.isArray(raw.reviewHistory) || raw.reviewHistory.length !== 0) {
+              throw new ApplicationError("VALIDATION_FAILED", "Older legacy receipt reviewHistory must be omitted or empty");
+            }
+          }
+        }
+
+        const replayedView: TaskView = {
+          id: raw.id as string,
+          nodeId: raw.nodeId as string,
+          title: raw.title as string,
+          status: raw.status as TaskLifecycleState,
+          assigneePrincipalId: generation === "older_legacy" ? null : (raw.assigneePrincipalId as PrincipalId | null),
+          requiresAcceptance: raw.requiresAcceptance as boolean,
+          reviewerPrincipalId: generation === "older_legacy" ? null : (raw.reviewerPrincipalId as PrincipalId | null),
+          version: raw.version as number,
+          reviewHistory: generation === "older_legacy" ? [] : structuredClone(raw.reviewHistory as TaskReviewActionView[]),
+        };
+
+        // Load authoritative Task and validate ownership and domain/epoch coherence
+        const authoritativeTask = await transaction.tasks.get(command.taskId);
+        if (authoritativeTask === undefined || authoritativeTask.deletedAtUtc !== null) {
+          throw new ApplicationError("TASK_NOT_FOUND", `Task not found: ${command.taskId}`);
+        }
+        if (authoritativeTask.id !== command.taskId
+          || authoritativeTask.projectId !== command.projectId
+          || authoritativeTask.ownerNodeId !== command.nodeId) {
+          throw new ApplicationError("TASK_NOT_FOUND", "Task identity or ownership mismatch");
+        }
+        if (authoritativeTask.securityDomainId !== node.securityDomainId
+          || authoritativeTask.securityEpoch !== node.securityEpoch) {
+          throw new ApplicationError("TASK_NOT_FOUND", "Task security domain or epoch incoherent with node");
+        }
+        if (authoritativeTask.requiresAcceptance !== command.requiresAcceptance) {
+          throw new ApplicationError("TASK_NOT_FOUND", "Task acceptance semantics mismatch");
+        }
+        if (authoritativeTask.version < replayedView.version) {
+          throw new ApplicationError("TASK_NOT_FOUND", "Task version is less than receipt version");
+        }
+
+        // Authorize persisted resolved reviewer against authoritative Task's current domain
+        if (replayedView.requiresAcceptance) {
+          if (replayedView.reviewerPrincipalId === null) {
+            throw new ApplicationError("REVIEWER_REQUIRED", "A reviewer is required for an acceptance task");
+          }
+          const isEligible = await isCandidateEligible(
+            transaction,
+            command.tenantId,
+            command.projectId,
+            authoritativeTask.securityDomainId,
+            replayedView.reviewerPrincipalId,
+            authorizationAtUtc,
+          );
+          if (!isEligible) {
+            throw new ApplicationError("REVIEWER_NOT_ELIGIBLE", "The reviewer is not eligible for this task");
+          }
+        }
+
+        if (replayedView.assigneePrincipalId !== null) {
+          const assignee = await transaction.principals.get(replayedView.assigneePrincipalId);
+          if (assignee?.status !== "active" || !await canAccessProjectObject(
+            transaction,
+            await transaction.memberships.get(command.projectId, replayedView.assigneePrincipalId),
+            replayedView.assigneePrincipalId,
+            command.projectId,
+            authoritativeTask.securityDomainId,
+            "view",
+            authorizationAtUtc,
+          )) {
+            throw new ApplicationError("ASSIGNEE_NOT_ELIGIBLE", "The assignee is not eligible for this task");
+          }
+        }
+
+        return { value: replayedView, replayed: true };
       }
       if (node.kind === "milestone") throw new Error("MILESTONE_TASK_FORBIDDEN");
       if (node.deletedAtUtc !== null) throw new Error("NODE_DELETED");
       if (await transaction.tasks.get(command.taskId) !== undefined) throw new Error("TASK_ALREADY_EXISTS");
-      if (command.requiresAcceptance && command.reviewerPrincipalId === null) {
-        throw new ApplicationError("REVIEWER_REQUIRED", "A reviewer is required for an acceptance task");
-      }
-      if (!command.requiresAcceptance && command.reviewerPrincipalId !== null) {
+      if (!command.requiresAcceptance && (command.reviewerPrincipalId !== null || (command.reviewerRoleSlotKey !== null && command.reviewerRoleSlotKey !== undefined))) {
         throw new ApplicationError("REVIEWER_NOT_ALLOWED", "A reviewer is only valid for an acceptance task");
       }
       if (command.assigneePrincipalId !== null && !await canAccessProjectObject(
@@ -123,20 +302,18 @@ export class CreateTaskHandler {
         const assignee = await transaction.principals.get(command.assigneePrincipalId);
         if (assignee?.status !== "active") throw new ApplicationError("ASSIGNEE_NOT_ELIGIBLE", "The assignee is not active");
       }
-      if (command.reviewerPrincipalId !== null && !await canAccessProjectObject(
-        transaction,
-        await transaction.memberships.get(command.projectId, command.reviewerPrincipalId),
-        command.reviewerPrincipalId,
-        command.projectId,
-        node.securityDomainId,
-        "view",
-        authorizationAtUtc,
-      )) {
-        throw new ApplicationError("REVIEWER_NOT_ELIGIBLE", "The reviewer is not eligible for this task");
-      }
-      if (command.reviewerPrincipalId !== null) {
-        const reviewer = await transaction.principals.get(command.reviewerPrincipalId);
-        if (reviewer?.status !== "active") throw new ApplicationError("REVIEWER_NOT_ELIGIBLE", "The reviewer is not active");
+
+      let resolvedReviewerPrincipalId: PrincipalId | null = null;
+      if (command.requiresAcceptance) {
+        const resolution = await resolveTaskReviewer(transaction, {
+          tenantId: command.tenantId,
+          projectId: command.projectId,
+          node,
+          explicitReviewerPrincipalId: command.reviewerPrincipalId,
+          reviewerRoleSlotKey: command.reviewerRoleSlotKey,
+          authorizationAtUtc,
+        });
+        resolvedReviewerPrincipalId = resolution.reviewerPrincipalId;
       }
 
       const task: ProductTask = {
@@ -149,7 +326,7 @@ export class CreateTaskHandler {
         title: command.title,
         assigneePrincipalId: command.assigneePrincipalId,
         requiresAcceptance: command.requiresAcceptance,
-        reviewerPrincipalId: command.reviewerPrincipalId,
+        reviewerPrincipalId: resolvedReviewerPrincipalId,
         executionState: "todo",
         reviewState: command.requiresAcceptance ? "not_submitted" : "not_required",
         version: 1,
@@ -264,6 +441,7 @@ function projectionJob(command: CreateTaskCommand, task: ProductTask): Backgroun
 
 function validate(command: CreateTaskCommand): void {
   for (const [name, value] of Object.entries({
+    tenantId: command.tenantId,
     commandId: command.commandId,
     idempotencyKey: command.idempotencyKey,
     correlationId: command.correlationId,
@@ -272,12 +450,34 @@ function validate(command: CreateTaskCommand): void {
     nodeId: command.nodeId,
     taskId: command.taskId,
     title: command.title,
-  })) if (String(value).trim().length === 0) throw new Error(`${name} is required`);
-  if (!command.occurredAtUtc.endsWith("Z") || Number.isNaN(Date.parse(command.occurredAtUtc))) throw new Error("occurredAtUtc must be UTC");
+  })) if (String(value).trim().length === 0) throw new ApplicationError("VALIDATION_FAILED", `${name} is required`);
+  if (!command.occurredAtUtc.endsWith("Z") || Number.isNaN(Date.parse(command.occurredAtUtc))) {
+    throw new ApplicationError("VALIDATION_FAILED", "occurredAtUtc must be UTC");
+  }
+  if (!command.requiresAcceptance && (command.reviewerPrincipalId !== null || (command.reviewerRoleSlotKey !== null && command.reviewerRoleSlotKey !== undefined))) {
+    throw new ApplicationError("REVIEWER_NOT_ALLOWED", "A reviewer is only valid for an acceptance task");
+  }
+  if (command.reviewerRoleSlotKey !== undefined && command.reviewerRoleSlotKey !== null) {
+    if (typeof command.reviewerRoleSlotKey !== "string" || !/^[a-zA-Z0-9_-]{1,64}$/.test(command.reviewerRoleSlotKey)) {
+      throw new ApplicationError("VALIDATION_FAILED", `reviewerRoleSlotKey format or length is invalid: ${command.reviewerRoleSlotKey}`);
+    }
+  }
 }
 
 function hash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function baseFingerprint(command: CreateTaskCommand): string {
+  return hash({
+    projectId: command.projectId,
+    nodeId: command.nodeId,
+    taskId: command.taskId,
+    title: command.title,
+    assigneePrincipalId: command.assigneePrincipalId,
+    requiresAcceptance: command.requiresAcceptance,
+    reviewerPrincipalId: command.reviewerPrincipalId,
+  });
 }
 
 function legacyFingerprints(command: CreateTaskCommand): string[] {
@@ -294,25 +494,40 @@ function legacyFingerprints(command: CreateTaskCommand): string[] {
   return fingerprints;
 }
 
-function isLegacyTaskView(value: unknown): boolean {
-  return typeof value === "object" && value !== null && !("reviewHistory" in value);
+function isOlderLegacyReceipt(value: Record<string, unknown>): boolean {
+  return !("reviewHistory" in value)
+    && (!("assigneePrincipalId" in value) || value.assigneePrincipalId === null)
+    && (!("reviewerPrincipalId" in value) || value.reviewerPrincipalId === null);
 }
 
-function taskViewFromReceipt(value: unknown): TaskView {
-  if (typeof value !== "object" || value === null) throw new Error("TASK_RECEIPT_INVALID");
-  const task = value as Partial<TaskView>;
-  if (typeof task.id !== "string" || typeof task.nodeId !== "string" || typeof task.title !== "string"
-    || typeof task.status !== "string" || typeof task.requiresAcceptance !== "boolean"
-    || typeof task.version !== "number") throw new Error("TASK_RECEIPT_INVALID");
-  return {
-    id: task.id,
-    nodeId: task.nodeId,
-    title: task.title,
-    status: task.status as TaskLifecycleState,
-    assigneePrincipalId: task.assigneePrincipalId ?? null,
-    requiresAcceptance: task.requiresAcceptance,
-    reviewerPrincipalId: task.reviewerPrincipalId ?? null,
-    version: task.version,
-    reviewHistory: structuredClone(task.reviewHistory ?? []),
-  };
+const VALID_REVIEW_ACTIONS: ReadonlySet<string> = new Set([
+  "submitted",
+  "accepted",
+  "rejected",
+  "withdrawn",
+]);
+
+function assertValidTaskReviewActionView(item: unknown): void {
+  if (typeof item !== "object" || item === null) {
+    throw new ApplicationError("VALIDATION_FAILED", "Task receipt reviewHistory item must be an object");
+  }
+  const r = item as Record<string, unknown>;
+  if (typeof r.cycleNumber !== "number" || !Number.isInteger(r.cycleNumber) || r.cycleNumber < 1) {
+    throw new ApplicationError("VALIDATION_FAILED", "Task receipt reviewHistory cycleNumber must be a positive integer");
+  }
+  if (typeof r.action !== "string" || !VALID_REVIEW_ACTIONS.has(r.action)) {
+    throw new ApplicationError("VALIDATION_FAILED", `Task receipt reviewHistory action is invalid: ${String(r.action)}`);
+  }
+  if (typeof r.actorPrincipalId !== "string" || r.actorPrincipalId.trim().length === 0) {
+    throw new ApplicationError("VALIDATION_FAILED", "Task receipt reviewHistory actorPrincipalId must be a non-empty string");
+  }
+  if (r.reviewerPrincipalId !== null && (typeof r.reviewerPrincipalId !== "string" || (r.reviewerPrincipalId as string).trim().length === 0)) {
+    throw new ApplicationError("VALIDATION_FAILED", "Task receipt reviewHistory reviewerPrincipalId must be null or a non-empty string");
+  }
+  if (typeof r.occurredAtUtc !== "string" || !r.occurredAtUtc.endsWith("Z") || Number.isNaN(Date.parse(r.occurredAtUtc))) {
+    throw new ApplicationError("VALIDATION_FAILED", "Task receipt reviewHistory occurredAtUtc must be a valid UTC timestamp");
+  }
+  if (r.note !== null && typeof r.note !== "string") {
+    throw new ApplicationError("VALIDATION_FAILED", "Task receipt reviewHistory note must be null or a string");
+  }
 }

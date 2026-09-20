@@ -1,0 +1,26 @@
+{
+  "artifactType": "review-result",
+  "taskId": "P0-05A-T1b",
+  "cycle": 1,
+  "producer": "codex-independent-reviewer",
+  "riskClass": "R2",
+  "verdict": "REWORK",
+  "findings": [
+    { "severity": "high", "summary": "Idempotent create replay returns the receipt without reauthorizing the persisted resolved reviewer; revoked Principal or sensitive-domain view Grant still replays successfully." },
+    { "severity": "high", "summary": "Receipts created by base 9cadf1c cannot replay because adding reviewerRoleSlotKey changes the fingerprint and the legacy path excludes normal base-era Task views." },
+    { "severity": "medium", "summary": "Malformed reviewerRoleSlotKey throws a plain error and Product API maps it to 502 instead of stable 422 validation failure." },
+    { "severity": "low", "summary": "diff.json incorrectly reports publicHttpOrUiChange false despite the new public Task request field." }
+  ],
+  "testsAndProbes": [
+    "targeted Task/product suite 27/27 passed",
+    "Product API and canonical client suites 25/25 passed",
+    "role-slot/binding corruption probes 4/4 fail-closed",
+    "revoked reviewer Principal replay incorrectly succeeded",
+    "revoked sensitive-domain view Grant replay incorrectly succeeded",
+    "exact base-era receipt replay incorrectly failed with IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD",
+    "malformed public slot key returned 502 while wrong type and non-acceptance usage returned 422",
+    "git diff --check passed"
+  ],
+  "safeToAcceptCommitAndPush": false,
+  "nextAction": "Reauthorize the stored resolved reviewer on replay without rerunning resolution, support the immediate previous fingerprint when slot key is null/omitted, map slot-key validation to 422, correct evidence metadata, add regressions and rerun gates."
+}

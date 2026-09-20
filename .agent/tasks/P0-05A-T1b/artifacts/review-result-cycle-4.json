@@ -1,0 +1,34 @@
+{
+  "artifactType": "review-result",
+  "taskId": "P0-05A-T1b",
+  "cycle": 4,
+  "producer": "codex-independent-reviewer",
+  "riskClass": "R2",
+  "verdict": "REWORK",
+  "findings": [
+    {
+      "severity": "medium",
+      "summary": "Immediate-base creation receipts bypass the empty-reviewHistory invariant and can replay fabricated malformed review actions in Memory and SQLite."
+    },
+    {
+      "severity": "low",
+      "summary": "Missing assignee and reviewHistory fields are normalized before generation-specific validation, leaving undocumented legacy representation exceptions available to newer receipt generations."
+    }
+  ],
+  "cycle3Closure": {
+    "explicitReviewerSubstitution": "closed for current and immediate-base",
+    "projectIdAndNonNullAssigneeCorruption": "closed for tested cases",
+    "fabricatedCurrentGenerationCreationSnapshot": "closed",
+    "generationAwareDecoding": "partial: immediate-base history and newer-generation missing-field normalization remain open",
+    "laterLifecycleReplayAndLegacyUpgrade": "verified"
+  },
+  "testsAndProbes": [
+    "independent targeted suites 60/60 passed",
+    "git diff --check passed",
+    "Memory and SQLite probes reproduced fabricated immediate-base reviewHistory replay",
+    "Memory and SQLite probes accepted current-format missing assignee normalization",
+    "independent command-level start-submit-accept lifecycle probe preserved original creation replay and current assignee reauthorization"
+  ],
+  "safeToAcceptCommitAndPush": false,
+  "nextAction": "Require empty reviewHistory for current and immediate-base creation receipts, confine missing-field normalization to documented older-legacy receipts, add both-adapter regressions and command-level lifecycle evidence, rerun gates, and request Codex R2 cycle 5."
+}

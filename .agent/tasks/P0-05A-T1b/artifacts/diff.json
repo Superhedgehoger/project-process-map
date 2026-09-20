@@ -1,0 +1,23 @@
+{
+  "artifactType": "diff",
+  "taskId": "P0-05A-T1b",
+  "baseCommit": "9cadf1c72140e0f0bf572efab0e18d27abc77a30",
+  "branch": "main",
+  "worktreeState": "uncommitted",
+  "scope": [
+    ".agent task and orchestration metadata",
+    "docs task packet, checkpoint and acceptance report",
+    "application resolve-task-reviewer service",
+    "application create-task integration, generation-aware receipt validation, explicit reviewer binding, and creation snapshot invariants",
+    "product API error mapping (restored SECURITY_MIGRATION_MANIFEST_MISMATCH at 409 and added 422 mappings)",
+    "product API request contract (added optional reviewerRoleSlotKey to CreateTaskRequest)",
+    "task-reviewer-resolution test suite (27 test suites covering 3-tier resolution, replay reauthorization, authoritative task & domain coherence, receipt invariants, explicit reviewer substitution rejection, generation-aware validation, immediate-base empty reviewHistory, strict missing-field rejection, and positive lifecycle/upgrade replays)"
+  ],
+  "nonGoalChangesObserved": false,
+  "scopeReviewRequired": false,
+  "scopeReviewReason": "Implementation strictly limited to task creation reviewer resolution, authoritative task replay validation, receipt invariant binding, and approved reviewerRoleSlotKey parameter; no changes to act-on-task, assign_reviewer, or Huly.",
+  "newDependency": false,
+  "publicHttpOrUiChange": true,
+  "publicHttpOrUiChangeDescription": "Added optional reviewerRoleSlotKey parameter to POST /api/nodes/:nodeId/tasks request contract and CreateTaskRequest schema; mapped VALIDATION_FAILED, REVIEWER_NOT_ALLOWED, and REVIEWER_REQUIRED to HTTP 422 while preserving SECURITY_MIGRATION_MANIFEST_MISMATCH at HTTP 409.",
+  "hulyChange": false
+}

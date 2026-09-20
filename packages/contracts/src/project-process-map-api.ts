@@ -86,6 +86,7 @@ export type CreateTaskRequest = Readonly<{
   taskId?: string;
   requiresAcceptance?: boolean;
   reviewerPrincipalId?: string;
+  reviewerRoleSlotKey?: string;
 }>;
 export type TaskActionRequest = Readonly<{
   expectedVersion: number;

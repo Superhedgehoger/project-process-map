@@ -256,6 +256,7 @@ export async function routeProjectRequest(
     const idempotencyKey = requiredHeader(request, "idempotency-key");
     const principalKey = commandKey(identity, idempotencyKey);
     const reviewer = optionalBodyString(body, "reviewerPrincipalId");
+    const reviewerRoleSlotKey = optionalBodyString(body, "reviewerRoleSlotKey");
     const result = await new CreateTaskHandler(persistence, {
       scheduleCollaborationProjection: dependencies.scheduleCollaborationProjection,
     }).execute({
@@ -271,6 +272,7 @@ export async function routeProjectRequest(
       assigneePrincipalId: identity.principalId,
       requiresAcceptance: optionalBodyBoolean(body, "requiresAcceptance") ?? false,
       reviewerPrincipalId: reviewer === undefined ? null : principalId(reviewer),
+      reviewerRoleSlotKey: reviewerRoleSlotKey === undefined ? null : reviewerRoleSlotKey,
       occurredAtUtc: new Date().toISOString(),
     });
     sendJson(response, result.replayed ? 200 : 201, result);
