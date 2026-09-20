@@ -1,6 +1,7 @@
 import type { DomainEvent } from "./events.ts";
 import { nodeEventSchemas } from "./project-structure.ts";
 import { projectMembershipRestrictionEventSchemas } from "./project-access.ts";
+import { roleBindingEventSchemas, roleSlotEventSchemas } from "./role-slots.ts";
 
 export type EventSchema = Readonly<{
   eventType: string;
@@ -37,6 +38,9 @@ registerSchema(nodeEventSchemas.created);
 registerSchema(nodeEventSchemas.leaderAssigned);
 registerSchema(projectMembershipRestrictionEventSchemas.demoted);
 registerSchema(projectMembershipRestrictionEventSchemas.revoked);
+registerSchema(roleBindingEventSchemas.assigned);
+registerSchema(roleSlotEventSchemas.initialized);
+
 
 export function getEventSchema(eventType: string, schemaVersion: number): EventSchema | undefined {
   return registeredSchemas.get(`${eventType}:v${schemaVersion}`);
@@ -70,7 +74,9 @@ export function validateEventAgainstSchema(event: DomainEvent): void {
     // If it's a node event or membership event with unknown version, or not recognized:
     if (
       event.eventType.startsWith("project-map.node.") ||
-      event.eventType.startsWith("project-map.project-membership.")
+      event.eventType.startsWith("project-map.project-membership.") ||
+      event.eventType.startsWith("project-map.role-binding.") ||
+      event.eventType.startsWith("project-map.role-slots.")
     ) {
       throw new Error(`UNKNOWN_EVENT_SCHEMA_VERSION:${event.eventType}:v${event.schemaVersion}`);
     }

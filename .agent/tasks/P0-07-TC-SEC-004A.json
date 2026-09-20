@@ -5,7 +5,7 @@
   "risk": "R2 PASS",
   "worker": "Antigravity/Gemini 3.8 Flash High",
   "branch": "main",
-  "commit": "ab1c18658984be25fdd09cd763eb78b029bb9e39",
+  "commit": "3f047c7a7cff1d6cef32bde952dde2f3920db811",
   "tests": [
     "tests/node-owner.test.ts",
     "tests/task-upgrade-compatibility.test.ts"

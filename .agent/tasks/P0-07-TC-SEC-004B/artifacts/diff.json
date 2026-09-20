@@ -1,0 +1,22 @@
+{
+  "artifactType": "diff",
+  "taskId": "P0-07/TC-SEC-004B",
+  "baseCommit": "3f047c7a7cff1d6cef32bde952dde2f3920db811",
+  "branch": "main",
+  "worktreeState": "uncommitted",
+  "scope": [
+    ".agent task and A2A-compatible orchestration metadata",
+    "docs task packet, checkpoint and acceptance report",
+    "domain role-slot model and event schema",
+    "application guarded slot initialization and binding commands",
+    "Memory and SQLite persistence plus schema v11",
+    "production and test persistence bundles",
+    "role-binding, upgrade and directly affected regression tests"
+  ],
+  "nonGoalChangesObserved": false,
+  "scopeReviewRequired": false,
+  "scopeReviewReason": "Cycle 3 shared create-node helper broadening was removed; create-node.ts has zero diff from the accepted base.",
+  "newDependency": false,
+  "publicHttpOrUiChange": false,
+  "hulyChange": false
+}

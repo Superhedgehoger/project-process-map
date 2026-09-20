@@ -1,0 +1,50 @@
+{
+  "artifactType": "test-result",
+  "taskId": "P0-07/TC-SEC-004B",
+  "producer": "antigravity",
+  "status": "pass",
+  "results": [
+    {
+      "command": "node --experimental-strip-types --test tests/role-binding.test.ts tests/task-upgrade-compatibility.test.ts",
+      "passed": 72,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "command": "git diff --check",
+      "status": "pass"
+    },
+    {
+      "command": "credential/private-key scan",
+      "matches": 0
+    },
+    {
+      "command": "pnpm check",
+      "status": "pass",
+      "typecheckErrors": 0,
+      "testsPassed": 284,
+      "testsFailed": 0,
+      "hulyImages": 14,
+      "hulyExtensionPackages": 4
+    }
+  ],
+  "pending": [],
+  "independentVerification": {
+    "producer": "cindy-orchestrator",
+    "status": "pass",
+    "targeted": {
+      "passed": 72,
+      "failed": 0,
+      "skipped": 0
+    },
+    "fullGate": {
+      "testsPassed": 284,
+      "testsFailed": 0,
+      "typecheckErrors": 0,
+      "hulyImages": 14,
+      "hulyExtensionPackages": 4
+    },
+    "diffCheck": "pass",
+    "credentialAndPrivateKeyScanMatches": 0
+  }
+}

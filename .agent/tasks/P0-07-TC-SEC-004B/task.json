@@ -1,0 +1,36 @@
+{
+  "taskId": "P0-07/TC-SEC-004B",
+  "contextId": "tc-sec-004b-template-role-slot-foundation",
+  "fc": ["FC-006", "A4-03A"],
+  "testId": ["TC-TASK-005", "TC-SEC-004B"],
+  "riskClass": "R2",
+  "goal": "建立 TemplateRoleSlot 与 ProjectRoleBinding 的最小领域和持久化底座，不接入 Task 三级验收人解析。",
+  "expectedScope": [
+    "packages/domain role slot and binding invariants",
+    "packages/application guarded initialization and binding commands",
+    "Memory and SQLite parity with schema v11",
+    "event, outbox, receipt, concurrency, restart and corruption tests",
+    "docs and agent evidence"
+  ],
+  "nonGoals": [
+    "Task reviewer-resolution integration",
+    "public HTTP API or UI",
+    "template cross-version upgrade",
+    "U7/U8 or nested security domains",
+    "Huly changes"
+  ],
+  "acceptanceCriteria": [
+    "multi-principal candidate sets are canonical, deterministic and versioned",
+    "project slot snapshot is write-once and frozen to one source template version",
+    "only current active project managers may initialize slots or change bindings",
+    "binding grants no Membership, Grant or ACL",
+    "Memory and SQLite behavior, restart, CAS, idempotency and corruption handling are equivalent",
+    "targeted and full mechanical gates pass",
+    "independent Codex R2 review passes before commit"
+  ],
+  "worker": "antigravity",
+  "status": "ACCEPTED",
+  "branch": "main",
+  "commit": "3f047c7a7cff1d6cef32bde952dde2f3920db811",
+  "nextAction": "Commit and push the accepted worktree, then select the next Ready Task."
+}

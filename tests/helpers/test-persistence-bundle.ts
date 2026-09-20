@@ -3,9 +3,15 @@ import type {
   AssignNodeLeaderCommand,
   AssignNodeLeaderFailurePoint,
   AssignNodeLeaderResult,
+  AssignProjectRoleBindingCommand,
+  AssignProjectRoleBindingFailurePoint,
+  AssignProjectRoleBindingResult,
   CreateNodeCommand,
   CreateNodeFailurePoint,
   CreateNodeResult,
+  InitializeProjectRoleSlotsCommand,
+  InitializeProjectRoleSlotsFailurePoint,
+  InitializeProjectRoleSlotsResult,
   Persistence,
 } from "../../packages/application/src/ports/persistence.ts";
 import type { VerifyMigrationReadiness } from "../../packages/application/src/security/security-migration-coordinator.ts";
@@ -19,6 +25,11 @@ export type TestMemoryBundle = Readonly<{
   testHarness: TestReadinessHarness;
   createNode: (command: CreateNodeCommand, failurePoint?: CreateNodeFailurePoint) => Promise<CreateNodeResult>;
   assignNodeLeader: (command: AssignNodeLeaderCommand, failurePoint?: AssignNodeLeaderFailurePoint) => Promise<AssignNodeLeaderResult>;
+  assignProjectRoleBinding: (
+    command: AssignProjectRoleBindingCommand,
+    failurePoint?: AssignProjectRoleBindingFailurePoint,
+  ) => Promise<AssignProjectRoleBindingResult>;
+  initializeProjectRoleSlots: (command: InitializeProjectRoleSlotsCommand, failurePoint?: InitializeProjectRoleSlotsFailurePoint) => Promise<InitializeProjectRoleSlotsResult>;
 }>;
 
 export type TestSqliteBundle = Readonly<{
@@ -27,7 +38,13 @@ export type TestSqliteBundle = Readonly<{
   testHarness: TestReadinessHarness;
   createNode: (command: CreateNodeCommand, failurePoint?: CreateNodeFailurePoint) => Promise<CreateNodeResult>;
   assignNodeLeader: (command: AssignNodeLeaderCommand, failurePoint?: AssignNodeLeaderFailurePoint) => Promise<AssignNodeLeaderResult>;
+  assignProjectRoleBinding: (
+    command: AssignProjectRoleBindingCommand,
+    failurePoint?: AssignProjectRoleBindingFailurePoint,
+  ) => Promise<AssignProjectRoleBindingResult>;
+  initializeProjectRoleSlots: (command: InitializeProjectRoleSlotsCommand, failurePoint?: InitializeProjectRoleSlotsFailurePoint) => Promise<InitializeProjectRoleSlotsResult>;
 }>;
+
 
 const testHarnessRegistry = new WeakMap<Persistence, TestReadinessHarness>();
 
@@ -59,6 +76,8 @@ export function createTestMemoryBundle(options: {
     testHarness: harness,
     createNode: (command, failurePoint) => persistence.executeCreateNode(command, failurePoint),
     assignNodeLeader: (command, failurePoint) => persistence.executeAssignNodeLeader(command, failurePoint),
+    assignProjectRoleBinding: (command, failurePoint) => persistence.executeAssignProjectRoleBinding(command, failurePoint),
+    initializeProjectRoleSlots: (command, failurePoint) => persistence.executeInitializeProjectRoleSlots(command, failurePoint),
   };
 }
 
@@ -88,5 +107,7 @@ export function createTestSqliteBundle(options: {
     testHarness: harness,
     createNode: (command, failurePoint) => persistence.executeCreateNode(command, failurePoint),
     assignNodeLeader: (command, failurePoint) => persistence.executeAssignNodeLeader(command, failurePoint),
+    assignProjectRoleBinding: (command, failurePoint) => persistence.executeAssignProjectRoleBinding(command, failurePoint),
+    initializeProjectRoleSlots: (command, failurePoint) => persistence.executeInitializeProjectRoleSlots(command, failurePoint),
   };
 }

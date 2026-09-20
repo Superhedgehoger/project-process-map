@@ -386,6 +386,9 @@ function failingPersistence(base: Persistence, failure: "node" | "task" | "asset
     read: async (tenantId, work) => await base.read(tenantId, work),
     executeCreateNode: async (cmd, fp) => await base.executeCreateNode(cmd, fp),
     executeAssignNodeLeader: async (cmd, fp) => await base.executeAssignNodeLeader(cmd, fp),
+    executeAssignProjectRoleBinding: async (cmd, fp) => await base.executeAssignProjectRoleBinding(cmd, fp),
+    executeInitializeProjectRoleSlots: async (cmd, fp) => await base.executeInitializeProjectRoleSlots(cmd, fp),
     close: async () => {},
+
   };
 }

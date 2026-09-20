@@ -1,0 +1,7 @@
+{
+  "agentId": "stitch",
+  "role": "ui-designer",
+  "skills": ["ui-design", "ux-design", "prototype"],
+  "allowedRisk": ["R0", "R1-design"],
+  "taskProtocol": "a2a-compatible-local-v1"
+}

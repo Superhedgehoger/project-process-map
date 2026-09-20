@@ -1,0 +1,8 @@
+{
+  "agentId": "antigravity",
+  "role": "primary-worker",
+  "skills": ["code", "debug", "test", "browser"],
+  "allowedRisk": ["R0", "R1", "R2-implement"],
+  "defaultModel": "Gemini 3.8 Flash High",
+  "taskProtocol": "a2a-compatible-local-v1"
+}

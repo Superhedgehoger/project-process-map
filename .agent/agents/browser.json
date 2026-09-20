@@ -1,0 +1,7 @@
+{
+  "agentId": "antigravity-browser",
+  "role": "ui-validator",
+  "skills": ["browser", "e2e", "responsive-validation", "screenshot-evidence"],
+  "allowedRisk": ["R0", "R1-validation"],
+  "taskProtocol": "a2a-compatible-local-v1"
+}

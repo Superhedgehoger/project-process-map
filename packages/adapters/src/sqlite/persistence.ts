@@ -28,9 +28,31 @@ import {
   type SecurityGrantAuditEntry,
 } from "../../../domain/src/security-access.ts";
 import {
+  assertCanonicalProjectRoleBinding,
+  assertCanonicalTemplateRoleSlot,
+  assertCanonicalProjectRoleSlotSnapshot,
+  assertCanonicalProjectRoleSlotAuditEntry,
+  compareExactStrings,
+  normalizeCandidateIds,
+  type ProjectRoleBinding,
+  type TemplateRoleSlot,
+  type ProjectRoleSlotSnapshot,
+  type ProjectRoleSlotAuditAction,
+  type ProjectRoleSlotAuditEntry,
+  type RoleSlotsInitializedPayload,
+} from "../../../domain/src/role-slots.ts";
+import {
   type AssignNodeLeaderCommand,
   type AssignNodeLeaderFailurePoint,
   type AssignNodeLeaderResult,
+  type AssignProjectRoleBindingCommand,
+  type AssignProjectRoleBindingFailurePoint,
+  type AssignProjectRoleBindingResult,
+  type InitializeProjectRoleSlotsCommand,
+  type InitializeProjectRoleSlotsFailurePoint,
+  type InitializeProjectRoleSlotsResult,
+  type RoleBindingAssignedPayload,
+
   type ClaimOptions,
   type CommandReceipt,
   type CommandScope,
@@ -58,6 +80,19 @@ import {
   validate,
   validateAssignLeader,
 } from "../../../application/src/create-node.ts";
+import {
+  assertEligibleRoleBindingCandidate,
+  hashRoleBindingPayload,
+  injectRoleBindingFailure,
+  validateAssignProjectRoleBinding,
+} from "../../../application/src/role-slots/assign-project-role-binding.ts";
+import {
+  areRoleSlotsIdentical,
+  assertCoherentRoleSlotsInitializationRecords,
+  hashInitializeRoleSlotsPayload,
+  injectRoleSlotFailure,
+  validateInitializeProjectRoleSlots,
+} from "../../../application/src/role-slots/initialize-project-role-slots.ts";
 import { ApplicationError } from "../../../application/src/errors.ts";
 import { assertProjectSecurityStable } from "../../../application/src/access/project-security.ts";
 import {
@@ -88,7 +123,7 @@ export type SqlitePersistenceOptions = Readonly<{
 }>;
 
 const pathLocks = new Map<string, Promise<void>>();
-const currentSchemaVersion = 10;
+const currentSchemaVersion = 11;
 
 export class SqlitePersistence implements Persistence {
   readonly #database: DatabaseSync;
@@ -112,8 +147,16 @@ export class SqlitePersistence implements Persistence {
     this.#database.exec("PRAGMA journal_mode=WAL");
     this.#database.exec("PRAGMA synchronous=FULL");
     this.#database.exec("PRAGMA foreign_keys=ON");
-    this.assertSupportedSchema();
-    this.migrate();
+    try {
+      this.assertSupportedSchema();
+      this.migrate();
+    } catch (error) {
+      try {
+        this.#database.close();
+      } catch {}
+      this.#closed = true;
+      throw error;
+    }
     if (options.verifier !== undefined) {
       this.#verifyMigrationReadiness = createVerificationOperation({
         persistence: this,
@@ -166,6 +209,123 @@ export class SqlitePersistence implements Persistence {
     ).get(tenantId, nodeId) as Record<string, unknown>;
     return nodeFromRow(row);
   }
+
+  #mutateProjectRoleBinding(
+    tenantId: TenantId,
+    projectId: string,
+    slotKey: string,
+    principalIds: readonly PrincipalId[],
+    expectedVersion: number,
+    nextVersion: number,
+    nowUtc: string,
+    actorPrincipalId: PrincipalId,
+  ): ProjectRoleBinding {
+    if (expectedVersion === 0) {
+      const insertResult = this.#database.prepare(`
+        INSERT INTO project_role_bindings (
+          tenant_id, project_id, slot_key, principal_ids_json, version, updated_at_utc, updated_by_principal_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        tenantId,
+        projectId,
+        slotKey,
+        JSON.stringify(principalIds),
+        nextVersion,
+        nowUtc,
+        actorPrincipalId,
+      );
+      if (insertResult.changes !== 1) {
+        throw new ApplicationError("ROLE_BINDING_VERSION_CONFLICT", "Role binding version conflict");
+      }
+    } else {
+      const updateResult = this.#database.prepare(`
+        UPDATE project_role_bindings
+        SET principal_ids_json = ?, version = ?, updated_at_utc = ?, updated_by_principal_id = ?
+        WHERE tenant_id = ? AND project_id = ? AND slot_key = ? AND version = ?
+      `).run(
+        JSON.stringify(principalIds),
+        nextVersion,
+        nowUtc,
+        actorPrincipalId,
+        tenantId,
+        projectId,
+        slotKey,
+        expectedVersion,
+      );
+      if (updateResult.changes !== 1) {
+        throw new ApplicationError("ROLE_BINDING_VERSION_CONFLICT", "Role binding version conflict");
+      }
+    }
+    const row = this.#database.prepare(`
+      SELECT * FROM project_role_bindings
+      WHERE tenant_id = ? AND project_id = ? AND slot_key = ?
+    `).get(tenantId, projectId, slotKey) as Record<string, unknown>;
+    return bindingFromRow(row, { tenantId, projectId, slotKey });
+  }
+
+  #mutateInitializeProjectRoleSlots(
+    command: InitializeProjectRoleSlotsCommand,
+    nowUtc: string,
+  ): Readonly<{ snapshot: ProjectRoleSlotSnapshot; slots: readonly TemplateRoleSlot[] }> {
+    const snapshot: ProjectRoleSlotSnapshot = {
+      tenantId: command.tenantId,
+      projectId: command.projectId,
+      sourceTemplateVersionId: command.sourceTemplateVersionId,
+      createdAtUtc: nowUtc,
+      createdByPrincipalId: command.principalId,
+    };
+    assertCanonicalProjectRoleSlotSnapshot(snapshot, {
+      tenantId: command.tenantId,
+      projectId: command.projectId,
+    });
+    this.#database.prepare(`
+      INSERT INTO project_role_slot_snapshots (
+        tenant_id, project_id, source_template_version_id, created_at_utc, created_by_principal_id
+      ) VALUES (?, ?, ?, ?, ?)
+    `).run(
+      snapshot.tenantId,
+      snapshot.projectId,
+      snapshot.sourceTemplateVersionId,
+      snapshot.createdAtUtc,
+      snapshot.createdByPrincipalId,
+    );
+
+    const insertStmt = this.#database.prepare(`
+      INSERT INTO project_role_slots (
+        tenant_id, project_id, slot_key, source_template_version_id, name, description, created_at_utc
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    const slots: TemplateRoleSlot[] = [];
+    for (const slotInit of command.slots) {
+      const slot: TemplateRoleSlot = {
+        tenantId: command.tenantId,
+        projectId: command.projectId,
+        slotKey: slotInit.slotKey,
+        name: slotInit.name,
+        description: slotInit.description ?? null,
+        sourceTemplateVersionId: command.sourceTemplateVersionId,
+        createdAtUtc: nowUtc,
+      };
+      assertCanonicalTemplateRoleSlot(slot, {
+        tenantId: command.tenantId,
+        projectId: command.projectId,
+        slotKey: slot.slotKey,
+      });
+      insertStmt.run(
+        slot.tenantId,
+        slot.projectId,
+        slot.slotKey,
+        slot.sourceTemplateVersionId,
+        slot.name,
+        slot.description,
+        slot.createdAtUtc,
+      );
+      slots.push(slot);
+    }
+    slots.sort((a, b) => compareExactStrings(a.slotKey, b.slotKey));
+    return { snapshot, slots };
+  }
+
 
   async executeCreateNode(
     command: CreateNodeCommand,
@@ -569,6 +729,557 @@ export class SqlitePersistence implements Persistence {
       return result;
     });
   }
+
+  async executeAssignProjectRoleBinding(
+    command: AssignProjectRoleBindingCommand,
+    failurePoint?: AssignProjectRoleBindingFailurePoint,
+  ): Promise<AssignProjectRoleBindingResult> {
+    validateAssignProjectRoleBinding(command);
+    const distinctCandidateIds = normalizeCandidateIds(command.principalIds);
+    const scope: CommandScope = {
+      principalId: command.principalId,
+      operation: "assign_project_role_binding",
+      idempotencyKey: command.idempotencyKey,
+    };
+    const fingerprint = hashRoleBindingPayload({
+      projectId: command.projectId,
+      slotKey: command.slotKey,
+      principalIds: distinctCandidateIds,
+      expectedVersion: command.expectedVersion,
+    });
+
+    return await this.transaction(command.tenantId, async (transaction) => {
+      const actorPrincipal = await transaction.principals.get(command.principalId);
+      const actorMembership = await transaction.memberships.get(command.projectId, command.principalId);
+      if (
+        actorPrincipal === undefined ||
+        actorPrincipal.tenantId !== command.tenantId ||
+        actorPrincipal.status !== "active" ||
+        actorPrincipal.kind !== "user" ||
+        actorMembership === undefined ||
+        actorMembership.tenantId !== command.tenantId ||
+        actorMembership.projectId !== command.projectId ||
+        actorMembership.status !== "active" ||
+        !isProjectManager(actorMembership)
+      ) {
+        throw new ApplicationError("FORBIDDEN", "Only active project managers can assign role bindings");
+      }
+
+      await assertProjectSecurityStable(transaction, command.projectId);
+
+      const slot = await transaction.roleSlots.get(command.projectId, command.slotKey);
+      if (slot === undefined || slot.tenantId !== command.tenantId || slot.projectId !== command.projectId) {
+        throw new ApplicationError("ROLE_SLOT_NOT_FOUND", `Role slot ${command.slotKey} not found in project ${command.projectId}`);
+      }
+
+      for (const candidateId of distinctCandidateIds) {
+        await assertEligibleRoleBindingCandidate(transaction, command.tenantId, command.projectId, candidateId);
+      }
+
+      const previous = await transaction.receipts.get<Omit<AssignProjectRoleBindingResult, "replayed">>(scope);
+      if (previous !== undefined) {
+        if (previous.fingerprint !== fingerprint) {
+          throw new ApplicationError("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD", "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD");
+        }
+
+        // 1. Authoritative current binding must exist and be canonical
+        const currentBinding = await transaction.roleBindings.get(command.projectId, command.slotKey);
+        if (currentBinding === undefined) {
+          throw new ApplicationError("ROLE_BINDING_RECORD_CORRUPT", "Authoritative role binding missing on receipt replay");
+        }
+        assertCanonicalProjectRoleBinding(currentBinding, {
+          tenantId: command.tenantId,
+          projectId: command.projectId,
+          slotKey: command.slotKey,
+        });
+        if (currentBinding.version < previous.result.binding.version) {
+          throw new ApplicationError("ROLE_BINDING_RECORD_CORRUPT", "Authoritative role binding version is older than receipt");
+        }
+
+        // 2. Receipt binding must be canonical and complete
+        assertCanonicalProjectRoleBinding(previous.result.binding, {
+          tenantId: command.tenantId,
+          projectId: command.projectId,
+          slotKey: command.slotKey,
+        });
+        if (previous.result.binding.updatedByPrincipalId !== command.principalId) {
+          throw new ApplicationError("ROLE_BINDING_RECORD_CORRUPT", "Receipt updatedByPrincipalId mismatch");
+        }
+        if (
+          previous.result.binding.principalIds.length !== distinctCandidateIds.length ||
+          !previous.result.binding.principalIds.every((id, idx) => id === distinctCandidateIds[idx])
+        ) {
+          throw new ApplicationError("ROLE_BINDING_RECORD_CORRUPT", "Receipt principalIds mismatch");
+        }
+        if (!isCanonicalUtcTimestamp(previous.result.binding.updatedAtUtc)) {
+          throw new ApplicationError("ROLE_BINDING_RECORD_CORRUPT", "Receipt updatedAtUtc invalid");
+        }
+        if (!Number.isInteger(previous.result.binding.version) || previous.result.binding.version <= 0) {
+          throw new ApplicationError("ROLE_BINDING_RECORD_CORRUPT", "Receipt version invalid");
+        }
+
+        // 3. Receipt event must be coherent and canonical
+        const rev = previous.result.event;
+        if (
+          !rev ||
+          rev.tenantId !== command.tenantId ||
+          rev.projectId !== command.projectId ||
+          rev.aggregateType !== "project_role_binding" ||
+          rev.aggregateId !== `${command.projectId}:${command.slotKey}` ||
+          rev.aggregateVersion !== previous.result.binding.version ||
+          rev.eventType !== "project-map.role-binding.assigned" ||
+          rev.schemaVersion !== 1 ||
+          rev.actorPrincipalId !== command.principalId ||
+          rev.occurredAtUtc !== previous.result.binding.updatedAtUtc ||
+          !Number.isInteger(rev.projectSequence) ||
+          rev.projectSequence <= 0 ||
+          rev.payload?.projectId !== command.projectId ||
+          rev.payload?.slotKey !== command.slotKey ||
+          rev.payload?.version !== previous.result.binding.version ||
+          !Array.isArray(rev.payload?.principalIds) ||
+          rev.payload.principalIds.length !== distinctCandidateIds.length ||
+          !rev.payload.principalIds.every((id: string, idx: number) => id === distinctCandidateIds[idx])
+        ) {
+          throw new ApplicationError("ROLE_BINDING_RECORD_CORRUPT", "Receipt event is invalid or divergent");
+        }
+
+        // 4. Receipt outbox must be coherent
+        const rout = previous.result.outbox;
+        if (
+          !rout ||
+          rout.tenantId !== command.tenantId ||
+          rout.id !== `outbox:${rev.eventId}` ||
+          rout.eventId !== rev.eventId ||
+          rout.topic !== "project-map.role-binding.assigned.v1" ||
+          JSON.stringify(rout.payload) !== JSON.stringify(rev)
+        ) {
+          throw new ApplicationError("ROLE_BINDING_RECORD_CORRUPT", "Receipt outbox is invalid or divergent");
+        }
+
+        // 5. Independently load and validate durable domain event
+        const eventRow = this.#database.prepare(
+          "SELECT * FROM domain_events WHERE tenant_id = ? AND event_id = ?",
+        ).get(command.tenantId, rev.eventId) as Record<string, unknown> | undefined;
+        if (!eventRow) {
+          throw new ApplicationError("ROLE_BINDING_RECORD_CORRUPT", "Durable domain event missing for role binding receipt");
+        }
+        const durableEvent = domainEventFromRow(eventRow, "ROLE_BINDING_RECORD_CORRUPT");
+        if (JSON.stringify(durableEvent) !== JSON.stringify(rev)) {
+          throw new ApplicationError("ROLE_BINDING_RECORD_CORRUPT", "Durable domain event divergent from role binding receipt");
+        }
+
+        // 6. Independently load and validate durable outbox message
+        const outboxRow = this.#database.prepare(
+          "SELECT * FROM outbox_messages WHERE tenant_id = ? AND message_id = ?",
+        ).get(command.tenantId, rout.id) as Record<string, unknown> | undefined;
+        if (!outboxRow) {
+          throw new ApplicationError("ROLE_BINDING_RECORD_CORRUPT", "Durable outbox message missing for role binding receipt");
+        }
+        const durableOutbox = outboxFromRow(outboxRow);
+        if (
+          durableOutbox.tenantId !== command.tenantId ||
+          durableOutbox.id !== rout.id ||
+          durableOutbox.eventId !== rev.eventId ||
+          durableOutbox.topic !== rout.topic ||
+          durableOutbox.createdAtUtc !== rout.createdAtUtc ||
+          JSON.stringify(durableOutbox.payload) !== JSON.stringify(rev)
+        ) {
+          throw new ApplicationError("ROLE_BINDING_RECORD_CORRUPT", "Durable outbox message divergent from role binding receipt");
+        }
+
+        return { ...structuredClone(previous.result), replayed: true };
+      }
+
+      const currentBinding = await transaction.roleBindings.get(command.projectId, command.slotKey);
+      if (currentBinding === undefined) {
+        if (command.expectedVersion !== 0) {
+          throw new ApplicationError("ROLE_BINDING_VERSION_CONFLICT", "Role binding version conflict");
+        }
+      } else {
+        if (currentBinding.version !== command.expectedVersion) {
+          throw new ApplicationError("ROLE_BINDING_VERSION_CONFLICT", "Role binding version conflict");
+        }
+      }
+
+      const nextVersion = (currentBinding?.version ?? 0) + 1;
+      const nowUtc = this.nowUtc();
+
+      const binding = this.#mutateProjectRoleBinding(
+        command.tenantId,
+        command.projectId,
+        command.slotKey,
+        distinctCandidateIds,
+        command.expectedVersion,
+        nextVersion,
+        nowUtc,
+        command.principalId,
+      );
+      injectRoleBindingFailure(failurePoint, "after_aggregate");
+
+      const projectSequence = await transaction.sequences.next(command.projectId);
+      const event: DomainEvent<RoleBindingAssignedPayload> = {
+        tenantId: command.tenantId,
+        eventId: `evt:${command.commandId}`,
+        projectId: command.projectId,
+        projectSequence,
+        aggregateType: "project_role_binding",
+        aggregateId: `${command.projectId}:${command.slotKey}`,
+        aggregateVersion: binding.version,
+        eventType: "project-map.role-binding.assigned",
+        schemaVersion: 1,
+        actorPrincipalId: command.principalId,
+        occurredAtUtc: nowUtc,
+        correlationId: command.correlationId,
+        causationId: command.commandId,
+        originalSecurityDomainId: null,
+        originalSecurityEpoch: 0,
+        payload: {
+          projectId: command.projectId,
+          slotKey: command.slotKey,
+          principalIds: distinctCandidateIds,
+          version: binding.version,
+        },
+      };
+      await transaction.events.append(event);
+      injectRoleBindingFailure(failurePoint, "after_event");
+
+      const outbox: OutboxMessage = {
+        tenantId: command.tenantId,
+        id: `outbox:${event.eventId}`,
+        eventId: event.eventId,
+        topic: eventTopic(event),
+        payload: event,
+        state: "pending",
+        availableAtUtc: nowUtc,
+        attempts: 0,
+        maxAttempts: 8,
+        leaseOwner: null,
+        leaseToken: null,
+        leaseExpiresAtUtc: null,
+        lastError: null,
+        publishedAtUtc: null,
+        createdAtUtc: nowUtc,
+      };
+      await transaction.outbox.enqueue(outbox);
+      injectRoleBindingFailure(failurePoint, "after_outbox");
+
+      const result: AssignProjectRoleBindingResult = {
+        binding,
+        event,
+        outbox,
+        replayed: false,
+      };
+      await transaction.receipts.insert({
+        scope,
+        fingerprint,
+        result: {
+          binding,
+          event,
+          outbox,
+        },
+        createdAtUtc: nowUtc,
+      });
+      injectRoleBindingFailure(failurePoint, "after_idempotency");
+      return result;
+    });
+  }
+
+  async executeInitializeProjectRoleSlots(
+    command: InitializeProjectRoleSlotsCommand,
+    failurePoint?: InitializeProjectRoleSlotsFailurePoint,
+  ): Promise<InitializeProjectRoleSlotsResult> {
+    validateInitializeProjectRoleSlots(command);
+    const scope: CommandScope = {
+      principalId: command.principalId,
+      operation: "initialize_project_role_slots",
+      idempotencyKey: command.idempotencyKey,
+    };
+    const fingerprint = hashInitializeRoleSlotsPayload(command);
+
+    return await this.transaction(command.tenantId, async (transaction) => {
+      const actorPrincipal = await transaction.principals.get(command.principalId);
+      const actorMembership = await transaction.memberships.get(command.projectId, command.principalId);
+      if (
+        actorPrincipal === undefined ||
+        actorPrincipal.tenantId !== command.tenantId ||
+        actorPrincipal.status !== "active" ||
+        actorPrincipal.kind !== "user" ||
+        actorMembership === undefined ||
+        actorMembership.tenantId !== command.tenantId ||
+        actorMembership.projectId !== command.projectId ||
+        actorMembership.status !== "active" ||
+        !isProjectManager(actorMembership)
+      ) {
+        throw new ApplicationError("FORBIDDEN", "Only active project managers can initialize role slots");
+      }
+
+      await assertProjectSecurityStable(transaction, command.projectId);
+
+      const previous = await transaction.receipts.get<Omit<InitializeProjectRoleSlotsResult, "replayed">>(scope);
+      if (previous !== undefined) {
+        if (previous.fingerprint !== fingerprint) {
+          throw new ApplicationError("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD", "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD");
+        }
+
+        // 1. Authoritative current snapshot & slots
+        const currentSnapshot = await transaction.roleSlots.getSnapshot(command.projectId);
+        if (currentSnapshot === undefined) {
+          throw new ApplicationError("ROLE_SLOT_RECORD_CORRUPT", "Authoritative role slot snapshot missing on receipt replay");
+        }
+        const currentSlots = await transaction.roleSlots.listByProject(command.projectId);
+
+        // 2. Independently load durable audit
+        const auditRow = this.#database.prepare(
+          "SELECT * FROM project_role_slot_audits WHERE tenant_id = ? AND id = ?",
+        ).get(command.tenantId, previous.result.audit.id) as Record<string, unknown> | undefined;
+        if (!auditRow) {
+          throw new ApplicationError("ROLE_SLOT_RECORD_CORRUPT", "Durable role slot audit missing on receipt replay");
+        }
+        const durableAudit = roleSlotAuditFromRow(auditRow, { tenantId: command.tenantId, projectId: command.projectId });
+
+        // 3. Independently load durable event
+        const eventRow = this.#database.prepare(
+          "SELECT * FROM domain_events WHERE tenant_id = ? AND event_id = ?",
+        ).get(command.tenantId, previous.result.event.eventId) as Record<string, unknown> | undefined;
+        if (!eventRow) {
+          throw new ApplicationError("ROLE_SLOT_RECORD_CORRUPT", "Durable domain event missing on receipt replay");
+        }
+        const durableEvent = domainEventFromRow<RoleSlotsInitializedPayload>(eventRow, "ROLE_SLOT_RECORD_CORRUPT");
+
+        // 4. Independently load durable outbox
+        const outboxRow = this.#database.prepare(
+          "SELECT * FROM outbox_messages WHERE tenant_id = ? AND message_id = ?",
+        ).get(command.tenantId, previous.result.outbox.id) as Record<string, unknown> | undefined;
+        if (!outboxRow) {
+          throw new ApplicationError("ROLE_SLOT_RECORD_CORRUPT", "Durable outbox message missing on receipt replay");
+        }
+        const durableOutbox = outboxFromRow(outboxRow);
+
+        // 5. Canonical validation of receipt-embedded records and full cross-record coherence
+        assertCoherentRoleSlotsInitializationRecords({
+          tenantId: command.tenantId,
+          projectId: command.projectId,
+          sourceTemplateVersionId: command.sourceTemplateVersionId,
+          snapshot: previous.result.snapshot,
+          slots: previous.result.slots,
+          audit: previous.result.audit,
+          event: previous.result.event,
+          outbox: previous.result.outbox,
+        });
+
+        // 6. Full cross-record coherence validator on durable records
+        assertCoherentRoleSlotsInitializationRecords({
+          tenantId: command.tenantId,
+          projectId: command.projectId,
+          sourceTemplateVersionId: command.sourceTemplateVersionId,
+          snapshot: currentSnapshot,
+          slots: currentSlots,
+          audit: durableAudit,
+          event: durableEvent,
+          outbox: durableOutbox,
+        });
+
+        // 7. Ensure receipt matches durable records
+        if (
+          previous.result.snapshot.tenantId !== currentSnapshot.tenantId ||
+          previous.result.snapshot.projectId !== currentSnapshot.projectId ||
+          previous.result.snapshot.sourceTemplateVersionId !== currentSnapshot.sourceTemplateVersionId ||
+          previous.result.snapshot.createdAtUtc !== currentSnapshot.createdAtUtc ||
+          previous.result.snapshot.createdByPrincipalId !== currentSnapshot.createdByPrincipalId ||
+          previous.result.slots.length !== currentSlots.length ||
+          !previous.result.slots.every((ps, idx) => {
+            const cs = currentSlots[idx]!;
+            return (
+              ps.tenantId === cs.tenantId &&
+              ps.projectId === cs.projectId &&
+              ps.slotKey === cs.slotKey &&
+              ps.name === cs.name &&
+              ps.description === cs.description &&
+              ps.sourceTemplateVersionId === cs.sourceTemplateVersionId &&
+              ps.createdAtUtc === cs.createdAtUtc
+            );
+          }) ||
+          previous.result.audit.id !== durableAudit.id ||
+          previous.result.audit.tenantId !== durableAudit.tenantId ||
+          previous.result.audit.projectId !== durableAudit.projectId ||
+          previous.result.audit.occurredAtUtc !== durableAudit.occurredAtUtc ||
+          previous.result.audit.actorPrincipalId !== durableAudit.actorPrincipalId ||
+          previous.result.audit.sourceTemplateVersionId !== durableAudit.sourceTemplateVersionId ||
+          previous.result.audit.action !== durableAudit.action ||
+          JSON.stringify(previous.result.audit.slotKeys) !== JSON.stringify(durableAudit.slotKeys) ||
+          JSON.stringify(previous.result.event) !== JSON.stringify(durableEvent) ||
+          previous.result.outbox.id !== durableOutbox.id ||
+          previous.result.outbox.tenantId !== durableOutbox.tenantId ||
+          previous.result.outbox.eventId !== durableOutbox.eventId ||
+          previous.result.outbox.topic !== durableOutbox.topic ||
+          previous.result.outbox.createdAtUtc !== durableOutbox.createdAtUtc ||
+          JSON.stringify(previous.result.outbox.payload) !== JSON.stringify(durableEvent)
+        ) {
+          throw new ApplicationError("ROLE_SLOT_RECORD_CORRUPT", "Receipt result diverges from durable records");
+        }
+
+        return { ...structuredClone(previous.result), replayed: true };
+      }
+
+      const existingSnapshot = await transaction.roleSlots.getSnapshot(command.projectId);
+      if (existingSnapshot !== undefined) {
+        if (command.sourceTemplateVersionId !== existingSnapshot.sourceTemplateVersionId) {
+          throw new ApplicationError("ROLE_SLOT_TEMPLATE_VERSION_FROZEN", `Project ${command.projectId} role slots are frozen to template version ${existingSnapshot.sourceTemplateVersionId}`);
+        }
+        const existingSlots = await transaction.roleSlots.listByProject(command.projectId);
+        if (!areRoleSlotsIdentical(existingSlots, command.slots)) {
+          throw new ApplicationError("ROLE_SLOT_IMMUTABLE_CONFLICT", `Role slots for project ${command.projectId} are immutable and cannot be rewritten or extended`);
+        }
+
+        const existingAudits = await transaction.roleSlotAudits.listByProject(command.projectId);
+        const audit = existingAudits.find(
+          (a) => a.action === "initialized" && a.sourceTemplateVersionId === existingSnapshot.sourceTemplateVersionId,
+        );
+        if (audit === undefined) {
+          throw new ApplicationError("ROLE_SLOT_RECORD_CORRUPT", "Authoritative initialization audit missing");
+        }
+
+        const eventRow = this.#database.prepare(
+          "SELECT * FROM domain_events WHERE tenant_id = ? AND aggregate_type = 'project_role_slots' AND aggregate_id = ? AND aggregate_version = 1",
+        ).get(command.tenantId, command.projectId) as Record<string, unknown> | undefined;
+        if (!eventRow) {
+          throw new ApplicationError("ROLE_SLOT_RECORD_CORRUPT", "Authoritative initialization event missing from domain_events");
+        }
+        const event = domainEventFromRow<RoleSlotsInitializedPayload>(eventRow, "ROLE_SLOT_RECORD_CORRUPT");
+
+        const outboxRow = this.#database.prepare(
+          "SELECT * FROM outbox_messages WHERE tenant_id = ? AND event_id = ?",
+        ).get(command.tenantId, event.eventId) as Record<string, unknown> | undefined;
+        if (!outboxRow) {
+          throw new ApplicationError("ROLE_SLOT_RECORD_CORRUPT", "Authoritative initialization outbox missing from outbox_messages");
+        }
+        const outbox = outboxFromRow(outboxRow);
+
+        assertCoherentRoleSlotsInitializationRecords({
+          tenantId: command.tenantId,
+          projectId: command.projectId,
+          sourceTemplateVersionId: command.sourceTemplateVersionId,
+          snapshot: existingSnapshot,
+          slots: existingSlots,
+          audit,
+          event,
+          outbox,
+        });
+
+        const nowUtc = this.nowUtc();
+        const result: InitializeProjectRoleSlotsResult = {
+          snapshot: existingSnapshot,
+          slots: existingSlots,
+          event,
+          outbox,
+          audit,
+          replayed: false,
+        };
+        await transaction.receipts.insert({
+          scope,
+          fingerprint,
+          result: {
+            snapshot: existingSnapshot,
+            slots: existingSlots,
+            event,
+            outbox,
+            audit,
+          },
+          createdAtUtc: nowUtc,
+        });
+        return result;
+      }
+
+      const nowUtc = this.nowUtc();
+      const { snapshot, slots } = this.#mutateInitializeProjectRoleSlots(command, nowUtc);
+      injectRoleSlotFailure(failurePoint, "after_state");
+
+      const sortedSlotKeys = slots.map((s) => s.slotKey);
+      const audit: ProjectRoleSlotAuditEntry = {
+        tenantId: command.tenantId,
+        id: `audit:${command.commandId}`,
+        projectId: command.projectId,
+        actorPrincipalId: command.principalId,
+        sourceTemplateVersionId: command.sourceTemplateVersionId,
+        action: "initialized",
+        slotKeys: sortedSlotKeys,
+        occurredAtUtc: nowUtc,
+      };
+      await transaction.roleSlotAudits.append(audit);
+      injectRoleSlotFailure(failurePoint, "after_audit");
+
+      const projectSequence = await transaction.sequences.next(command.projectId);
+      const event: DomainEvent<RoleSlotsInitializedPayload> = {
+        tenantId: command.tenantId,
+        eventId: `evt:${command.commandId}`,
+        projectId: command.projectId,
+        projectSequence,
+        aggregateType: "project_role_slots",
+        aggregateId: command.projectId,
+        aggregateVersion: 1,
+        eventType: "project-map.role-slots.initialized",
+        schemaVersion: 1,
+        actorPrincipalId: command.principalId,
+        occurredAtUtc: nowUtc,
+        correlationId: command.correlationId ?? command.commandId,
+        causationId: command.commandId,
+        originalSecurityDomainId: null,
+        originalSecurityEpoch: 0,
+        payload: {
+          projectId: command.projectId,
+          sourceTemplateVersionId: command.sourceTemplateVersionId,
+          slotKeys: sortedSlotKeys,
+        },
+      };
+      validateEventAgainstSchema(event);
+      await transaction.events.append(event);
+      injectRoleSlotFailure(failurePoint, "after_event");
+
+      const outbox: OutboxMessage = {
+        tenantId: command.tenantId,
+        id: `outbox:${event.eventId}`,
+        eventId: event.eventId,
+        topic: eventTopic(event),
+        payload: event,
+        state: "pending",
+        availableAtUtc: nowUtc,
+        attempts: 0,
+        maxAttempts: 8,
+        leaseOwner: null,
+        leaseToken: null,
+        leaseExpiresAtUtc: null,
+        lastError: null,
+        publishedAtUtc: null,
+        createdAtUtc: nowUtc,
+      };
+      await transaction.outbox.enqueue(outbox);
+      injectRoleSlotFailure(failurePoint, "after_outbox");
+
+      const result: InitializeProjectRoleSlotsResult = {
+        snapshot,
+        slots,
+        event,
+        outbox,
+        audit,
+        replayed: false,
+      };
+      await transaction.receipts.insert({
+        scope,
+        fingerprint,
+        result: {
+          snapshot,
+          slots,
+          event,
+          outbox,
+          audit,
+        },
+        createdAtUtc: nowUtc,
+      });
+      injectRoleSlotFailure(failurePoint, "after_idempotency");
+      return result;
+    });
+  }
+
 
   readonly outboxConsumer: OutboxConsumer = {
     countReady: async (nowUtc) => this.countReady("outbox_messages", nowUtc),
@@ -2314,6 +3025,79 @@ export class SqlitePersistence implements Persistence {
           (row) => parseJson<SecurityMigrationAuditEntry>(asString(row.audit_json)),
         ),
       },
+      roleSlots: {
+        get: async (projectId, slotKey) => {
+          const row = this.#database.prepare(`
+            SELECT * FROM project_role_slots
+            WHERE tenant_id = ? AND project_id = ? AND slot_key = ?
+          `).get(tenantId, projectId, slotKey) as Record<string, unknown> | undefined;
+          return row === undefined ? undefined : slotFromRow(row, { tenantId, projectId, slotKey });
+        },
+        listByProject: async (projectId) => {
+          const rows = this.#database.prepare(`
+            SELECT * FROM project_role_slots
+            WHERE tenant_id = ? AND project_id = ?
+            ORDER BY slot_key
+          `).all(tenantId, projectId) as Record<string, unknown>[];
+          return rows
+            .map((row) => slotFromRow(row, { tenantId, projectId, slotKey: asString(row.slot_key) }))
+            .sort((a, b) => compareExactStrings(a.slotKey, b.slotKey));
+        },
+        getSnapshot: async (projectId) => {
+          const row = this.#database.prepare(`
+            SELECT * FROM project_role_slot_snapshots
+            WHERE tenant_id = ? AND project_id = ?
+          `).get(tenantId, projectId) as Record<string, unknown> | undefined;
+          return row === undefined ? undefined : snapshotFromRow(row, { tenantId, projectId });
+        },
+      },
+      roleSlotAudits: {
+        append: async (entry) => {
+          assertCanonicalProjectRoleSlotAuditEntry(entry, { tenantId, projectId: entry.projectId });
+          this.#database.prepare(`
+            INSERT INTO project_role_slot_audits (
+              tenant_id, id, project_id, actor_principal_id, source_template_version_id, action, slot_keys_json, occurred_at_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            entry.tenantId,
+            entry.id,
+            entry.projectId,
+            entry.actorPrincipalId,
+            entry.sourceTemplateVersionId,
+            entry.action,
+            JSON.stringify(entry.slotKeys),
+            entry.occurredAtUtc,
+          );
+        },
+        listByProject: async (projectId) => {
+          const rows = this.#database.prepare(`
+            SELECT * FROM project_role_slot_audits
+            WHERE tenant_id = ? AND project_id = ?
+            ORDER BY occurred_at_utc, id
+          `).all(tenantId, projectId) as Record<string, unknown>[];
+          return rows.map((row) => roleSlotAuditFromRow(row, { tenantId, projectId }));
+        },
+      },
+
+      roleBindings: {
+        get: async (projectId, slotKey) => {
+          const row = this.#database.prepare(`
+            SELECT * FROM project_role_bindings
+            WHERE tenant_id = ? AND project_id = ? AND slot_key = ?
+          `).get(tenantId, projectId, slotKey) as Record<string, unknown> | undefined;
+          return row === undefined ? undefined : bindingFromRow(row, { tenantId, projectId, slotKey });
+        },
+        listByProject: async (projectId) => {
+          const rows = this.#database.prepare(`
+            SELECT * FROM project_role_bindings
+            WHERE tenant_id = ? AND project_id = ?
+            ORDER BY slot_key
+          `).all(tenantId, projectId) as Record<string, unknown>[];
+          return rows
+            .map((row) => bindingFromRow(row, { tenantId, projectId, slotKey: asString(row.slot_key) }))
+            .sort((a, b) => compareExactStrings(a.slotKey, b.slotKey));
+        },
+      },
       receipts: {
         get: async <T>(scope: CommandScope) => {
           const row = this.#database.prepare(`
@@ -2441,6 +3225,7 @@ export class SqlitePersistence implements Persistence {
       const maxRow = this.#database.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version?: number } | undefined;
       const countRow = this.#database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count?: number } | undefined;
       if (typeof maxRow?.version === "number" && maxRow.version >= currentSchemaVersion && countRow?.count === currentSchemaVersion) {
+        this.#validateV11TableShapes(this.#database);
         this.#database.exec("COMMIT");
         return;
       }
@@ -2884,12 +3669,206 @@ export class SqlitePersistence implements Persistence {
     this.#database.prepare(`
       INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc) VALUES (10, ?)
     `).run(new Date().toISOString());
+    this.#database.exec(`
+      CREATE TABLE IF NOT EXISTS project_role_slot_snapshots (
+        tenant_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        source_template_version_id TEXT NOT NULL,
+        created_at_utc TEXT NOT NULL,
+        created_by_principal_id TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, project_id),
+        FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS project_role_slots (
+        tenant_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        slot_key TEXT NOT NULL,
+        source_template_version_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT,
+        created_at_utc TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, project_id, slot_key),
+        FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS project_role_bindings (
+        tenant_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        slot_key TEXT NOT NULL,
+        principal_ids_json TEXT NOT NULL,
+        version INTEGER NOT NULL CHECK (version > 0),
+        updated_at_utc TEXT NOT NULL,
+        updated_by_principal_id TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, project_id, slot_key),
+        FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id),
+        FOREIGN KEY (tenant_id, project_id, slot_key) REFERENCES project_role_slots (tenant_id, project_id, slot_key)
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS project_role_slot_audits (
+        tenant_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        actor_principal_id TEXT NOT NULL,
+        source_template_version_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        slot_keys_json TEXT NOT NULL,
+        occurred_at_utc TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, id),
+        FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS idx_project_role_slot_audits_project
+        ON project_role_slot_audits (tenant_id, project_id, occurred_at_utc, id);
+    `);
+
+    this.#validateV11TableShapes(this.#database);
+
+    this.#database.prepare(`
+      INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc) VALUES (11, ?)
+    `).run(new Date().toISOString());
     this.#database.exec("COMMIT");
   } catch (error) {
     this.#database.exec("ROLLBACK");
     throw error;
   }
 }
+
+  #validateV11TableShapes(db: DatabaseSync): void {
+  const tableSchemas: Record<
+    string,
+    {
+      columns: Record<string, { type: string; notnull: number; pk: number }>;
+      foreignKeys: Array<{ table: string; from: string; to: string }>;
+    }
+  > = {
+    project_role_slot_snapshots: {
+      columns: {
+        tenant_id: { type: "TEXT", notnull: 1, pk: 1 },
+        project_id: { type: "TEXT", notnull: 1, pk: 2 },
+        source_template_version_id: { type: "TEXT", notnull: 1, pk: 0 },
+        created_at_utc: { type: "TEXT", notnull: 1, pk: 0 },
+        created_by_principal_id: { type: "TEXT", notnull: 1, pk: 0 },
+      },
+      foreignKeys: [{ table: "tenants", from: "tenant_id", to: "tenant_id" }],
+    },
+    project_role_slots: {
+      columns: {
+        tenant_id: { type: "TEXT", notnull: 1, pk: 1 },
+        project_id: { type: "TEXT", notnull: 1, pk: 2 },
+        slot_key: { type: "TEXT", notnull: 1, pk: 3 },
+        source_template_version_id: { type: "TEXT", notnull: 1, pk: 0 },
+        name: { type: "TEXT", notnull: 1, pk: 0 },
+        description: { type: "TEXT", notnull: 0, pk: 0 },
+        created_at_utc: { type: "TEXT", notnull: 1, pk: 0 },
+      },
+      foreignKeys: [{ table: "tenants", from: "tenant_id", to: "tenant_id" }],
+    },
+    project_role_bindings: {
+      columns: {
+        tenant_id: { type: "TEXT", notnull: 1, pk: 1 },
+        project_id: { type: "TEXT", notnull: 1, pk: 2 },
+        slot_key: { type: "TEXT", notnull: 1, pk: 3 },
+        principal_ids_json: { type: "TEXT", notnull: 1, pk: 0 },
+        version: { type: "INTEGER", notnull: 1, pk: 0 },
+        updated_at_utc: { type: "TEXT", notnull: 1, pk: 0 },
+        updated_by_principal_id: { type: "TEXT", notnull: 1, pk: 0 },
+      },
+      foreignKeys: [
+        { table: "tenants", from: "tenant_id", to: "tenant_id" },
+        { table: "project_role_slots", from: "tenant_id", to: "tenant_id" },
+        { table: "project_role_slots", from: "project_id", to: "project_id" },
+        { table: "project_role_slots", from: "slot_key", to: "slot_key" },
+      ],
+    },
+    project_role_slot_audits: {
+      columns: {
+        tenant_id: { type: "TEXT", notnull: 1, pk: 1 },
+        id: { type: "TEXT", notnull: 1, pk: 2 },
+        project_id: { type: "TEXT", notnull: 1, pk: 0 },
+        actor_principal_id: { type: "TEXT", notnull: 1, pk: 0 },
+        source_template_version_id: { type: "TEXT", notnull: 1, pk: 0 },
+        action: { type: "TEXT", notnull: 1, pk: 0 },
+        slot_keys_json: { type: "TEXT", notnull: 1, pk: 0 },
+        occurred_at_utc: { type: "TEXT", notnull: 1, pk: 0 },
+      },
+      foreignKeys: [{ table: "tenants", from: "tenant_id", to: "tenant_id" }],
+    },
+  };
+
+  for (const [tableName, expected] of Object.entries(tableSchemas)) {
+    const ddlRow = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName) as
+      | { sql?: string }
+      | undefined;
+    if (!ddlRow?.sql) {
+      throw new Error(`SQLITE_SCHEMA_INCOMPATIBLE: table ${tableName} missing`);
+    }
+    if (!/\bSTRICT\b/i.test(ddlRow.sql)) {
+      throw new Error(`SQLITE_SCHEMA_INCOMPATIBLE: table ${tableName} not STRICT`);
+    }
+
+    if (tableName === "project_role_bindings") {
+      if (!/\bCHECK\s*\(\s*version\s*>\s*0\s*\)/i.test(ddlRow.sql)) {
+        throw new Error("SQLITE_SCHEMA_INCOMPATIBLE: table project_role_bindings missing CHECK (version > 0)");
+      }
+    }
+
+    const cols = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{
+      cid: number;
+      name: string;
+      type: string;
+      notnull: number;
+      dflt_value: unknown;
+      pk: number;
+    }>;
+
+    const colMap = new Map(cols.map((c) => [c.name, c]));
+    if (cols.length !== Object.keys(expected.columns).length) {
+      throw new Error(
+        `SQLITE_SCHEMA_INCOMPATIBLE: table ${tableName} column count mismatch: expected ${Object.keys(expected.columns).length}, got ${cols.length}`,
+      );
+    }
+
+    for (const [colName, exp] of Object.entries(expected.columns)) {
+      const actual = colMap.get(colName);
+      if (!actual) {
+        throw new Error(`SQLITE_SCHEMA_INCOMPATIBLE: table ${tableName} missing column ${colName}`);
+      }
+      if (actual.type.toUpperCase() !== exp.type || actual.notnull !== exp.notnull || actual.pk !== exp.pk) {
+        throw new Error(`SQLITE_SCHEMA_INCOMPATIBLE: table ${tableName} column ${colName} shape mismatch`);
+      }
+    }
+
+    const fks = db.prepare(`PRAGMA foreign_key_list(${tableName})`).all() as Array<{
+      table: string;
+      from: string;
+      to: string;
+    }>;
+
+    for (const expFk of expected.foreignKeys) {
+      const match = fks.some((f) => f.table === expFk.table && f.from === expFk.from && f.to === expFk.to);
+      if (!match) {
+        throw new Error(
+          `SQLITE_SCHEMA_INCOMPATIBLE: table ${tableName} missing foreign key ${expFk.from} -> ${expFk.table}(${expFk.to})`,
+        );
+      }
+    }
+  }
+
+  const idxRow = db.prepare(
+    "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_project_role_slot_audits_project'",
+  ).get() as { name?: string; sql?: string } | undefined;
+  if (!idxRow?.name || !idxRow.sql) {
+    throw new Error("SQLITE_SCHEMA_INCOMPATIBLE: index idx_project_role_slot_audits_project missing");
+  }
+  if (
+    !/ON\s+project_role_slot_audits\s*\(\s*tenant_id\s*,\s*project_id\s*,\s*occurred_at_utc\s*,\s*id\s*\)/i.test(
+      idxRow.sql,
+    )
+  ) {
+    throw new Error("SQLITE_SCHEMA_INCOMPATIBLE: index idx_project_role_slot_audits_project definition mismatch");
+  }
+}
+
 
   private assertSupportedSchema(): void {
     this.#database.exec(`
@@ -3999,8 +4978,10 @@ function assertTenant(expected: TenantId, actual: TenantId): void {
 }
 
 function translateConstraint(error: unknown): unknown {
+  if (error instanceof ApplicationError) return error;
   if (!(error instanceof Error)) return error;
   if (error.message.includes("project_nodes.tenant_id, project_nodes.node_id")) return new Error("AGGREGATE_ALREADY_EXISTS");
+  if (error.message.includes("project_role_slots")) return new Error("ROLE_SLOT_ALREADY_EXISTS");
   if (error.message.includes("command_receipts")) return new Error("IDEMPOTENCY_RECORD_ALREADY_EXISTS");
   if (error.message.includes("domain_events.tenant_id, domain_events.aggregate_type")) return new Error("AGGREGATE_VERSION_ALREADY_EXISTS");
   if (error.message.includes("domain_events.tenant_id, domain_events.project_id")) return new Error("PROJECT_SEQUENCE_ALREADY_EXISTS");
@@ -4025,4 +5006,145 @@ function computeNodeDepths(rootNodeId: string, nodes: readonly ProjectNode[]): M
     }
   }
   return depths;
+}
+
+function slotFromRow(
+  row: Record<string, unknown>,
+  expectedScope?: { tenantId?: TenantId; projectId?: string; slotKey?: string },
+): TemplateRoleSlot {
+  try {
+    const slot: TemplateRoleSlot = {
+      tenantId: asString(row.tenant_id) as TenantId,
+      projectId: asString(row.project_id),
+      slotKey: asString(row.slot_key),
+      sourceTemplateVersionId: asString(row.source_template_version_id),
+      name: asString(row.name),
+      description: row.description === null || row.description === undefined ? null : asString(row.description),
+      createdAtUtc: asString(row.created_at_utc),
+    };
+    assertCanonicalTemplateRoleSlot(slot, expectedScope);
+    return slot;
+  } catch (error) {
+    if (error instanceof ApplicationError) throw error;
+    throw new ApplicationError("ROLE_SLOT_RECORD_CORRUPT", error instanceof Error ? error.message : String(error));
+  }
+}
+
+function bindingFromRow(
+  row: Record<string, unknown>,
+  expectedScope?: { tenantId?: TenantId; projectId?: string; slotKey?: string },
+): ProjectRoleBinding {
+  try {
+    const rawIds = JSON.parse(asString(row.principal_ids_json));
+    const binding: ProjectRoleBinding = {
+      tenantId: asString(row.tenant_id) as TenantId,
+      projectId: asString(row.project_id),
+      slotKey: asString(row.slot_key),
+      principalIds: rawIds as PrincipalId[],
+      version: asNumber(row.version),
+      updatedAtUtc: asString(row.updated_at_utc),
+      updatedByPrincipalId: asString(row.updated_by_principal_id) as PrincipalId,
+    };
+    assertCanonicalProjectRoleBinding(binding, expectedScope);
+    return binding;
+  } catch (error) {
+    if (error instanceof ApplicationError) throw error;
+    throw new ApplicationError("ROLE_BINDING_RECORD_CORRUPT", error instanceof Error ? error.message : String(error));
+  }
+}
+
+function snapshotFromRow(
+  row: Record<string, unknown>,
+  expectedScope?: { tenantId?: TenantId; projectId?: string },
+): ProjectRoleSlotSnapshot {
+  try {
+    const snapshot: ProjectRoleSlotSnapshot = {
+      tenantId: asString(row.tenant_id) as TenantId,
+      projectId: asString(row.project_id),
+      sourceTemplateVersionId: asString(row.source_template_version_id),
+      createdAtUtc: asString(row.created_at_utc),
+      createdByPrincipalId: asString(row.created_by_principal_id) as PrincipalId,
+    };
+    assertCanonicalProjectRoleSlotSnapshot(snapshot, expectedScope);
+    return snapshot;
+  } catch (error) {
+    if (error instanceof ApplicationError) throw error;
+    throw new ApplicationError("ROLE_SLOT_RECORD_CORRUPT", error instanceof Error ? error.message : String(error));
+  }
+}
+
+function domainEventFromRow<T extends Record<string, unknown> = Record<string, unknown>>(
+  row: Record<string, unknown>,
+  errorCode: "ROLE_SLOT_RECORD_CORRUPT" | "ROLE_BINDING_RECORD_CORRUPT" = "ROLE_SLOT_RECORD_CORRUPT",
+): DomainEvent<T> {
+  const eventJsonStr = asString(row.event_json);
+  const event = parseJson<DomainEvent<T>>(eventJsonStr);
+  if (!event || typeof event !== "object") {
+    throw new ApplicationError(errorCode, "Domain event JSON is corrupted");
+  }
+
+  const rowTenantId = asString(row.tenant_id);
+  const rowEventId = asString(row.event_id);
+  const rowProjectId = asString(row.project_id);
+  const rowProjectSequence = asNumber(row.project_sequence);
+  const rowAggregateType = asString(row.aggregate_type);
+  const rowAggregateId = asString(row.aggregate_id);
+  const rowAggregateVersion = asNumber(row.aggregate_version);
+  const rowEventType = asString(row.event_type);
+  const rowSchemaVersion = asNumber(row.schema_version);
+  const rowOccurredAtUtc = asString(row.occurred_at_utc);
+
+  if (
+    rowTenantId !== event.tenantId ||
+    rowEventId !== event.eventId ||
+    rowProjectId !== event.projectId ||
+    rowProjectSequence !== event.projectSequence ||
+    rowAggregateType !== event.aggregateType ||
+    rowAggregateId !== event.aggregateId ||
+    rowAggregateVersion !== event.aggregateVersion ||
+    rowEventType !== event.eventType ||
+    rowSchemaVersion !== event.schemaVersion ||
+    rowOccurredAtUtc !== event.occurredAtUtc
+  ) {
+    throw new ApplicationError(
+      errorCode,
+      `Domain event relational columns diverge from event_json: ` +
+      `tenant(${rowTenantId} vs ${event.tenantId}), ` +
+      `eventId(${rowEventId} vs ${event.eventId}), ` +
+      `projectId(${rowProjectId} vs ${event.projectId}), ` +
+      `sequence(${rowProjectSequence} vs ${event.projectSequence}), ` +
+      `aggregateType(${rowAggregateType} vs ${event.aggregateType}), ` +
+      `aggregateId(${rowAggregateId} vs ${event.aggregateId}), ` +
+      `aggregateVersion(${rowAggregateVersion} vs ${event.aggregateVersion}), ` +
+      `eventType(${rowEventType} vs ${event.eventType}), ` +
+      `schemaVersion(${rowSchemaVersion} vs ${event.schemaVersion}), ` +
+      `occurredAt(${rowOccurredAtUtc} vs ${event.occurredAtUtc})`,
+    );
+  }
+
+  return event;
+}
+
+function roleSlotAuditFromRow(
+  row: Record<string, unknown>,
+  expectedScope?: { tenantId?: TenantId; projectId?: string },
+): ProjectRoleSlotAuditEntry {
+  try {
+    const slotKeys = JSON.parse(asString(row.slot_keys_json));
+    const entry: ProjectRoleSlotAuditEntry = {
+      tenantId: asString(row.tenant_id) as TenantId,
+      id: asString(row.id),
+      projectId: asString(row.project_id),
+      actorPrincipalId: asString(row.actor_principal_id) as PrincipalId,
+      sourceTemplateVersionId: asString(row.source_template_version_id),
+      action: asString(row.action) as ProjectRoleSlotAuditAction,
+      slotKeys: slotKeys as readonly string[],
+      occurredAtUtc: asString(row.occurred_at_utc),
+    };
+    assertCanonicalProjectRoleSlotAuditEntry(entry, expectedScope);
+    return entry;
+  } catch (error) {
+    if (error instanceof ApplicationError) throw error;
+    throw new ApplicationError("ROLE_SLOT_AUDIT_RECORD_CORRUPT", error instanceof Error ? error.message : String(error));
+  }
 }

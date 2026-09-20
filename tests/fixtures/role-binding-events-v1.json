@@ -1,0 +1,37 @@
+[
+  {
+    "eventType": "project-map.role-slots.initialized",
+    "schemaVersion": 1,
+    "payload": {
+      "projectId": "proj-1",
+      "sourceTemplateVersionId": "tpl-v1",
+      "slotKeys": [
+        "reviewer_qa",
+        "reviewer_security"
+      ]
+    }
+  },
+  {
+    "eventType": "project-map.role-binding.assigned",
+    "schemaVersion": 1,
+    "payload": {
+      "projectId": "proj-1",
+      "slotKey": "reviewer_qa",
+      "principalIds": [
+        "usr:alice",
+        "usr:bob"
+      ],
+      "version": 1
+    }
+  },
+  {
+    "eventType": "project-map.role-binding.assigned",
+    "schemaVersion": 1,
+    "payload": {
+      "projectId": "proj-1",
+      "slotKey": "reviewer_qa",
+      "principalIds": [],
+      "version": 2
+    }
+  }
+]

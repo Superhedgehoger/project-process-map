@@ -10,6 +10,14 @@ import type { ProjectMembership, ProjectMembershipSecurityAuditEntry } from "../
 import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import type { SecurityDomainMigration, SecurityMigrationAuditEntry } from "../../../domain/src/security-migration.ts";
 import type { SecurityDomain, SecurityGrant, SecurityGrantAuditEntry } from "../../../domain/src/security-access.ts";
+import type {
+  TemplateRoleSlot,
+  ProjectRoleBinding,
+  ProjectRoleSlotSnapshot,
+  ProjectRoleSlotAuditEntry,
+  RoleSlotsInitializedPayload,
+} from "../../../domain/src/role-slots.ts";
+
 import type { SecurityMigrationReadinessEvidence } from "./integrations.ts";
 
 export type CommandScope = Readonly<{
@@ -52,6 +60,74 @@ export type AssignNodeLeaderResult = Readonly<{
 }>;
 
 export type AssignNodeLeaderFailurePoint = "after_aggregate" | "after_event" | "after_outbox" | "after_idempotency";
+
+export type TemplateRoleSlotInit = Readonly<{
+  slotKey: string;
+  name: string;
+  description?: string | null | undefined;
+}>;
+
+export type InitializeProjectRoleSlotsCommand = Readonly<{
+  tenantId: TenantId;
+  commandId: string;
+  idempotencyKey: string;
+  correlationId?: string | null | undefined;
+  principalId: PrincipalId;
+  projectId: string;
+  sourceTemplateVersionId: string;
+  slots: readonly TemplateRoleSlotInit[];
+  occurredAtUtc: string;
+}>;
+
+export type InitializeProjectRoleSlotsFailurePoint =
+  | "after_state"
+  | "after_audit"
+  | "after_event"
+  | "after_outbox"
+  | "after_idempotency";
+
+export type InitializeProjectRoleSlotsResult = Readonly<{
+  snapshot: ProjectRoleSlotSnapshot;
+  slots: readonly TemplateRoleSlot[];
+  event: DomainEvent<RoleSlotsInitializedPayload>;
+  outbox: OutboxMessage;
+  audit: ProjectRoleSlotAuditEntry;
+  replayed: boolean;
+}>;
+
+
+export type AssignProjectRoleBindingCommand = Readonly<{
+  tenantId: TenantId;
+  commandId: string;
+  idempotencyKey: string;
+  correlationId: string;
+  principalId: PrincipalId;
+  projectId: string;
+  slotKey: string;
+  principalIds: readonly PrincipalId[];
+  expectedVersion: number;
+  occurredAtUtc: string;
+}>;
+
+export type RoleBindingAssignedPayload = Readonly<{
+  projectId: string;
+  slotKey: string;
+  principalIds: readonly PrincipalId[];
+  version: number;
+}>;
+
+export type AssignProjectRoleBindingResult = Readonly<{
+  binding: ProjectRoleBinding;
+  event: DomainEvent<RoleBindingAssignedPayload>;
+  outbox: OutboxMessage;
+  replayed: boolean;
+}>;
+
+export type AssignProjectRoleBindingFailurePoint =
+  | "after_aggregate"
+  | "after_event"
+  | "after_outbox"
+  | "after_idempotency";
 
 export type CreateNodeCommand = Readonly<{
   tenantId: TenantId;
@@ -350,6 +426,22 @@ export interface SecurityMigrationAuditRepository {
   listByMigration(migrationId: string): Promise<SecurityMigrationAuditEntry[]>;
 }
 
+export interface TemplateRoleSlotRepository {
+  get(projectId: string, slotKey: string): Promise<TemplateRoleSlot | undefined>;
+  listByProject(projectId: string): Promise<TemplateRoleSlot[]>;
+  getSnapshot(projectId: string): Promise<ProjectRoleSlotSnapshot | undefined>;
+}
+
+export interface RoleSlotAuditRepository {
+  append(entry: ProjectRoleSlotAuditEntry): Promise<void>;
+  listByProject(projectId: string): Promise<ProjectRoleSlotAuditEntry[]>;
+}
+
+export interface ProjectRoleBindingRepository {
+  get(projectId: string, slotKey: string): Promise<ProjectRoleBinding | undefined>;
+  listByProject(projectId: string): Promise<ProjectRoleBinding[]>;
+}
+
 export interface ProjectSequenceRepository {
   next(projectId: string): Promise<number>;
   current(projectId: string): Promise<number>;
@@ -385,6 +477,9 @@ export type TransactionContext = Readonly<{
   securityGrantAudits: SecurityGrantAuditRepository;
   securityMigrations: SecurityDomainMigrationRepository;
   securityMigrationAudits: SecurityMigrationAuditRepository;
+  roleSlots: TemplateRoleSlotRepository;
+  roleSlotAudits: RoleSlotAuditRepository;
+  roleBindings: ProjectRoleBindingRepository;
   receipts: CommandReceiptRepository;
   sequences: ProjectSequenceRepository;
   events: DomainEventWriter;
@@ -405,6 +500,15 @@ export interface Persistence {
     command: AssignNodeLeaderCommand,
     failurePoint?: AssignNodeLeaderFailurePoint,
   ): Promise<AssignNodeLeaderResult>;
+  executeInitializeProjectRoleSlots(
+    command: InitializeProjectRoleSlotsCommand,
+    failurePoint?: InitializeProjectRoleSlotsFailurePoint,
+  ): Promise<InitializeProjectRoleSlotsResult>;
+
+  executeAssignProjectRoleBinding(
+    command: AssignProjectRoleBindingCommand,
+    failurePoint?: AssignProjectRoleBindingFailurePoint,
+  ): Promise<AssignProjectRoleBindingResult>;
 }
 
 export type ClaimOptions = Readonly<{

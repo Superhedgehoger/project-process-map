@@ -1,0 +1,8 @@
+{
+  "agentId": "codex",
+  "role": "specialist-reviewer",
+  "skills": ["security-review", "architecture-review", "migration-review"],
+  "allowedRisk": ["R2-review", "specialist"],
+  "defaultUsage": "R2-only",
+  "taskProtocol": "a2a-compatible-local-v1"
+}

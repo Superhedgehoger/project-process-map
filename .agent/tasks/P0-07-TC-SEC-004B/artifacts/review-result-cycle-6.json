@@ -1,0 +1,27 @@
+{
+  "artifactType": "review-result",
+  "taskId": "P0-07/TC-SEC-004B",
+  "cycle": 6,
+  "producer": "codex-independent-reviewer",
+  "verdict": "REWORK",
+  "findings": [
+    {
+      "severity": "high",
+      "title": "Memory binding replay omits durable outbox value-side ID comparison",
+      "evidence": "packages/adapters/src/memory/persistence.ts:982-993",
+      "scenario": "Changing the stored Memory outbox value id while retaining its authoritative map key still returns replayed=true."
+    }
+  ],
+  "closed": [
+    "Cycle 5 receipt discriminator validation",
+    "SQLite domain_events relational versus event_json cross-check",
+    "Cycle 4 SQLite v11 reopen, CHECK, and index validation"
+  ],
+  "verification": {
+    "targeted": "72 passed, 0 failed, 0 skipped",
+    "fullGate": "284/284 passed; typecheck clean; Huly images 14; extension packages 4",
+    "customProbe": "Memory durable outbox value-side id tamper was incorrectly accepted"
+  },
+  "safeToCommit": false,
+  "nextAction": "Require durableOutbox.id to equal the receipt/key outbox ID in Memory binding replay; add a Memory value-side outbox ID tamper regression; rerun targeted/full gates and independent R2 review."
+}

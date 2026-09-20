@@ -1,0 +1,44 @@
+{
+  "artifactType": "review-result",
+  "taskId": "P0-07/TC-SEC-004B",
+  "cycle": 5,
+  "producer": "codex-independent-reviewer",
+  "verdict": "REWORK",
+  "findings": [
+    {
+      "severity": "high",
+      "title": "Initialization replay does not fully validate receipt discriminators",
+      "evidence": [
+        "packages/adapters/src/memory/persistence.ts:1168",
+        "packages/adapters/src/sqlite/persistence.ts:1071"
+      ],
+      "scenario": "Tampering receipt-embedded slots[0].tenantId, audit.tenantId, or audit.projectId is accepted and returned with replayed=true even when durable records remain valid."
+    },
+    {
+      "severity": "high",
+      "title": "SQLite event relational columns are not cross-checked against event_json",
+      "evidence": [
+        "packages/adapters/src/sqlite/persistence.ts:1126",
+        "packages/application/src/role-slots/initialize-project-role-slots.ts:247"
+      ],
+      "scenario": "Changing domain_events.project_sequence while leaving event_json.projectSequence unchanged is accepted by different-key identical initialization and creates a new receipt."
+    }
+  ],
+  "closure": {
+    "cycle4A": "partial",
+    "cycle4B": "partial",
+    "cycle4C": "closed"
+  },
+  "verification": {
+    "targeted": "69 passed, 0 failed, 0 skipped",
+    "fullGate": "281/281 passed; typecheck clean; Huly images 14; extension packages 4",
+    "diffCheck": "pass",
+    "credentialAndPrivateKeyScanMatches": 0,
+    "customProbes": [
+      "Memory and SQLite receipt discriminator corruption was incorrectly accepted",
+      "SQLite project_sequence column versus event_json divergence was incorrectly accepted and created a receipt"
+    ]
+  },
+  "safeToCommit": false,
+  "nextAction": "Return to Antigravity. Canonically validate every receipt-embedded snapshot, slot, audit, event, and outbox discriminator before replay return; cross-check SQLite domain_events relational columns against parsed event_json in replay and different-key history paths; add Memory/SQLite rejection and zero-new-receipt regressions; rerun targeted and full gates."
+}
