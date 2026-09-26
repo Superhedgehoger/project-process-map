@@ -21,13 +21,12 @@
 - 当前 Gate：P0-07 敏感 ACL（总项继续进行中）
 - 最新完成切片：P0-07 / TC-SEC-004B 模板角色槽位与项目角色绑定底座，提交 `9cadf1c72140e0f0bf572efab0e18d27abc77a30` 已推送并与 `origin/main` 一致。
 - 最新完成切片：P0-05A-T1b Task 验收人三级解析，提交 `0598ad482c02876de6f4e804033bdba906b9d6c7` 已推送并与 `origin/main` 一致；Codex R2 Cycle 5 PASS，64/64 定向与 313/313 全量门禁通过。
-- 当前切片：P0-05A-T2a 文件型 DeliverableRequirement / EvidenceLink 提交、接受与有理由豁免闭环（TC-DLV-001/003）。
-- 当前状态：READY_TO_COMMIT（IMPLEMENTED、VERIFIED、INDEPENDENT_R2_REVIEW_PASS、READY_TO_COMMIT）；R2；Base `0598ad482c02876de6f4e804033bdba906b9d6c7`。
-- Review 历史：Codex R2 Cycle 2–13 迭代修复完成；独立 cross-model R2 Review Cycle 14 **PASS**（BLOCKER: 0, HIGH: 0, MEDIUM: 0, LOW: 0；R2F10–R2F13 全部 verified）。
-- 元数据调和：删除孤立落后文件 `.agent/tasks/P0-05A-T2a.json`；保留 `.agent/tasks/P0-05A-T2a/artifacts/diff.json` 既有 Markdown 文本 artifact 约定。
-- 最近已通过 Gate（2026-09-26）：`tests/deliverable-evidence.test.ts` 33/33；`tests/product-api.test.ts` 21/21；`pnpm check` 346/346；Huly image/extension；`git diff HEAD --check`；高置信凭据扫描 clean；44 个状态 JSON 校验通过（已知 Markdown `diff.json` 排除）。
+- 最新完成切片：P0-05A-T2a 文件型 DeliverableRequirement / EvidenceLink 提交、接受与有理由豁免闭环（TC-DLV-001/003），提交 `46cc16b` 已推送并与 `origin/main` 一致；独立 cross-model R2 Review Cycle 14 PASS，33/33 定向、21/21 product-api 与 346/346 全量门禁通过。
+- 当前任务：P0-05A-T2b ProjectNode 状态机与节点完成守卫（TC-DLV-002）。
+- 当前状态：READY；R2；Base `46cc16b`；Task Packet `docs/agent-tasks/P0-05A-T2b.md` 与 `.agent/tasks/P0-05A-T2b/task.json` 已就绪。
+- 前置依赖：P0-05A-T1a、P0-05A-T1b、P0-05A-T2a、P0-07/TC-SEC-004A、P0-07/TC-SEC-004B 均已通过验收并推送到 origin/main。
 - 当前 blocker：无。
-- next_action：执行最终 Gate，提交并推送 P0-05A-T2a，然后选择下一 Phase 0 Ready Task。
+- next_action：在下一实现会话中启动 P0-05A-T2b 实现；本轮不开始实现代码。
 
 旧会话 `e8e244ee-0c02-4769-8bd0-37f1ca8bd485` 仅是该 Git 工作树所在目录，不得作为聊天执行上下文恢复。原绑定的“project-process-map Goal 恢复”和“用量恢复后继续任务”自动任务已于 2026-09-05 暂停；后续不得把本 Goal 的恢复投递到该旧会话。
 

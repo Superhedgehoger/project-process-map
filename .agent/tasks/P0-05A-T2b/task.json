@@ -1,0 +1,26 @@
+{
+  "taskId": "P0-05A-T2b",
+  "fc": [
+    "FC-006",
+    "A4-03B"
+  ],
+  "testId": [
+    "TC-DLV-002"
+  ],
+  "riskClass": "R2",
+  "goal": "Implement the ProjectNode lifecycle state machine and authoritative node completion guard: require all non-deleted tasks completed and all required deliverable requirements accepted or waived before allowing a node to complete, preserving CAS, transaction boundaries, and Memory/SQLite parity.",
+  "status": "READY",
+  "branch": "main",
+  "baseCommit": "46cc16b",
+  "reviewHistory": [],
+  "dependencies": [
+    "P0-05A-T1a",
+    "P0-05A-T1b",
+    "P0-05A-T2a",
+    "P0-07/TC-SEC-004A",
+    "P0-07/TC-SEC-004B"
+  ],
+  "verification": null,
+  "blocker": null,
+  "nextAction": "Start implementation of P0-05A-T2b (test harness and domain models) in the next dedicated implementation session."
+}
