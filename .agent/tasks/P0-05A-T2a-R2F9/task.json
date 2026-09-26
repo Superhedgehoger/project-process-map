@@ -1,0 +1,58 @@
+{
+  "taskId": "P0-05A-T2a-R2F9",
+  "parentTaskId": "P0-05A-T2a",
+  "previousRepairTaskId": "P0-05A-T2a-R2F8",
+  "riskClass": "R2",
+  "worker": "internal worker (pre-existing worktree edits)",
+  "executionChannel": {
+    "requested": "Antigravity app",
+    "sessionTitle": "。禁止commit/push/T2b。最后唯一下一步=独立只读Review。项目必须为 /Users/djy/Documents/Antigravity/project-process-map；任务 P0-05A-T2a-R2F9。先回报 pwd、项目、会话标题和实际模型；路径不符则停止。读取 AGENTS.md、R2F9 packet/task/artifacts、current/checkpoint、当前 diff及直接相关代码。磁盘已有 occurredAtUtc 四命令指纹、生产517映射移除、CAS helper与测试修改：核对完整性，仅修确认问题。运行定向测",
+    "observedModel": "Gemini 3 Flash (High)",
+    "result": "FAILED_BEFORE_RESPONSE",
+    "failure": "Antigravity displayed 'Model execution terminated due to an error' and automatic retry failed 5/5 times; no Antigravity implementation or verification edits were produced."
+  },
+  "status": "IMPLEMENTED_AND_GATE_PASSED",
+  "baseCommit": "0598ad482c02876de6f4e804033bdba906b9d6c7",
+  "goal": "Fix complete idempotency fingerprints and keep SQLITE_BUSY_SNAPSHOT handling test-only and target-version-proven.",
+  "findings": [
+    "Include normalized occurredAtUtc in initialize, submit, accept and waive fingerprints",
+    "Remove production 517 mapping and only normalize it in controlled CAS tests after proving target version advancement"
+  ],
+  "implemented": {
+    "R2F9_1": "The initialize, submit, accept and waive command fingerprints include normalized occurredAtUtc. Memory and SQLite regression coverage verifies that reusing an idempotency key with a different business timestamp returns IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD.",
+    "R2F9_2": "Production SqlitePersistence contains no SQLITE_BUSY_SNAPSHOT/517 mapping. The controlled CAS helper converts errcode 517 only after a fresh read proves the target requirement advanced from expected stale v1 to a current version greater than 1, while preserving the Cycle 8 uninterrupted transaction-identity and six-fact uniqueness evidence."
+  },
+  "changedFiles": [
+    "packages/application/src/deliverables/initialize-deliverable-requirement.ts",
+    "packages/application/src/deliverables/submit-deliverable-evidence.ts",
+    "packages/application/src/deliverables/accept-deliverable.ts",
+    "packages/application/src/deliverables/waive-deliverable.ts",
+    "packages/adapters/src/sqlite/persistence.ts",
+    "tests/helpers/cas-independent-worker.ts",
+    "tests/deliverable-evidence.test.ts",
+    "docs/reports/P0-05A-T2a-deliverable-evidence.md",
+    "docs/handoff/GOAL-CHECKPOINT.md",
+    ".agent/current.json",
+    ".agent/tasks/P0-05A-T2a/task.json",
+    ".agent/tasks/P0-05A-T2a-R2F9/task.json",
+    ".agent/tasks/P0-05A-T2a/artifacts/diff.json",
+    ".agent/tasks/P0-05A-T2a/artifacts/test-result.json",
+    ".agent/tasks/P0-05A-T2a/artifacts/evidence.json"
+  ],
+  "verification": {
+    "targeted": "PASS 27/27 tests/deliverable-evidence.test.ts",
+    "pnpmCheck": "PASS 340/340 (typecheck, tests, Huly image lock 14 images linux/arm64, Huly extension verify upstream ccefccd8d0361d3c8612d508071b777aa833826d)",
+    "gitDiffCheck": "PASS",
+    "credentialScan": "PASS (changed and untracked worktree high-confidence secret/private-key scan)",
+    "jsonValidation": "PASS"
+  },
+  "constraints": [
+    "No unrelated expansion",
+    "Do not commit or push",
+    "Preserve Cycle 8 evidence",
+    "Run all gates",
+    "Refresh artifacts"
+  ],
+  "packet": "docs/agent-tasks/P0-05A-T2a-R2F9.md",
+  "nextAction": "Fresh independent short-context read-only Codex R2 review (Cycle 10); do not modify code during review and do not commit or push before PASS."
+}

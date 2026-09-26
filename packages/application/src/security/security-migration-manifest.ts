@@ -72,6 +72,7 @@ export function computeSecurityMigrationManifestDigest(manifest: SecurityMigrati
       blobObservedVersion: item.blobObservedVersion ?? null,
       blobSyncState: item.blobSyncState ?? null,
       blobSyncWatermark: item.blobSyncWatermark ?? null,
+      externalIssueId: item.externalIssueId ?? null,
     })),
   };
 
@@ -150,6 +151,15 @@ export async function collectSecurityMigrationManifest(
         blobSyncState: blobBinding?.syncState,
         blobSyncWatermark: blobBinding?.syncWatermark,
       });
+    } else if (item.kind === "deliverable") {
+      manifestItems.push({
+        kind: "deliverable",
+        id: item.id,
+        ownerNodeId: item.ownerNodeId,
+        version: item.version,
+        securityDomainId: item.securityDomainId,
+        securityEpoch: item.securityEpoch,
+      });
     }
   }
 
@@ -224,8 +234,8 @@ export function validateCanonicalManifestItem(item: unknown): SecurityMigrationM
     throw new Error("SECURITY_MIGRATION_MANIFEST_MISMATCH: manifest item must be an object");
   }
   const it = item as Record<string, unknown>;
-  if (it.kind !== "node" && it.kind !== "task" && it.kind !== "asset") {
-    throw new Error("SECURITY_MIGRATION_MANIFEST_MISMATCH: manifest item kind must be node, task, or asset");
+  if (it.kind !== "node" && it.kind !== "task" && it.kind !== "asset" && it.kind !== "deliverable") {
+    throw new Error("SECURITY_MIGRATION_MANIFEST_MISMATCH: manifest item kind must be node, task, asset, or deliverable");
   }
   if (!isNonEmptyString(it.id)) {
     throw new Error("SECURITY_MIGRATION_MANIFEST_MISMATCH: manifest item id must be non-empty string");
@@ -337,6 +347,18 @@ export function validateCanonicalManifestItem(item: unknown): SecurityMigrationM
     }
     if (it.externalIssueId !== undefined && it.externalIssueId !== null && !isNonEmptyString(it.externalIssueId)) {
       throw new Error("SECURITY_MIGRATION_MANIFEST_MISMATCH: asset externalIssueId must be non-empty string or null");
+    }
+  } else if (it.kind === "deliverable") {
+    const forbiddenKeys = [
+      "externalReference", "bindingVersion", "desiredVersion", "observedVersion", "syncState", "syncWatermark",
+      "externalAttachmentReference", "attachmentBindingVersion", "attachmentDesiredVersion", "attachmentObservedVersion", "attachmentSyncState", "attachmentSyncWatermark",
+      "externalBlobReference", "blobBindingVersion", "blobDesiredVersion", "blobObservedVersion", "blobSyncState", "blobSyncWatermark",
+      "externalIssueId",
+    ];
+    for (const key of forbiddenKeys) {
+      if (it[key] !== undefined && it[key] !== null) {
+        throw new Error(`SECURITY_MIGRATION_MANIFEST_MISMATCH: deliverable item cannot have ${key}`);
+      }
     }
   }
 

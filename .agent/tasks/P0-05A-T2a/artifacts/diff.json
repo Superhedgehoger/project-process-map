@@ -1,0 +1,33 @@
+# P0-05A-T2a diff artifact (worktree vs base 0598ad4, uncommitted)
+
+- Format note: Intentionally preserved as Markdown text artifact per established P0-05A-T2a convention.
+- Generated: 2026-09-26T18:14:00+08:00 (final closeout)
+- Base commit: 0598ad482c02876de6f4e804033bdba906b9d6c7
+- Scope: File-backed DeliverableRequirement / EvidenceLink submission, acceptance, and reason-backed waiver vertical slice (TC-DLV-001/003, FC-006, A4-03B), preserving R2F1–R2F13 repair findings and security migration compatibility.
+- Provenance: Implementation edits across R2F9–R2F13 attributed to internal worker. Independent take-over audit and independent cross-model R2 review executed with zero code changes during review.
+
+## Independent Review Evidence
+
+- reviewType: independent_cross_model_r2_review
+- result: PASS
+- findings:
+  - BLOCKER: 0
+  - HIGH: 0
+  - MEDIUM: 0
+  - LOW: 0
+- Scope and repairs R2F10–R2F13 verified.
+
+## Metadata Reconciliation
+
+- Deleted stale isolated file `.agent/tasks/P0-05A-T2a.json`. The authoritative task file is `.agent/tasks/P0-05A-T2a/task.json`.
+- Preserved historical Markdown format for `.agent/tasks/P0-05A-T2a/artifacts/diff.json` for full compatibility.
+
+## Gate
+
+- Targeted deliverable evidence: 33/33 PASS.
+- Product API: 21/21 PASS.
+- `pnpm check`: 346/346 PASS; typecheck, Huly image lock (14, linux/arm64), and Huly extension verification PASS.
+- `git diff HEAD --check`: PASS.
+- Changed-worktree high-confidence credential/private-key scan: PASS (no matches).
+- JSON validation: PASS (44 JSON files; this intentionally Markdown-formatted historical artifact excluded).
+- Status: IMPLEMENTED, VERIFIED, INDEPENDENT_R2_REVIEW_PASS, READY_TO_COMMIT.

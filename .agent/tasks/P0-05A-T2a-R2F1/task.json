@@ -1,0 +1,23 @@
+{
+  "taskId": "P0-05A-T2a-R2F1",
+  "parentTaskId": "P0-05A-T2a",
+  "riskClass": "R2",
+  "worker": "antigravity",
+  "status": "REVIEWED_FAIL_CYCLE_2",
+  "baseCommit": "0598ad482c02876de6f4e804033bdba906b9d6c7",
+  "goal": "Apply only the minimal fixes for the five blocking findings from the independent Codex R2 review.",
+  "findings": [
+    "Include DeliverableRequirement in security migration and Security Root guards",
+    "Prevent Asset ID enumeration through deliverable submission errors",
+    "Fully reauthorize and validate authoritative replay state and evidence facts",
+    "Fail closed on corrupt terminal deliverable records and SQLite reopen/read",
+    "Add direct regression coverage for migration, replay, concurrency, corruption and atomicity gaps"
+  ],
+  "reviewResult": {
+    "review": "Codex R2 Cycle 2",
+    "verdict": "FAIL",
+    "followUp": "P0-05A-T2a-R2F2"
+  },
+  "packet": "docs/agent-tasks/P0-05A-T2a-R2F1.md",
+  "nextAction": "Superseded by implemented repair P0-05A-T2a-R2F2; retain for audit history."
+}

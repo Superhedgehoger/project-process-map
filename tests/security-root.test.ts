@@ -272,7 +272,7 @@ test("TC-SEC-001 missing, revoked-member and revoked-principal identities all fa
 });
 
 test("TC-SEC-001 empty-leaf and legacy-ID guards fail closed without partial writes", async () => {
-  const scenarios = ["child", "task", "asset", "legacy-id"] as const;
+  const scenarios = ["child", "task", "asset", "deliverable", "legacy-id"] as const;
   for (const scenario of scenarios) {
     const persistence = new MemoryPersistence();
     try {
@@ -297,6 +297,18 @@ test("TC-SEC-001 empty-leaf and legacy-ID guards fail closed without partial wri
           contentType: "text/plain", size: 1, sha256: "0".repeat(64), lifecycleState: "available",
           failureCode: null, version: 1, deletedAtUtc: null,
         }));
+      } else if (scenario === "deliverable") {
+        await persistence.transaction(tenant, async (transaction) => {
+          await transaction.deliverables.insert({
+            tenantId: tenant, id: "dlv-existing", projectId: "project-security", ownerNodeId: "node-security",
+            securityDomainId: null, securityEpoch: 1, requirementKey: "dlv_existing", title: "Existing Deliverable",
+            description: null, required: true, acceptedSourceTypes: ["file"], minCount: 1,
+            reviewerPrincipalId: manager, status: "pending",
+            acceptedByPrincipalId: null, acceptedAtUtc: null, acceptedReason: null,
+            waivedByPrincipalId: null, waivedAtUtc: null, waivedReason: null,
+            version: 1, createdAtUtc: "2026-09-04T11:00:10.000Z", updatedAtUtc: "2026-09-04T11:00:10.000Z", deletedAtUtc: null,
+          });
+        });
       } else {
         await persistence.transaction(tenant, async (transaction) => await transaction.nodes.insert({
           tenantId: tenant, id: "legacy-node", projectId: "legacy-project", parentId: null, leaderPrincipalId: null, title: "旧敏感节点",

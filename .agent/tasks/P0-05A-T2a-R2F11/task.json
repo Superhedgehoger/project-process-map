@@ -1,0 +1,36 @@
+{
+  "taskId": "P0-05A-T2a-R2F11",
+  "parentTaskId": "P0-05A-T2a",
+  "previousRepairTaskId": "P0-05A-T2a-R2F10",
+  "riskClass": "R2",
+  "worker": "internal worker (Antigravity control unavailable)",
+  "status": "READY_FOR_CODEX_R2_REVIEW_CYCLE_12",
+  "baseCommit": "0598ad482c02876de6f4e804033bdba906b9d6c7",
+  "goal": "Bind initialize replay to the node security domain and epoch that were authoritative at initialization time.",
+  "findings": [
+    "Initialize replay compares requirement security facts only to the current node, so coordinated node plus requirement securityEpoch/domain tamper can replay successfully while the unchanged initialized event retains the original facts"
+  ],
+  "constraints": [
+    "Fix only Cycle 11 finding",
+    "Preserve R2F1-R2F10 evidence",
+    "Do not commit or push",
+    "Do not start T2b",
+    "Run all gates and refresh artifacts"
+  ],
+  "packet": "docs/agent-tasks/P0-05A-T2a-R2F11.md",
+  "implementation": [
+    "Initialize replay validates exactly one authoritative initialized event and binds its originalSecurityDomainId/originalSecurityEpoch to both the current node and requirement",
+    "Initialized event tenant/project/aggregate/type/version/payload/actor/time facts are bound to the normalized command, action and receipt",
+    "Memory/SQLite coordinated node plus requirement securityEpoch tamper regression added"
+  ],
+  "verification": {
+    "targeted": "PASS 29/29 tests/deliverable-evidence.test.ts",
+    "productApi": "PASS 21/21 tests/product-api.test.ts",
+    "pnpmCheck": "PASS 342/342; typecheck and Huly checks PASS",
+    "gitDiffCheck": "PASS",
+    "credentialScan": "PASS",
+    "jsonValidation": "PASS (known Markdown diff artifact excluded)"
+  },
+  "blocker": null,
+  "nextAction": "Independent short-context read-only Codex R2 Review Cycle 12; no code changes during review and no commit/push/T2b before PASS."
+}

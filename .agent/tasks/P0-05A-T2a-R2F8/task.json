@@ -1,0 +1,44 @@
+{
+  "taskId": "P0-05A-T2a-R2F8",
+  "parentTaskId": "P0-05A-T2a",
+  "previousRepairTaskId": "P0-05A-T2a-R2F7",
+  "riskClass": "R2",
+  "worker": "antigravity",
+  "status": "IMPLEMENTED",
+  "baseCommit": "0598ad482c02876de6f4e804033bdba906b9d6c7",
+  "goal": "Prove CAS using stale v1 read and CAS update in the same physical transaction for each contender.",
+  "findings": [
+    "Remove transaction restart between stale read and CAS update and assert transaction identity continuity"
+  ],
+  "implemented": {
+    "R2F8": "Removed the loser ROLLBACK/BEGIN restart. Two independent child-process handlers now each read stale v1, stop at the barrier immediately before the real version-guarded UPDATE, and attempt that UPDATE after release without ending their physical transaction. BEGIN-derived transaction identities are recorded at stale read and UPDATE attempt and asserted equal. SQLite WAL SQLITE_BUSY_SNAPSHOT (extended code 517) from the stale-reader upgrade is mapped narrowly by the deliverable CAS repository to DELIVERABLE_VERSION_CONFLICT. Six durable fact categories remain unique."
+  },
+  "changedFiles": [
+    "packages/adapters/src/sqlite/persistence.ts",
+    "tests/helpers/cas-independent-worker.ts",
+    "tests/deliverable-evidence.test.ts",
+    "docs/reports/P0-05A-T2a-deliverable-evidence.md",
+    "docs/handoff/GOAL-CHECKPOINT.md",
+    ".agent/current.json",
+    ".agent/tasks/P0-05A-T2a/task.json",
+    ".agent/tasks/P0-05A-T2a-R2F8/task.json",
+    ".agent/tasks/P0-05A-T2a/artifacts/diff.json",
+    ".agent/tasks/P0-05A-T2a/artifacts/test-result.json",
+    ".agent/tasks/P0-05A-T2a/artifacts/evidence.json"
+  ],
+  "verification": {
+    "targeted": "PASS 25/25 tests/deliverable-evidence.test.ts",
+    "pnpmCheck": "PASS 338/338 (typecheck, tests, Huly image lock 14 images linux/arm64, Huly extension verify upstream ccefccd8d0361d3c8612d508071b777aa833826d)",
+    "gitDiffCheck": "PASS",
+    "credentialScan": "PASS (changed worktree high-confidence secret/private-key scan)"
+  },
+  "constraints": [
+    "No unrelated expansion",
+    "No production lock or permission bypass",
+    "Do not commit or push",
+    "Run all gates",
+    "Refresh artifacts"
+  ],
+  "packet": "docs/agent-tasks/P0-05A-T2a-R2F8.md",
+  "nextAction": "Cindy reruns Gate and a fresh independent Codex R2 review (Cycle 9); do not commit or push before PASS."
+}

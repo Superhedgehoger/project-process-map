@@ -1,0 +1,32 @@
+{
+  "taskId": "P0-05A-T2a-R2F2",
+  "parentTaskId": "P0-05A-T2a",
+  "previousRepairTaskId": "P0-05A-T2a-R2F1",
+  "riskClass": "R2",
+  "worker": "antigravity",
+  "status": "IMPLEMENTED",
+  "baseCommit": "0598ad482c02876de6f4e804033bdba906b9d6c7",
+  "goal": "Apply only the minimal fixes for the five blocking findings from Codex R2 Cycle 2 on the current uncommitted worktree.",
+  "findings": [
+    "Replay must validate the exact authoritative action fact and exact EvidenceLink set for initialize, submit, accept and waive",
+    "Repair invalid CAS and expired-Grant tests and regenerate stale test artifacts from the current worktree",
+    "Strengthen Deliverable and action canonical validation for terminal fields and evidence metadata",
+    "Enforce EvidenceLink natural-key uniqueness and exact SQLite v12 UNIQUE/CHECK schema validation",
+    "Complete four-command failure-atomicity coverage and use a real v11 upgrade fixture plus old-version rejection evidence"
+  ],
+  "verification": {
+    "targeted": "PASS 18/18",
+    "pnpmCheck": "PASS 331/331",
+    "gitDiffCheck": "PASS",
+    "credentialScan": "PASS (changed files only)"
+  },
+  "constraints": [
+    "No unrelated feature expansion",
+    "Do not commit or push",
+    "Preserve R2F1 fixes and Memory/SQLite parity",
+    "Run targeted tests and pnpm check before handoff",
+    "Update reports and artifacts to match the actual current worktree"
+  ],
+  "packet": "docs/agent-tasks/P0-05A-T2a-R2F2.md",
+  "nextAction": "Cindy reruns Gate and requests a new independent short-context Codex R2 review; do not commit or push before PASS."
+}

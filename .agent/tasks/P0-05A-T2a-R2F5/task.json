@@ -1,0 +1,38 @@
+{
+  "taskId": "P0-05A-T2a-R2F5",
+  "parentTaskId": "P0-05A-T2a",
+  "previousRepairTaskId": "P0-05A-T2a-R2F4",
+  "riskClass": "R2",
+  "worker": "antigravity",
+  "status": "IMPLEMENTED",
+  "baseCommit": "0598ad482c02876de6f4e804033bdba906b9d6c7",
+  "goal": "Apply only the four minimal fixes from Codex R2 Cycle 5.",
+  "findings": [
+    "Bind submit replay to exact EvidenceLink sourceType and sourceId and reject ProcessRecord tampering",
+    "Use a coordinated independent-process CAS race and verify all six durable fact categories",
+    "Execute the actual frozen base-v11 reader/startup guard rather than a newly written version-check substitute",
+    "Make accept tamper residue assertions exact for links and initialized/submitted actions"
+  ],
+  "implemented": {
+    "R2F5-1": "Submit replay re-checks accepted source types and ProcessRecord unsupported for each replayed evidence item, and binds the replay to the exact full (sourceType, sourceId) set of the authoritative links compared against the original command and stored receipt. New regression test R2F5-1 tampers an authoritative link sourceType together with the receipt sourceType and asserts fail-closed rejection on memory and sqlite.",
+    "R2F5-2": "Cross-process ready/release barrier added to tests/helpers/cas-independent-worker.ts (parent marker + child ready marker, both sides settled before entering the CAS race window). Main-process submit is wrapped so its settled DELIVERABLE_VERSION_CONFLICT loser outcome is collected. Winner/loser outcomes are both settled; loser only accepts DELIVERABLE_VERSION_CONFLICT. Precise uniqueness assertions across aggregate, evidence, action, event, outbox and receipt.",
+    "R2F5-3": "New frozen module packages/adapters/src/sqlite/schema/v11-reader.ts: FrozenV11SqlitePersistenceReader transcribes the base 0598ad4 v11-generation SqlitePersistence startup guard (open options, PRAGMAs, assertSupportedSchema, close-on-failure contract, currentSchemaVersion=11). R2F2-4/5 and R2F3-4 old-reader rejection evidence now executes this frozen reader path (constructor guard + v11-contract error), not a test-local MAX(version)+throw substitute. Frozen v11 schema/fixture/upgrades/reopen evidence unchanged.",
+    "R2F5-4": "R2F3-1 zero-residue assertions made exact: delete-link asserts links exactly empty; replace-link asserts exactly the tampered link set; actions assert deep-equal to the original initialized + submitted records (ids, types, actor, evidenceIds) in both memory and sqlite backends; event/outbox/receipt zero-residue assertions retained."
+  },
+  "verification": {
+    "targeted": "PASS 22/22 tests/deliverable-evidence.test.ts (3 consecutive runs, including cross-process CAS barrier race)",
+    "targetedSuites": "PASS 144/144 across 8 target suites",
+    "pnpmCheck": "PASS 335/335 (typecheck, tests, Huly image lock 14 images linux/arm64, Huly extension verify upstream ccefccd8d0361d3c8612d508071b777aa833826d)",
+    "gitDiffCheck": "PASS",
+    "credentialScan": "PASS (changed files only, high-confidence pattern scan, no hits)"
+  },
+  "constraints": [
+    "No unrelated feature expansion",
+    "Do not commit or push",
+    "Preserve valid R2F1 through R2F4 fixes",
+    "Run targeted tests and pnpm check before handoff",
+    "Refresh reports and artifacts to match the actual worktree"
+  ],
+  "packet": "docs/agent-tasks/P0-05A-T2a-R2F5.md",
+  "nextAction": "Cindy reruns Gate and a fresh independent short-context Codex R2 review (Cycle 6)."
+}

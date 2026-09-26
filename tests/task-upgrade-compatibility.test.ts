@@ -121,7 +121,7 @@ test("P0-05A-T1a SQLite upgrades a legacy Task and receipt without stranding the
     await upgraded.close();
 
     const evidence = new DatabaseSync(path, { readOnly: true });
-    assert.equal((evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version, 11);
+    assert.equal((evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version, 12);
     evidence.close();
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -191,7 +191,7 @@ test("TC-SEC-002J schema v6 to v7 migration and rejection by v6 binary", async (
 
     const evidence = new DatabaseSync(path, { readOnly: true });
     const maxVersion = (evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version;
-    assert.equal(maxVersion, 11);
+    assert.equal(maxVersion, 12);
     evidence.close();
 
     const v6SimulatedCheck = (dbPath: string) => {
@@ -204,7 +204,7 @@ test("TC-SEC-002J schema v6 to v7 migration and rejection by v6 binary", async (
       }
       db.close();
     };
-    assert.throws(() => v6SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:11/);
+    assert.throws(() => v6SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:12/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -249,7 +249,7 @@ test("TC-SEC-002K schema v7 to v8 migration and rejection by v7 binary", async (
 
     const evidence = new DatabaseSync(path, { readOnly: true });
     const maxVersion = (evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version;
-    assert.equal(maxVersion, 11);
+    assert.equal(maxVersion, 12);
     const tableCheck = evidence.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='security_migration_audits'").get();
     assert.ok(tableCheck);
     evidence.close();
@@ -264,7 +264,7 @@ test("TC-SEC-002K schema v7 to v8 migration and rejection by v7 binary", async (
       }
       db.close();
     };
-    assert.throws(() => v7SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:11/);
+    assert.throws(() => v7SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:12/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -310,7 +310,7 @@ test("TC-SEC-002K schema v8 to v9 migration and rejection by v8 binary", async (
 
     const evidence = new DatabaseSync(path, { readOnly: true });
     const maxVersion = (evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version;
-    assert.equal(maxVersion, 11);
+    assert.equal(maxVersion, 12);
     const tableCheck = evidence.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='consumed_security_migration_evidence'").get();
     assert.ok(tableCheck);
     evidence.close();
@@ -325,7 +325,7 @@ test("TC-SEC-002K schema v8 to v9 migration and rejection by v8 binary", async (
       }
       db.close();
     };
-    assert.throws(() => v8SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:11/);
+    assert.throws(() => v8SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:12/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -372,7 +372,7 @@ test("TC-SEC-004A schema v9 to v10 migration and rejection by v9 binary", async 
 
     const evidence = new DatabaseSync(path, { readOnly: true });
     const maxVersion = (evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version;
-    assert.equal(maxVersion, 11);
+    assert.equal(maxVersion, 12);
     const tableInfo = evidence.prepare("PRAGMA table_info(project_nodes)").all() as Array<{ name: string }>;
     assert.ok(tableInfo.some((col) => col.name === "leader_principal_id"));
     evidence.close();
@@ -387,7 +387,7 @@ test("TC-SEC-004A schema v9 to v10 migration and rejection by v9 binary", async 
       }
       db.close();
     };
-    assert.throws(() => v9SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:11/);
+    assert.throws(() => v9SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:12/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -435,7 +435,7 @@ test("TC-SEC-004B schema v10 to v11 migration and rejection by v10 binary", asyn
 
     const evidence = new DatabaseSync(path, { readOnly: true });
     const maxVersion = (evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version;
-    assert.equal(maxVersion, 11);
+    assert.equal(maxVersion, 12);
     const slotsTable = evidence.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='project_role_slots'").get();
     assert.ok(slotsTable);
     const bindingsTable = evidence.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='project_role_bindings'").get();
@@ -457,7 +457,7 @@ test("TC-SEC-004B schema v10 to v11 migration and rejection by v10 binary", asyn
       }
       db.close();
     };
-    assert.throws(() => v10SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:11/);
+    assert.throws(() => v10SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:12/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -660,7 +660,7 @@ test("TC-SEC-004B (sqlite): Cycle 4 Finding 3 - Reopening database already marke
     // Verify it is already marked v11 with 11 migrations
     const checkDb = new DatabaseSync(path);
     const countRow = checkDb.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number };
-    assert.equal(countRow.count, 11);
+    assert.equal(countRow.count, 12);
     checkDb.close();
 
     // 2. Normal reopen succeeds

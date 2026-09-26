@@ -29,6 +29,17 @@ import { ManageSecurityGrantHandler } from "../../../../packages/application/src
 import { CommitSecurityMigrationHandler } from "../../../../packages/application/src/security/commit-security-migration.ts";
 import { RollbackSecurityMigrationHandler } from "../../../../packages/application/src/security/rollback-security-migration.ts";
 import type { VerifyMigrationReadiness } from "../../../../packages/application/src/security/security-migration-coordinator.ts";
+import { SubmitDeliverableEvidenceHandler } from "../../../../packages/application/src/deliverables/submit-deliverable-evidence.ts";
+import { AcceptDeliverableHandler } from "../../../../packages/application/src/deliverables/accept-deliverable.ts";
+import { WaiveDeliverableHandler } from "../../../../packages/application/src/deliverables/waive-deliverable.ts";
+import { toDeliverableRequirementView } from "../../../../packages/application/src/deliverables/initialize-deliverable-requirement.ts";
+import type {
+  AcceptDeliverableResult,
+  DeliverableRequirementView,
+  SubmitDeliverableEvidenceResult,
+  WaiveDeliverableResult,
+} from "../../../../packages/application/src/ports/persistence.ts";
+import type { EvidenceSourceType } from "../../../../packages/domain/src/deliverables.ts";
 
 import type { ApiNode } from "../../../../packages/contracts/src/project-process-map-api.ts";
 import { principalId, type PrincipalId, type TenantId } from "../../../../packages/domain/src/identity.ts";
@@ -418,7 +429,219 @@ export async function routeProjectRequest(
     sendJson(response, 200, result);
     return true;
   }
+
+  const deliverableDetailMatch = url.pathname.match(/^\/api\/deliverables\/([^/]+)$/);
+  if (request.method === "GET" && deliverableDetailMatch?.[1] !== undefined) {
+    const deliverableId = decodePathIdentifier(deliverableDetailMatch[1]);
+    const detail = await persistence.read(identity.tenantId, async (transaction) => {
+      const req = await transaction.deliverables.get(deliverableId);
+      if (req === undefined || req.deletedAtUtc !== null) {
+        throw new ApplicationError("DELIVERABLE_NOT_FOUND", `Deliverable requirement not found: ${deliverableId}`);
+      }
+      const membership = await transaction.memberships.get(req.projectId, identity.principalId);
+      const atUtc = persistence.nowUtc();
+      if (!await canViewProjectObjectDuringMigration(
+        transaction, membership, identity.principalId, {
+          projectId: req.projectId,
+          ownerNodeId: req.ownerNodeId,
+          securityDomainId: req.securityDomainId,
+          securityEpoch: req.securityEpoch,
+        }, atUtc,
+      )) {
+        throw new ApplicationError("DELIVERABLE_NOT_FOUND", `Deliverable requirement not found: ${deliverableId}`);
+      }
+      const evidenceLinks = await transaction.deliverables.listEvidenceLinks(req.id);
+      const actionHistory = await transaction.deliverables.listActions(req.id);
+      return toDeliverableRequirementView(req, evidenceLinks, actionHistory);
+    });
+    sendJson(response, 200, detail);
+    return true;
+  }
+
+  const nodeDeliverablesMatch = url.pathname.match(/^\/api\/nodes\/([^/]+)\/deliverables$/);
+  if (request.method === "GET" && nodeDeliverablesMatch?.[1] !== undefined) {
+    const nodeId = decodePathIdentifier(nodeDeliverablesMatch[1]);
+    const list = await persistence.read(identity.tenantId, async (transaction) => {
+      const node = await transaction.nodes.get(nodeId);
+      if (node === undefined || node.deletedAtUtc !== null) {
+        throw new ApplicationError("NODE_NOT_FOUND", `Node not found: ${nodeId}`);
+      }
+      const membership = await transaction.memberships.get(node.projectId, identity.principalId);
+      const atUtc = persistence.nowUtc();
+      if (!await canAccessProjectNodeDuringMigration(
+        transaction, membership, identity.principalId, node, "view", atUtc,
+      )) {
+        throw new ApplicationError("NODE_NOT_FOUND", `Node not found: ${nodeId}`);
+      }
+      const reqs = await transaction.deliverables.listByNode(nodeId);
+      const visible: DeliverableRequirementView[] = [];
+      for (const req of reqs) {
+        if (req.deletedAtUtc !== null) continue;
+        if (!await canViewProjectObjectDuringMigration(
+          transaction, membership, identity.principalId, {
+            projectId: req.projectId,
+            ownerNodeId: req.ownerNodeId,
+            securityDomainId: req.securityDomainId,
+            securityEpoch: req.securityEpoch,
+          }, atUtc,
+        )) continue;
+        const evidenceLinks = await transaction.deliverables.listEvidenceLinks(req.id);
+        const actionHistory = await transaction.deliverables.listActions(req.id);
+        visible.push(toDeliverableRequirementView(req, evidenceLinks, actionHistory));
+      }
+      return visible;
+    });
+    sendJson(response, 200, list);
+    return true;
+  }
+
+  const deliverableActionMatch = url.pathname.match(/^\/api\/deliverables\/([^/]+)\/actions\/([^/]+)$/);
+  if (request.method === "POST" && deliverableActionMatch?.[1] !== undefined && deliverableActionMatch[2] !== undefined) {
+    const deliverableId = decodePathIdentifier(deliverableActionMatch[1]);
+    const action = deliverableActionMatch[2];
+    if (action !== "submit" && action !== "accept" && action !== "waive") {
+      throw new ApplicationError("NOT_FOUND", "Deliverable action not found");
+    }
+    const body = await readJson(request);
+    const idempotencyKey = requiredHeader(request, "idempotency-key");
+    const principalKey = commandKey(identity, idempotencyKey);
+    const expectedVersion = requiredPositiveInteger(body, "expectedVersion");
+
+    if (action === "submit") {
+      assertExactFields(body, ["expectedVersion", "evidence"]);
+      const rawEvidence = body["evidence"];
+      if (!Array.isArray(rawEvidence)) {
+        throw new ApplicationError("VALIDATION_FAILED", "evidence must be an array");
+      }
+      const evidence = rawEvidence.map((item, idx) => {
+        if (typeof item !== "object" || item === null) {
+          throw new ApplicationError("VALIDATION_FAILED", `evidence[${idx}] must be an object`);
+        }
+        assertExactFields(item as Record<string, unknown>, ["sourceType", "sourceId"]);
+        const sourceType = (item as Record<string, unknown>)["sourceType"];
+        const sourceId = (item as Record<string, unknown>)["sourceId"];
+        if (sourceType !== "file" && sourceType !== "process_record") {
+          throw new ApplicationError("SOURCE_TYPE_UNSUPPORTED", `Invalid source type: ${sourceType}`);
+        }
+        if (typeof sourceId !== "string" || sourceId.trim().length === 0) {
+          throw new ApplicationError("VALIDATION_FAILED", `evidence[${idx}].sourceId is required`);
+        }
+        return { sourceType: sourceType as EvidenceSourceType, sourceId };
+      });
+
+      const handler = new SubmitDeliverableEvidenceHandler(persistence);
+      const result = await executePublicDeliverableCommand(
+        persistence,
+        identity,
+        "submit_deliverable_evidence",
+        idempotencyKey,
+        async (occurredAtUtc) => await handler.execute({
+          tenantId: identity.tenantId,
+          commandId: deterministicPublicId("cmd-dlv-submit", principalKey),
+          idempotencyKey,
+          correlationId: request.headers["x-correlation-id"]?.toString() ?? randomUUID(),
+          principalId: identity.principalId,
+          deliverableId,
+          expectedVersion,
+          evidence,
+          occurredAtUtc,
+        }),
+      );
+      sendJson(response, 200, result);
+      return true;
+    }
+
+    if (action === "accept") {
+      assertExactFields(body, ["expectedVersion", "reason", "note"]);
+      const rawReason = body["reason"] ?? body["note"];
+      let note: string | null = null;
+      if (rawReason !== undefined && rawReason !== null) {
+        if (typeof rawReason !== "string") {
+          throw new ApplicationError("VALIDATION_FAILED", "reason must be string or null");
+        }
+        note = rawReason;
+      }
+
+      const handler = new AcceptDeliverableHandler(persistence);
+      const result = await executePublicDeliverableCommand(
+        persistence,
+        identity,
+        "accept_deliverable",
+        idempotencyKey,
+        async (occurredAtUtc) => await handler.execute({
+          tenantId: identity.tenantId,
+          commandId: deterministicPublicId("cmd-dlv-accept", principalKey),
+          idempotencyKey,
+          correlationId: request.headers["x-correlation-id"]?.toString() ?? randomUUID(),
+          principalId: identity.principalId,
+          deliverableId,
+          expectedVersion,
+          note,
+          occurredAtUtc,
+        }),
+      );
+      sendJson(response, 200, result);
+      return true;
+    }
+
+    if (action === "waive") {
+      assertExactFields(body, ["expectedVersion", "reason"]);
+      const reason = requiredString(body, "reason");
+
+      const handler = new WaiveDeliverableHandler(persistence);
+      const result = await executePublicDeliverableCommand(
+        persistence,
+        identity,
+        "waive_deliverable",
+        idempotencyKey,
+        async (occurredAtUtc) => await handler.execute({
+          tenantId: identity.tenantId,
+          commandId: deterministicPublicId("cmd-dlv-waive", principalKey),
+          idempotencyKey,
+          correlationId: request.headers["x-correlation-id"]?.toString() ?? randomUUID(),
+          principalId: identity.principalId,
+          deliverableId,
+          expectedVersion,
+          reason,
+          occurredAtUtc,
+        }),
+      );
+      sendJson(response, 200, result);
+      return true;
+    }
+  }
   return false;
+}
+
+async function executePublicDeliverableCommand<TResult>(
+  persistence: Persistence,
+  identity: ProductRequestIdentity,
+  operation: "submit_deliverable_evidence" | "accept_deliverable" | "waive_deliverable",
+  idempotencyKey: string,
+  execute: (occurredAtUtc: string) => Promise<TResult>,
+): Promise<TResult> {
+  const scope = { principalId: identity.principalId, operation, idempotencyKey };
+  const previous = await persistence.read(identity.tenantId, async (transaction) => {
+    return await transaction.receipts.get(scope);
+  });
+  const occurredAtUtc = previous?.createdAtUtc ?? new Date().toISOString();
+  try {
+    return await execute(occurredAtUtc);
+  } catch (error) {
+    // A concurrent first request can commit after the read above. Retry once with the
+    // authoritative receipt time; the handler still compares the complete business payload.
+    if (
+      previous === undefined
+      && error instanceof ApplicationError
+      && error.code === "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD"
+    ) {
+      const concurrent = await persistence.read(identity.tenantId, async (transaction) => {
+        return await transaction.receipts.get(scope);
+      });
+      if (concurrent !== undefined) return await execute(concurrent.createdAtUtc);
+    }
+    throw error;
+  }
 }
 
 function securityGrantAction(value: string): "set" | "revoke" {

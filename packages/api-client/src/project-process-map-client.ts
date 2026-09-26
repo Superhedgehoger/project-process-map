@@ -48,6 +48,27 @@ class ProjectProcessMapBrowserClient {
       method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': this.requiredKey(idempotencyKey) }, body: JSON.stringify(input)
     }, true, value => this.decodeCommand(value, item => this.decodeAsset(item)));
   }
+  getDeliverable(deliverableId) {
+    return this.request('/api/deliverables/' + encodeURIComponent(deliverableId), {}, false, value => this.decodeDeliverable(value));
+  }
+  listNodeDeliverables(nodeId) {
+    return this.request('/api/nodes/' + encodeURIComponent(nodeId) + '/deliverables', {}, false, value => this.decodeDeliverables(value));
+  }
+  submitDeliverableEvidence(deliverableId, input, idempotencyKey) {
+    return this.deliverableAction(deliverableId, 'submit', input, idempotencyKey);
+  }
+  acceptDeliverable(deliverableId, input, idempotencyKey) {
+    return this.deliverableAction(deliverableId, 'accept', input, idempotencyKey);
+  }
+  waiveDeliverable(deliverableId, input, idempotencyKey) {
+    return this.deliverableAction(deliverableId, 'waive', input, idempotencyKey);
+  }
+  deliverableAction(deliverableId, action, input, idempotencyKey) {
+    if (!['submit','accept','waive'].includes(action)) throw new Error('deliverable action is invalid');
+    return this.request('/api/deliverables/' + encodeURIComponent(deliverableId) + '/actions/' + action, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': this.requiredKey(idempotencyKey) }, body: JSON.stringify(input)
+    }, true, value => this.decodeCommand(value, item => this.decodeDeliverable(item)));
+  }
   async request(path, init = {}, safeToRetry = false, decode = value => value) {
     const attempts = safeToRetry ? 2 : 1;
     let lastError;
@@ -154,6 +175,61 @@ class ProjectProcessMapBrowserClient {
       permissionVersion: this.positive(item.permissionVersion, 'securityGrant.permissionVersion'),
       domainVersion: this.positive(item.domainVersion, 'securityGrant.domainVersion')
     };
+  }
+  decodeDeliverables(value) {
+    if (!Array.isArray(value)) throw new Error('deliverable list must be an array');
+    return value.map(item => this.decodeDeliverable(item));
+  }
+  decodeDeliverable(value) {
+    const item = this.record(value, 'deliverable');
+    this.text(item.id, 'deliverable.id');
+    this.text(item.projectId, 'deliverable.projectId');
+    this.text(item.nodeId, 'deliverable.nodeId');
+    this.text(item.requirementKey, 'deliverable.requirementKey');
+    this.text(item.title, 'deliverable.title');
+    this.nullableText(item.description, 'deliverable.description');
+    if (typeof item.required !== 'boolean') throw new Error('deliverable.required must be boolean');
+    if (!Array.isArray(item.acceptedSourceTypes)) throw new Error('deliverable.acceptedSourceTypes must be an array');
+    item.acceptedSourceTypes.forEach(st => this.oneOf(st, ['file','process_record'], 'deliverable.acceptedSourceType'));
+    this.positive(item.minCount, 'deliverable.minCount');
+    this.text(item.reviewerPrincipalId, 'deliverable.reviewerPrincipalId');
+    this.oneOf(item.status, ['pending','submitted','accepted','waived','evidence_due'], 'deliverable.status');
+    this.nullableText(item.acceptedByPrincipalId, 'deliverable.acceptedByPrincipalId');
+    this.nullableUtc(item.acceptedAtUtc, 'deliverable.acceptedAtUtc');
+    this.nullableText(item.acceptedReason, 'deliverable.acceptedReason');
+    this.nullableText(item.waivedByPrincipalId, 'deliverable.waivedByPrincipalId');
+    this.nullableUtc(item.waivedAtUtc, 'deliverable.waivedAtUtc');
+    this.nullableText(item.waivedReason, 'deliverable.waivedReason');
+    this.positive(item.version, 'deliverable.version');
+    if (!Array.isArray(item.evidenceLinks)) throw new Error('deliverable.evidenceLinks must be an array');
+    if (!Array.isArray(item.actionHistory)) throw new Error('deliverable.actionHistory must be an array');
+    return {
+      ...item,
+      evidenceLinks: item.evidenceLinks.map(l => this.decodeEvidenceLink(l)),
+      actionHistory: item.actionHistory.map(a => this.decodeDeliverableAction(a))
+    };
+  }
+  decodeEvidenceLink(value) {
+    const item = this.record(value, 'evidence link');
+    this.text(item.id, 'evidenceLink.id');
+    this.oneOf(item.sourceType, ['file','process_record'], 'evidenceLink.sourceType');
+    this.text(item.sourceId, 'evidenceLink.sourceId');
+    this.text(item.submittedByPrincipalId, 'evidenceLink.submittedByPrincipalId');
+    this.nullableUtc(item.linkedAtUtc, 'evidenceLink.linkedAtUtc');
+    this.positive(item.version, 'evidenceLink.version');
+    return item;
+  }
+  decodeDeliverableAction(value) {
+    const item = this.record(value, 'deliverable action');
+    this.text(item.id, 'deliverableAction.id');
+    this.oneOf(item.action, ['initialized','submitted','accepted','waived'], 'deliverableAction.action');
+    this.text(item.actorPrincipalId, 'deliverableAction.actorPrincipalId');
+    this.nullableUtc(item.occurredAtUtc, 'deliverableAction.occurredAtUtc');
+    this.nullableText(item.reason, 'deliverableAction.reason');
+    this.nonNegative(item.evidenceCount, 'deliverableAction.evidenceCount');
+    if (!Array.isArray(item.evidenceIds)) throw new Error('deliverableAction.evidenceIds must be an array');
+    item.evidenceIds.forEach(id => this.text(id, 'deliverableAction.evidenceId'));
+    return item;
   }
   decodeCommand(value, decodeValue) {
     const item = this.record(value, 'command result');

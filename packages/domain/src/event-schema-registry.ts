@@ -2,6 +2,7 @@ import type { DomainEvent } from "./events.ts";
 import { nodeEventSchemas } from "./project-structure.ts";
 import { projectMembershipRestrictionEventSchemas } from "./project-access.ts";
 import { roleBindingEventSchemas, roleSlotEventSchemas } from "./role-slots.ts";
+import { deliverableEventSchemas } from "./deliverables.ts";
 
 export type EventSchema = Readonly<{
   eventType: string;
@@ -40,6 +41,10 @@ registerSchema(projectMembershipRestrictionEventSchemas.demoted);
 registerSchema(projectMembershipRestrictionEventSchemas.revoked);
 registerSchema(roleBindingEventSchemas.assigned);
 registerSchema(roleSlotEventSchemas.initialized);
+registerSchema(deliverableEventSchemas.initialized);
+registerSchema(deliverableEventSchemas.submitted);
+registerSchema(deliverableEventSchemas.accepted);
+registerSchema(deliverableEventSchemas.waived);
 
 
 export function getEventSchema(eventType: string, schemaVersion: number): EventSchema | undefined {
@@ -76,7 +81,8 @@ export function validateEventAgainstSchema(event: DomainEvent): void {
       event.eventType.startsWith("project-map.node.") ||
       event.eventType.startsWith("project-map.project-membership.") ||
       event.eventType.startsWith("project-map.role-binding.") ||
-      event.eventType.startsWith("project-map.role-slots.")
+      event.eventType.startsWith("project-map.role-slots.") ||
+      event.eventType.startsWith("project-map.deliverable.")
     ) {
       throw new Error(`UNKNOWN_EVENT_SCHEMA_VERSION:${event.eventType}:v${event.schemaVersion}`);
     }

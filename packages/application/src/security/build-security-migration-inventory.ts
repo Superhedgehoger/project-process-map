@@ -12,7 +12,7 @@ export type SecurityMigrationInventoryQuery = Readonly<{
 }>;
 
 export type SecurityMigrationInventoryItem = Readonly<{
-  kind: "node" | "task" | "asset";
+  kind: "node" | "task" | "asset" | "deliverable";
   id: string;
   rootNodeId: string;
   ownerNodeId: string;
@@ -68,7 +68,8 @@ export class SecurityMigrationInventoryReader {
 
         const tasks = await transaction.tasks.listForSecurityMigration();
         const assets = await transaction.assets.listForSecurityMigration();
-        for (const object of [...tasks, ...assets]) {
+        const deliverables = await transaction.deliverables.listForSecurityMigration();
+        for (const object of [...tasks, ...assets, ...deliverables]) {
           const owner = nodesById.get(object.ownerNodeId);
           if ((object.projectId === query.projectId) !== (owner !== undefined)) invalid();
           if (owner !== undefined && object.projectId !== owner.projectId) invalid();
@@ -81,6 +82,8 @@ export class SecurityMigrationInventoryReader {
             .map((task) => item("task", task.id, task.ownerNodeId, task, root.id)),
           ...assets.filter((asset) => subtreeIds.has(asset.ownerNodeId))
             .map((asset) => item("asset", asset.id, asset.ownerNodeId, asset, root.id)),
+          ...deliverables.filter((deliverable) => subtreeIds.has(deliverable.ownerNodeId))
+            .map((deliverable) => item("deliverable", deliverable.id, deliverable.ownerNodeId, deliverable, root.id)),
         ].sort(compareItems);
         return {
           rootNodeId: root.id,
@@ -125,7 +128,8 @@ export async function buildResumableSecurityMigrationInventory(
 
     const tasks = await transaction.tasks.listForSecurityMigration();
     const assets = await transaction.assets.listForSecurityMigration();
-    for (const object of [...tasks, ...assets]) {
+    const deliverables = await transaction.deliverables.listForSecurityMigration();
+    for (const object of [...tasks, ...assets, ...deliverables]) {
       const owner = nodesById.get(object.ownerNodeId);
       if ((object.projectId === query.projectId) !== (owner !== undefined)) invalid();
       if (owner !== undefined && object.projectId !== owner.projectId) invalid();
@@ -137,6 +141,8 @@ export async function buildResumableSecurityMigrationInventory(
         .map((task) => item("task", task.id, task.ownerNodeId, task, root.id)),
       ...assets.filter((asset) => subtreeIds.has(asset.ownerNodeId))
         .map((asset) => item("asset", asset.id, asset.ownerNodeId, asset, root.id)),
+      ...deliverables.filter((deliverable) => subtreeIds.has(deliverable.ownerNodeId))
+        .map((deliverable) => item("deliverable", deliverable.id, deliverable.ownerNodeId, deliverable, root.id)),
     ].sort(compareItems);
     const completed = completedItemCount(items, progress);
     for (const [index, current] of items.entries()) {
@@ -265,7 +271,7 @@ function compareText(left: string, right: string): number {
 }
 
 function kindRank(kind: SecurityMigrationInventoryItem["kind"]): number {
-  return kind === "node" ? 0 : kind === "task" ? 1 : 2;
+  return kind === "node" ? 0 : kind === "task" ? 1 : kind === "asset" ? 2 : 3;
 }
 
 function invalid(): never {

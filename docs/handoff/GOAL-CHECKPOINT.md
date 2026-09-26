@@ -1,6 +1,6 @@
 # Goal Handoff Checkpoint — project-process-map
 
-## 当前恢复状态（2026-09-14，优先于下方历史暂停记录）
+## 当前恢复状态（2026-09-21，优先于下方历史暂停记录）
 
 - 状态：GOAL_RUNNING
 - Goal threadId：`01a06f07-6235-7a43-b22d-fc042cf0f6aa`
@@ -20,10 +20,14 @@
 - 架构事实说明：生产 Huly 协同收敛保持 fail-closed（超出本切片范围，由既有架构守卫妥善隔离）。
 - 当前 Gate：P0-07 敏感 ACL（总项继续进行中）
 - 最新完成切片：P0-07 / TC-SEC-004B 模板角色槽位与项目角色绑定底座，提交 `9cadf1c72140e0f0bf572efab0e18d27abc77a30` 已推送并与 `origin/main` 一致。
-- 当前切片：P0-05A-T1b Task 验收人三级解析。
-- 当前状态：ACCEPTED / DONE；Codex R2 Review Cycle 5 PASS（0 findings，safeToAcceptCommitAndPush: true）。3 项非行为性证据用词修正已全部完成。机械门禁（64/64 定向、`pnpm check` 313/313、`git diff --check` clean、凭据/私钥扫描 0 匹配）已全部通过。
-- 验收报告：`docs/reports/P0-05A-T1b-reviewer-resolution.md`
-- next_action：提交并推送 P0-05A-T1b，然后从权威 Backlog 选择下一个 Ready Task。
+- 最新完成切片：P0-05A-T1b Task 验收人三级解析，提交 `0598ad482c02876de6f4e804033bdba906b9d6c7` 已推送并与 `origin/main` 一致；Codex R2 Cycle 5 PASS，64/64 定向与 313/313 全量门禁通过。
+- 当前切片：P0-05A-T2a 文件型 DeliverableRequirement / EvidenceLink 提交、接受与有理由豁免闭环（TC-DLV-001/003）。
+- 当前状态：READY_TO_COMMIT（IMPLEMENTED、VERIFIED、INDEPENDENT_R2_REVIEW_PASS、READY_TO_COMMIT）；R2；Base `0598ad482c02876de6f4e804033bdba906b9d6c7`。
+- Review 历史：Codex R2 Cycle 2–13 迭代修复完成；独立 cross-model R2 Review Cycle 14 **PASS**（BLOCKER: 0, HIGH: 0, MEDIUM: 0, LOW: 0；R2F10–R2F13 全部 verified）。
+- 元数据调和：删除孤立落后文件 `.agent/tasks/P0-05A-T2a.json`；保留 `.agent/tasks/P0-05A-T2a/artifacts/diff.json` 既有 Markdown 文本 artifact 约定。
+- 最近已通过 Gate（2026-09-26）：`tests/deliverable-evidence.test.ts` 33/33；`tests/product-api.test.ts` 21/21；`pnpm check` 346/346；Huly image/extension；`git diff HEAD --check`；高置信凭据扫描 clean；44 个状态 JSON 校验通过（已知 Markdown `diff.json` 排除）。
+- 当前 blocker：无。
+- next_action：执行最终 Gate，提交并推送 P0-05A-T2a，然后选择下一 Phase 0 Ready Task。
 
 旧会话 `e8e244ee-0c02-4769-8bd0-37f1ca8bd485` 仅是该 Git 工作树所在目录，不得作为聊天执行上下文恢复。原绑定的“project-process-map Goal 恢复”和“用量恢复后继续任务”自动任务已于 2026-09-05 暂停；后续不得把本 Goal 的恢复投递到该旧会话。
 

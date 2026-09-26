@@ -42,6 +42,17 @@ import {
   type RoleSlotsInitializedPayload,
 } from "../../../domain/src/role-slots.ts";
 import {
+  assertCanonicalDeliverableRequirement,
+  assertCanonicalEvidenceLink,
+  assertCanonicalDeliverableActionRecord,
+  type DeliverableRequirement,
+  type EvidenceLink,
+  type DeliverableActionRecord,
+  type DeliverableAction,
+  type DeliverableStatus,
+  type EvidenceSourceType,
+} from "../../../domain/src/deliverables.ts";
+import {
   type AssignNodeLeaderCommand,
   type AssignNodeLeaderFailurePoint,
   type AssignNodeLeaderResult,
@@ -123,7 +134,7 @@ export type SqlitePersistenceOptions = Readonly<{
 }>;
 
 const pathLocks = new Map<string, Promise<void>>();
-const currentSchemaVersion = 11;
+const currentSchemaVersion = 12;
 
 export class SqlitePersistence implements Persistence {
   readonly #database: DatabaseSync;
@@ -1876,6 +1887,246 @@ export class SqlitePersistence implements Persistence {
           ORDER BY binding_id
         `).all(tenantId, targetType, targetId).map((row) => parseJson<AssetBinding>(asString(row.binding_json))),
       },
+      deliverables: {
+        get: async (deliverableId) => {
+          const row = this.#database.prepare(
+            "SELECT * FROM deliverable_requirements WHERE tenant_id = ? AND deliverable_id = ?",
+          ).get(tenantId, deliverableId) as Record<string, unknown> | undefined;
+          return row === undefined ? undefined : deliverableRequirementFromRow(row);
+        },
+        getByKey: async (projectId, ownerNodeId, requirementKey) => {
+          const row = this.#database.prepare(
+            "SELECT * FROM deliverable_requirements WHERE tenant_id = ? AND project_id = ? AND owner_node_id = ? AND requirement_key = ?",
+          ).get(tenantId, projectId, ownerNodeId, requirementKey) as Record<string, unknown> | undefined;
+          return row === undefined ? undefined : deliverableRequirementFromRow(row);
+        },
+        listByNode: async (nodeId) => {
+          const rows = this.#database.prepare(
+            "SELECT * FROM deliverable_requirements WHERE tenant_id = ? AND owner_node_id = ? ORDER BY requirement_key ASC",
+          ).all(tenantId, nodeId) as Record<string, unknown>[];
+          return rows.map(deliverableRequirementFromRow);
+        },
+        listByProject: async (projectId) => {
+          const rows = this.#database.prepare(
+            "SELECT * FROM deliverable_requirements WHERE tenant_id = ? AND project_id = ? ORDER BY owner_node_id ASC, requirement_key ASC",
+          ).all(tenantId, projectId) as Record<string, unknown>[];
+          return rows.map(deliverableRequirementFromRow);
+        },
+        listForSecurityMigration: async () => {
+          const rows = this.#database.prepare(
+            "SELECT * FROM deliverable_requirements WHERE tenant_id = ? ORDER BY deliverable_id ASC",
+          ).all(tenantId) as Record<string, unknown>[];
+          return rows.map(deliverableRequirementFromRow);
+        },
+        hasSecurityDomainReference: async (securityDomainId) => {
+          const row = this.#database.prepare(
+            "SELECT 1 FROM deliverable_requirements WHERE tenant_id = ? AND security_domain_id = ? LIMIT 1",
+          ).get(tenantId, securityDomainId);
+          return row !== undefined;
+        },
+        insert: async (requirement) => {
+          assertTenant(tenantId, requirement.tenantId);
+          assertCanonicalDeliverableRequirement(requirement, { tenantId });
+          const existingKey = this.#database.prepare(
+            "SELECT 1 FROM deliverable_requirements WHERE tenant_id = ? AND project_id = ? AND owner_node_id = ? AND requirement_key = ?",
+          ).get(tenantId, requirement.projectId, requirement.ownerNodeId, requirement.requirementKey);
+          if (existingKey !== undefined) throw new Error("DELIVERABLE_ALREADY_EXISTS");
+          const existingId = this.#database.prepare(
+            "SELECT 1 FROM deliverable_requirements WHERE tenant_id = ? AND deliverable_id = ?",
+          ).get(tenantId, requirement.id);
+          if (existingId !== undefined) throw new Error("DELIVERABLE_ALREADY_EXISTS");
+
+          this.#database.prepare(`
+            INSERT INTO deliverable_requirements (
+              tenant_id, deliverable_id, project_id, owner_node_id,
+              security_domain_id, security_epoch, requirement_key,
+              status, version, deliverable_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            tenantId,
+            requirement.id,
+            requirement.projectId,
+            requirement.ownerNodeId,
+            requirement.securityDomainId,
+            requirement.securityEpoch,
+            requirement.requirementKey,
+            requirement.status,
+            requirement.version,
+            JSON.stringify(requirement),
+          );
+        },
+        savePreservingSecurityOwnership: async (requirementId, requirement, expectedVersion) => {
+          assertTenant(tenantId, requirement.tenantId);
+          const row = this.#database.prepare(
+            "SELECT * FROM deliverable_requirements WHERE tenant_id = ? AND deliverable_id = ?",
+          ).get(tenantId, requirementId) as Record<string, unknown> | undefined;
+          if (row === undefined) throw new Error("DELIVERABLE_NOT_FOUND");
+          const current = deliverableRequirementFromRow(row);
+          if (current.version !== expectedVersion || requirement.version !== expectedVersion + 1) {
+            throw new Error("DELIVERABLE_VERSION_CONFLICT");
+          }
+          if (
+            requirement.tenantId !== tenantId ||
+            requirement.id !== requirementId ||
+            requirement.projectId !== current.projectId ||
+            requirement.ownerNodeId !== current.ownerNodeId ||
+            requirement.requirementKey !== current.requirementKey ||
+            requirement.securityDomainId !== current.securityDomainId ||
+            requirement.securityEpoch !== current.securityEpoch
+          ) {
+            throw new Error("DELIVERABLE_SECURITY_OWNERSHIP_IMMUTABLE");
+          }
+          assertCanonicalDeliverableRequirement(requirement, { tenantId, id: requirementId });
+          const result = this.#database.prepare(`
+            UPDATE deliverable_requirements
+            SET status = ?, version = ?, deliverable_json = ?
+            WHERE tenant_id = ? AND deliverable_id = ? AND version = ?
+          `).run(requirement.status, requirement.version, JSON.stringify(requirement), tenantId, requirementId, expectedVersion);
+          if (result.changes !== 1) throw new Error("DELIVERABLE_VERSION_CONFLICT");
+        },
+        migrateSecurityOwnership: async (migrationId, requirementId, expectedVersion) => {
+          const migration = this.migrationForObjectWrite(tenantId, migrationId);
+          const row = this.#database.prepare(
+            "SELECT * FROM deliverable_requirements WHERE tenant_id = ? AND deliverable_id = ?",
+          ).get(tenantId, requirementId) as Record<string, unknown> | undefined;
+          if (row === undefined) throw new Error("DELIVERABLE_NOT_FOUND");
+          const current = deliverableRequirementFromRow(row);
+          if (current.version !== expectedVersion) throw new Error("DELIVERABLE_VERSION_CONFLICT");
+          this.assertMigrationScope(tenantId, migration, current.ownerNodeId);
+          if (
+            current.projectId !== migration.projectId ||
+            current.securityDomainId !== migration.sourceSecurityDomainId ||
+            current.securityEpoch !== migration.sourceSecurityEpoch
+          ) {
+            throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+          }
+          const updated: DeliverableRequirement = {
+            ...current,
+            securityDomainId: migration.targetSecurityDomainId,
+            securityEpoch: migration.targetSecurityEpoch,
+            version: current.version + 1,
+          };
+          const result = this.#database.prepare(`
+            UPDATE deliverable_requirements
+            SET security_domain_id = ?, security_epoch = ?, version = ?, deliverable_json = ?
+            WHERE tenant_id = ? AND deliverable_id = ? AND project_id = ? AND owner_node_id = ? AND version = ?
+          `).run(
+            updated.securityDomainId,
+            updated.securityEpoch,
+            updated.version,
+            JSON.stringify(updated),
+            tenantId,
+            requirementId,
+            migration.projectId,
+            current.ownerNodeId,
+            expectedVersion,
+          );
+          if (result.changes !== 1) throw new Error("DELIVERABLE_VERSION_CONFLICT");
+          return updated;
+        },
+        rollbackSecurityOwnership: async (migrationId, requirementId, expectedVersion) => {
+          const migration = this.migrationForObjectRollback(tenantId, migrationId);
+          const row = this.#database.prepare(
+            "SELECT * FROM deliverable_requirements WHERE tenant_id = ? AND deliverable_id = ?",
+          ).get(tenantId, requirementId) as Record<string, unknown> | undefined;
+          if (row === undefined) throw new Error("DELIVERABLE_NOT_FOUND");
+          const current = deliverableRequirementFromRow(row);
+          if (current.version !== expectedVersion) throw new Error("DELIVERABLE_VERSION_CONFLICT");
+          this.assertMigrationScope(tenantId, migration, current.ownerNodeId);
+          if (
+            current.projectId !== migration.projectId ||
+            current.securityDomainId !== migration.targetSecurityDomainId ||
+            current.securityEpoch !== migration.targetSecurityEpoch
+          ) {
+            throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+          }
+          const updated: DeliverableRequirement = {
+            ...current,
+            securityDomainId: migration.sourceSecurityDomainId,
+            securityEpoch: migration.sourceSecurityEpoch,
+            version: current.version + 1,
+          };
+          const result = this.#database.prepare(`
+            UPDATE deliverable_requirements
+            SET security_domain_id = ?, security_epoch = ?, version = ?, deliverable_json = ?
+            WHERE tenant_id = ? AND deliverable_id = ? AND project_id = ? AND owner_node_id = ? AND version = ?
+          `).run(
+            updated.securityDomainId,
+            updated.securityEpoch,
+            updated.version,
+            JSON.stringify(updated),
+            tenantId,
+            requirementId,
+            migration.projectId,
+            current.ownerNodeId,
+            expectedVersion,
+          );
+          if (result.changes !== 1) throw new Error("DELIVERABLE_VERSION_CONFLICT");
+          return updated;
+        },
+        appendEvidenceLink: async (link) => {
+          assertTenant(tenantId, link.tenantId);
+          assertCanonicalEvidenceLink(link, { tenantId });
+          const existing = this.#database.prepare(`
+            SELECT 1 FROM deliverable_evidence_links
+            WHERE tenant_id = ? AND (
+              link_id = ? OR (requirement_id = ? AND source_type = ? AND source_id = ?)
+            )
+          `).get(tenantId, link.id, link.requirementId, link.sourceType, link.sourceId);
+          if (existing !== undefined) throw new Error("EVIDENCE_LINK_ALREADY_EXISTS");
+          this.#database.prepare(`
+            INSERT INTO deliverable_evidence_links (
+              tenant_id, link_id, requirement_id, source_type, source_id,
+              submitted_by_principal_id, linked_at_utc, version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            tenantId,
+            link.id,
+            link.requirementId,
+            link.sourceType,
+            link.sourceId,
+            link.submittedByPrincipalId,
+            link.linkedAtUtc,
+            link.version,
+          );
+        },
+        listEvidenceLinks: async (requirementId) => {
+          const rows = this.#database.prepare(
+            "SELECT * FROM deliverable_evidence_links WHERE tenant_id = ? AND requirement_id = ? ORDER BY linked_at_utc ASC, link_id ASC",
+          ).all(tenantId, requirementId) as Record<string, unknown>[];
+          return rows.map(evidenceLinkFromRow);
+        },
+        appendAction: async (action) => {
+          assertTenant(tenantId, action.tenantId);
+          assertCanonicalDeliverableActionRecord(action, { tenantId });
+          const existing = this.#database.prepare(
+            "SELECT 1 FROM deliverable_action_records WHERE tenant_id = ? AND action_id = ?",
+          ).get(tenantId, action.id);
+          if (existing !== undefined) throw new Error("DELIVERABLE_ACTION_ALREADY_EXISTS");
+          this.#database.prepare(`
+            INSERT INTO deliverable_action_records (
+              tenant_id, action_id, requirement_id, action,
+              actor_principal_id, occurred_at_utc, reason, evidence_count, evidence_ids_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            tenantId,
+            action.id,
+            action.requirementId,
+            action.action,
+            action.actorPrincipalId,
+            action.occurredAtUtc,
+            action.reason,
+            action.evidenceCount,
+            JSON.stringify(action.evidenceIds),
+          );
+        },
+        listActions: async (requirementId) => {
+          const rows = this.#database.prepare(
+            "SELECT * FROM deliverable_action_records WHERE tenant_id = ? AND requirement_id = ? ORDER BY occurred_at_utc ASC, action_id ASC",
+          ).all(tenantId, requirementId) as Record<string, unknown>[];
+          return rows.map(deliverableActionFromRow);
+        },
+      },
       externalBindings: {
         getByOwner: async (ownerType, ownerId, role) => {
           const row = this.#database.prepare(`
@@ -2858,8 +3109,16 @@ export class SqlitePersistence implements Persistence {
               ) VALUES (?, ?, ?, ?, ?, ?)
             `).run(tenantId, evidence.evidenceId, evidence.nonce, current.id, evidence.manifestDigest, nowUtc);
 
-            // Restore objects in reverse order using immutable manifest snapshot (asset -> task -> node)
-            // 1. Assets
+            // Restore objects in reverse order using immutable manifest snapshot (deliverable -> asset -> task -> node)
+            // 1. Deliverables (roll back first, since they are leaves owned by nodes)
+            for (const item of snapshot.items.filter((i) => i.kind === "deliverable")) {
+              const deliverable = await context.deliverables.get(item.id);
+              if (deliverable !== undefined && deliverable.securityDomainId === current.targetSecurityDomainId && deliverable.securityEpoch === current.targetSecurityEpoch) {
+                await context.deliverables.rollbackSecurityOwnership(current.id, deliverable.id, deliverable.version);
+                rolledBackItems++;
+              }
+            }
+            // 2. Assets
             for (const item of snapshot.items.filter((i) => i.kind === "asset")) {
               const asset = await context.assets.get(item.id);
               if (asset !== undefined && asset.securityDomainId === current.targetSecurityDomainId && asset.securityEpoch === current.targetSecurityEpoch) {
@@ -2867,7 +3126,7 @@ export class SqlitePersistence implements Persistence {
                 rolledBackItems++;
               }
             }
-            // 2. Tasks
+            // 3. Tasks
             for (const item of snapshot.items.filter((i) => i.kind === "task")) {
               const task = await context.tasks.get(item.id);
               if (task !== undefined && task.securityDomainId === current.targetSecurityDomainId && task.securityEpoch === current.targetSecurityEpoch) {
@@ -2875,7 +3134,7 @@ export class SqlitePersistence implements Persistence {
                 rolledBackItems++;
               }
             }
-            // 3. Nodes in reverse depth order (leaves before root)
+            // 4. Nodes in reverse depth order (leaves before root)
             const nodeDepths = this.collectSubtreeDepths(tenantId, current.projectId, current.rootNodeId);
             const nodeItems = snapshot.items
               .filter((i) => i.kind === "node")
@@ -3159,6 +3418,9 @@ export class SqlitePersistence implements Persistence {
             event.occurredAtUtc, JSON.stringify(event),
           );
         },
+        list: async () => (this.#database.prepare(
+          "SELECT event_json FROM domain_events WHERE tenant_id = ? ORDER BY project_id, project_sequence",
+        ).all(tenantId) as Array<Record<string, unknown>>).map((row) => parseJson<DomainEvent>(asString(row.event_json))),
       },
       outbox: {
         enqueue: async (message) => {
@@ -3182,6 +3444,9 @@ export class SqlitePersistence implements Persistence {
             message.leaseExpiresAtUtc, message.lastError, message.publishedAtUtc, message.createdAtUtc,
           );
         },
+        list: async () => (this.#database.prepare(
+          "SELECT * FROM outbox_messages WHERE tenant_id = ? ORDER BY created_at_utc, message_id",
+        ).all(tenantId) as Array<Record<string, unknown>>).map(outboxFromRow),
       },
       jobs: {
         schedule: async (job) => {
@@ -3226,6 +3491,7 @@ export class SqlitePersistence implements Persistence {
       const countRow = this.#database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count?: number } | undefined;
       if (typeof maxRow?.version === "number" && maxRow.version >= currentSchemaVersion && countRow?.count === currentSchemaVersion) {
         this.#validateV11TableShapes(this.#database);
+        this.#validateV12TableShapes(this.#database);
         this.#database.exec("COMMIT");
         return;
       }
@@ -3726,6 +3992,71 @@ export class SqlitePersistence implements Persistence {
     this.#database.prepare(`
       INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc) VALUES (11, ?)
     `).run(new Date().toISOString());
+
+    this.#database.exec(`
+      CREATE TABLE IF NOT EXISTS deliverable_requirements (
+        tenant_id TEXT NOT NULL,
+        deliverable_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        owner_node_id TEXT NOT NULL,
+        security_domain_id TEXT,
+        security_epoch INTEGER NOT NULL CHECK (security_epoch > 0),
+        requirement_key TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'submitted', 'accepted', 'waived', 'evidence_due')),
+        version INTEGER NOT NULL CHECK (version > 0),
+        deliverable_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, deliverable_id),
+        FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id),
+        FOREIGN KEY (tenant_id, owner_node_id) REFERENCES project_nodes (tenant_id, node_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS deliverable_requirements_by_node
+        ON deliverable_requirements (tenant_id, owner_node_id, deliverable_id);
+      CREATE INDEX IF NOT EXISTS deliverable_requirements_by_project
+        ON deliverable_requirements (tenant_id, project_id, deliverable_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_deliverable_requirements_key
+        ON deliverable_requirements (tenant_id, project_id, owner_node_id, requirement_key);
+
+      CREATE TABLE IF NOT EXISTS deliverable_evidence_links (
+        tenant_id TEXT NOT NULL,
+        link_id TEXT NOT NULL,
+        requirement_id TEXT NOT NULL,
+        source_type TEXT NOT NULL CHECK (source_type IN ('file', 'process_record')),
+        source_id TEXT NOT NULL,
+        submitted_by_principal_id TEXT NOT NULL,
+        linked_at_utc TEXT NOT NULL,
+        version INTEGER NOT NULL CHECK (version > 0),
+        PRIMARY KEY (tenant_id, link_id),
+        FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id),
+        FOREIGN KEY (tenant_id, requirement_id) REFERENCES deliverable_requirements (tenant_id, deliverable_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS deliverable_evidence_links_by_requirement
+        ON deliverable_evidence_links (tenant_id, requirement_id, link_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_deliverable_evidence_natural_key
+        ON deliverable_evidence_links (tenant_id, requirement_id, source_type, source_id);
+
+      CREATE TABLE IF NOT EXISTS deliverable_action_records (
+        tenant_id TEXT NOT NULL,
+        action_id TEXT NOT NULL,
+        requirement_id TEXT NOT NULL,
+        action TEXT NOT NULL CHECK (action IN ('initialized', 'submitted', 'accepted', 'waived')),
+        actor_principal_id TEXT NOT NULL,
+        occurred_at_utc TEXT NOT NULL,
+        reason TEXT,
+        evidence_count INTEGER NOT NULL CHECK (evidence_count >= 0),
+        evidence_ids_json TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, action_id),
+        FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id),
+        FOREIGN KEY (tenant_id, requirement_id) REFERENCES deliverable_requirements (tenant_id, deliverable_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS deliverable_actions_by_requirement
+        ON deliverable_action_records (tenant_id, requirement_id, occurred_at_utc, action_id);
+    `);
+
+    this.#validateV12TableShapes(this.#database);
+
+    this.#database.prepare(`
+      INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc) VALUES (12, ?)
+    `).run(new Date().toISOString());
     this.#database.exec("COMMIT");
   } catch (error) {
     this.#database.exec("ROLLBACK");
@@ -3869,6 +4200,249 @@ export class SqlitePersistence implements Persistence {
   }
 }
 
+  #validateV12TableShapes(db: DatabaseSync): void {
+    const tableSchemas: Record<
+      string,
+      {
+        columns: Record<string, { type: string; notnull: number; pk: number }>;
+        foreignKeys: Array<{ table: string; from: string; to: string }>;
+      }
+    > = {
+      deliverable_requirements: {
+        columns: {
+          tenant_id: { type: "TEXT", notnull: 1, pk: 1 },
+          deliverable_id: { type: "TEXT", notnull: 1, pk: 2 },
+          project_id: { type: "TEXT", notnull: 1, pk: 0 },
+          owner_node_id: { type: "TEXT", notnull: 1, pk: 0 },
+          security_domain_id: { type: "TEXT", notnull: 0, pk: 0 },
+          security_epoch: { type: "INTEGER", notnull: 1, pk: 0 },
+          requirement_key: { type: "TEXT", notnull: 1, pk: 0 },
+          status: { type: "TEXT", notnull: 1, pk: 0 },
+          version: { type: "INTEGER", notnull: 1, pk: 0 },
+          deliverable_json: { type: "TEXT", notnull: 1, pk: 0 },
+        },
+        foreignKeys: [
+          { table: "tenants", from: "tenant_id", to: "tenant_id" },
+          { table: "project_nodes", from: "tenant_id", to: "tenant_id" },
+          { table: "project_nodes", from: "owner_node_id", to: "node_id" },
+        ],
+      },
+      deliverable_evidence_links: {
+        columns: {
+          tenant_id: { type: "TEXT", notnull: 1, pk: 1 },
+          link_id: { type: "TEXT", notnull: 1, pk: 2 },
+          requirement_id: { type: "TEXT", notnull: 1, pk: 0 },
+          source_type: { type: "TEXT", notnull: 1, pk: 0 },
+          source_id: { type: "TEXT", notnull: 1, pk: 0 },
+          submitted_by_principal_id: { type: "TEXT", notnull: 1, pk: 0 },
+          linked_at_utc: { type: "TEXT", notnull: 1, pk: 0 },
+          version: { type: "INTEGER", notnull: 1, pk: 0 },
+        },
+        foreignKeys: [
+          { table: "tenants", from: "tenant_id", to: "tenant_id" },
+          { table: "deliverable_requirements", from: "tenant_id", to: "tenant_id" },
+          { table: "deliverable_requirements", from: "requirement_id", to: "deliverable_id" },
+        ],
+      },
+      deliverable_action_records: {
+        columns: {
+          tenant_id: { type: "TEXT", notnull: 1, pk: 1 },
+          action_id: { type: "TEXT", notnull: 1, pk: 2 },
+          requirement_id: { type: "TEXT", notnull: 1, pk: 0 },
+          action: { type: "TEXT", notnull: 1, pk: 0 },
+          actor_principal_id: { type: "TEXT", notnull: 1, pk: 0 },
+          occurred_at_utc: { type: "TEXT", notnull: 1, pk: 0 },
+          reason: { type: "TEXT", notnull: 0, pk: 0 },
+          evidence_count: { type: "INTEGER", notnull: 1, pk: 0 },
+          evidence_ids_json: { type: "TEXT", notnull: 1, pk: 0 },
+        },
+        foreignKeys: [
+          { table: "tenants", from: "tenant_id", to: "tenant_id" },
+          { table: "deliverable_requirements", from: "tenant_id", to: "tenant_id" },
+          { table: "deliverable_requirements", from: "requirement_id", to: "deliverable_id" },
+        ],
+      },
+    };
+
+    for (const [tableName, expected] of Object.entries(tableSchemas)) {
+      const ddlRow = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName) as
+        | { sql?: string }
+        | undefined;
+      if (!ddlRow?.sql) {
+        throw new Error(`SQLITE_SCHEMA_INCOMPATIBLE: table ${tableName} missing`);
+      }
+      if (!/\bSTRICT\b/i.test(ddlRow.sql)) {
+        throw new Error(`SQLITE_SCHEMA_INCOMPATIBLE: table ${tableName} not STRICT`);
+      }
+
+      if (tableName === "deliverable_requirements") {
+        if (!/\bCHECK\s*\(\s*security_epoch\s*>\s*0\s*\)/i.test(ddlRow.sql)) {
+          throw new Error("SQLITE_SCHEMA_INCOMPATIBLE: table deliverable_requirements missing CHECK (security_epoch > 0)");
+        }
+        if (!/\bCHECK\s*\(\s*version\s*>\s*0\s*\)/i.test(ddlRow.sql)) {
+          throw new Error("SQLITE_SCHEMA_INCOMPATIBLE: table deliverable_requirements missing CHECK (version > 0)");
+        }
+        if (!/\bCHECK\s*\(\s*status\s+IN\s*\(\s*'pending'\s*,\s*'submitted'\s*,\s*'accepted'\s*,\s*'waived'\s*,\s*'evidence_due'\s*\)\s*\)/i.test(ddlRow.sql)) {
+          throw new Error("SQLITE_SCHEMA_INCOMPATIBLE: table deliverable_requirements status CHECK enum mismatch");
+        }
+      }
+
+      if (tableName === "deliverable_evidence_links") {
+        if (!/\bCHECK\s*\(\s*version\s*>\s*0\s*\)/i.test(ddlRow.sql)) {
+          throw new Error("SQLITE_SCHEMA_INCOMPATIBLE: table deliverable_evidence_links missing CHECK (version > 0)");
+        }
+        if (!/\bCHECK\s*\(\s*source_type\s+IN\s*\(\s*'file'\s*,\s*'process_record'\s*\)\s*\)/i.test(ddlRow.sql)) {
+          throw new Error("SQLITE_SCHEMA_INCOMPATIBLE: table deliverable_evidence_links source_type CHECK enum mismatch");
+        }
+      }
+
+      if (tableName === "deliverable_action_records") {
+        if (!/\bCHECK\s*\(\s*evidence_count\s*>=\s*0\s*\)/i.test(ddlRow.sql)) {
+          throw new Error("SQLITE_SCHEMA_INCOMPATIBLE: table deliverable_action_records missing CHECK (evidence_count >= 0)");
+        }
+        if (!/\bCHECK\s*\(\s*action\s+IN\s*\(\s*'initialized'\s*,\s*'submitted'\s*,\s*'accepted'\s*,\s*'waived'\s*\)\s*\)/i.test(ddlRow.sql)) {
+          throw new Error("SQLITE_SCHEMA_INCOMPATIBLE: table deliverable_action_records action CHECK enum mismatch");
+        }
+      }
+
+      const cols = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{
+        cid: number;
+        name: string;
+        type: string;
+        notnull: number;
+        dflt_value: unknown;
+        pk: number;
+      }>;
+
+      const colMap = new Map(cols.map((c) => [c.name, c]));
+      if (cols.length !== Object.keys(expected.columns).length) {
+        throw new Error(
+          `SQLITE_SCHEMA_INCOMPATIBLE: table ${tableName} column count mismatch: expected ${Object.keys(expected.columns).length}, got ${cols.length}`,
+        );
+      }
+
+      for (const [colName, exp] of Object.entries(expected.columns)) {
+        const actual = colMap.get(colName);
+        if (!actual) {
+          throw new Error(`SQLITE_SCHEMA_INCOMPATIBLE: table ${tableName} missing column ${colName}`);
+        }
+        if (actual.type.toUpperCase() !== exp.type || actual.notnull !== exp.notnull || actual.pk !== exp.pk) {
+          throw new Error(`SQLITE_SCHEMA_INCOMPATIBLE: table ${tableName} column ${colName} shape mismatch`);
+        }
+      }
+
+      const fks = db.prepare(`PRAGMA foreign_key_list(${tableName})`).all() as Array<{
+        table: string;
+        from: string;
+        to: string;
+      }>;
+
+      for (const expFk of expected.foreignKeys) {
+        const match = fks.some((f) => f.table === expFk.table && f.from === expFk.from && f.to === expFk.to);
+        if (!match) {
+          throw new Error(
+            `SQLITE_SCHEMA_INCOMPATIBLE: table ${tableName} missing foreign key ${expFk.from} -> ${expFk.table}(${expFk.to})`,
+          );
+        }
+      }
+    }
+
+    const expectedIndexes = [
+      {
+        table: "deliverable_requirements",
+        name: "deliverable_requirements_by_node",
+        unique: 0,
+        columns: ["tenant_id", "owner_node_id", "deliverable_id"],
+      },
+      {
+        table: "deliverable_requirements",
+        name: "deliverable_requirements_by_project",
+        unique: 0,
+        columns: ["tenant_id", "project_id", "deliverable_id"],
+      },
+      {
+        table: "deliverable_requirements",
+        name: "uq_deliverable_requirements_key",
+        unique: 1,
+        columns: ["tenant_id", "project_id", "owner_node_id", "requirement_key"],
+      },
+      {
+        table: "deliverable_evidence_links",
+        name: "deliverable_evidence_links_by_requirement",
+        unique: 0,
+        columns: ["tenant_id", "requirement_id", "link_id"],
+      },
+      {
+        table: "deliverable_evidence_links",
+        name: "uq_deliverable_evidence_natural_key",
+        unique: 1,
+        columns: ["tenant_id", "requirement_id", "source_type", "source_id"],
+      },
+      {
+        table: "deliverable_action_records",
+        name: "deliverable_actions_by_requirement",
+        unique: 0,
+        columns: ["tenant_id", "requirement_id", "occurred_at_utc", "action_id"],
+      },
+    ] as const;
+
+    for (const expIdx of expectedIndexes) {
+      const indexes = db.prepare(`PRAGMA index_list(${expIdx.table})`).all() as Array<{
+        name: string;
+        unique: number;
+        partial: number;
+      }>;
+      const actual = indexes.find((index) => index.name === expIdx.name);
+      if (actual === undefined) {
+        throw new Error(`SQLITE_SCHEMA_INCOMPATIBLE: index ${expIdx.name} missing`);
+      }
+      if (actual.unique !== expIdx.unique) {
+        throw new Error(`SQLITE_SCHEMA_INCOMPATIBLE: index ${expIdx.name} uniqueness mismatch`);
+      }
+      if (actual.partial !== 0) {
+        throw new Error(`SQLITE_SCHEMA_INCOMPATIBLE: index ${expIdx.name} must cover the full table`);
+      }
+      const columns = db.prepare(`PRAGMA index_info(${expIdx.name})`).all() as Array<{
+        seqno: number;
+        name: string;
+      }>;
+      const names = columns.sort((a, b) => a.seqno - b.seqno).map((column) => column.name);
+      if (names.length !== expIdx.columns.length || names.some((name, index) => name !== expIdx.columns[index])) {
+        throw new Error(`SQLITE_SCHEMA_INCOMPATIBLE: index ${expIdx.name} definition mismatch`);
+      }
+      if (expIdx.unique === 1) {
+        const keyColumns = (db.prepare(`PRAGMA index_xinfo(${expIdx.name})`).all() as Array<{
+          seqno: number;
+          cid: number;
+          name: string | null;
+          desc: number;
+          coll: string;
+          key: number;
+        }>).filter((column) => column.key === 1).sort((a, b) => a.seqno - b.seqno);
+        if (
+          keyColumns.length !== expIdx.columns.length
+          || keyColumns.some((column, index) =>
+            column.cid < 0
+            || column.name !== expIdx.columns[index]
+            || column.desc !== 0
+            || column.coll.toUpperCase() !== "BINARY")
+        ) {
+          throw new Error(`SQLITE_SCHEMA_INCOMPATIBLE: index ${expIdx.name} key definition mismatch`);
+        }
+        const indexDdl = db.prepare(
+          "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+        ).get(expIdx.name) as { sql?: string } | undefined;
+        const escapedColumns = expIdx.columns.map((column) => column.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+        const definition = new RegExp(
+          `^CREATE\\s+UNIQUE\\s+INDEX\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${expIdx.name}\\s+ON\\s+${expIdx.table}\\s*\\(\\s*${escapedColumns.join("\\s*,\\s*")}\\s*\\)\\s*$`,
+          "i",
+        );
+        if (!indexDdl?.sql || !definition.test(indexDdl.sql)) {
+          throw new Error(`SQLITE_SCHEMA_INCOMPATIBLE: index ${expIdx.name} unique definition mismatch`);
+        }
+      }
+    }
+  }
 
   private assertSupportedSchema(): void {
     this.#database.exec(`
@@ -4352,6 +4926,20 @@ export class SqlitePersistence implements Persistence {
       }
     }
 
+    const deliverableRows = this.#database.prepare(`
+      SELECT * FROM deliverable_requirements WHERE tenant_id = ? AND project_id = ?
+    `).all(tenantId, migration.projectId) as Array<Record<string, unknown>>;
+    for (const deliverableRow of deliverableRows) {
+      const deliverable = deliverableRequirementFromRow(deliverableRow);
+      if (deliverable.deletedAtUtc !== null) continue;
+      if (subtree.has(deliverable.ownerNodeId)) {
+        if (deliverable.securityDomainId !== migration.targetSecurityDomainId
+          || deliverable.securityEpoch !== migration.targetSecurityEpoch) {
+          return true;
+        }
+      }
+    }
+
     return false;
   }
 
@@ -4402,6 +4990,20 @@ export class SqlitePersistence implements Persistence {
       if (subtree.has(asset.ownerNodeId)) {
         if (asset.securityDomainId !== migration.sourceSecurityDomainId
           || asset.securityEpoch !== migration.sourceSecurityEpoch) {
+          return true;
+        }
+      }
+    }
+
+    const deliverableRows = this.#database.prepare(`
+      SELECT * FROM deliverable_requirements WHERE tenant_id = ? AND project_id = ?
+    `).all(tenantId, migration.projectId) as Array<Record<string, unknown>>;
+    for (const deliverableRow of deliverableRows) {
+      const deliverable = deliverableRequirementFromRow(deliverableRow);
+      if (deliverable.deletedAtUtc !== null) continue;
+      if (subtree.has(deliverable.ownerNodeId)) {
+        if (deliverable.securityDomainId !== migration.sourceSecurityDomainId
+          || deliverable.securityEpoch !== migration.sourceSecurityEpoch) {
           return true;
         }
       }
@@ -4492,6 +5094,70 @@ function assetFromRow(row: Record<string, unknown>): Asset {
     throw new Error("ASSET_PERSISTENCE_INCONSISTENT");
   }
   return asset;
+}
+
+function deliverableRequirementFromRow(row: Record<string, unknown>): DeliverableRequirement {
+  let req: DeliverableRequirement;
+  try {
+    req = parseJson<DeliverableRequirement>(asString(row.deliverable_json));
+  } catch {
+    throw new Error("DELIVERABLE_RECORD_CORRUPT: malformed deliverable_json");
+  }
+  const rowSecDomain = row.security_domain_id !== null && row.security_domain_id !== undefined
+    ? asString(row.security_domain_id)
+    : null;
+  if (
+    req.tenantId !== asString(row.tenant_id) ||
+    req.id !== asString(row.deliverable_id) ||
+    req.projectId !== asString(row.project_id) ||
+    req.ownerNodeId !== asString(row.owner_node_id) ||
+    (req.securityDomainId ?? null) !== rowSecDomain ||
+    req.securityEpoch !== asNumber(row.security_epoch) ||
+    req.requirementKey !== asString(row.requirement_key) ||
+    req.status !== asString(row.status) ||
+    req.version !== asNumber(row.version)
+  ) {
+    throw new Error("DELIVERABLE_RECORD_CORRUPT: column mismatch");
+  }
+  assertCanonicalDeliverableRequirement(req);
+  return req;
+}
+
+function evidenceLinkFromRow(row: Record<string, unknown>): EvidenceLink {
+  const link: EvidenceLink = {
+    tenantId: asString(row.tenant_id) as TenantId,
+    id: asString(row.link_id),
+    requirementId: asString(row.requirement_id),
+    sourceType: asString(row.source_type) as EvidenceSourceType,
+    sourceId: asString(row.source_id),
+    submittedByPrincipalId: asString(row.submitted_by_principal_id) as PrincipalId,
+    linkedAtUtc: asString(row.linked_at_utc),
+    version: asNumber(row.version),
+  };
+  assertCanonicalEvidenceLink(link);
+  return link;
+}
+
+function deliverableActionFromRow(row: Record<string, unknown>): DeliverableActionRecord {
+  let evidenceIds: string[];
+  try {
+    evidenceIds = parseJson<string[]>(asString(row.evidence_ids_json));
+  } catch {
+    throw new Error("DELIVERABLE_ACTION_RECORD_CORRUPT: malformed evidence_ids_json");
+  }
+  const action: DeliverableActionRecord = {
+    tenantId: asString(row.tenant_id) as TenantId,
+    id: asString(row.action_id),
+    requirementId: asString(row.requirement_id),
+    action: asString(row.action) as DeliverableAction,
+    actorPrincipalId: asString(row.actor_principal_id) as PrincipalId,
+    occurredAtUtc: asString(row.occurred_at_utc),
+    reason: row.reason !== null && row.reason !== undefined ? asString(row.reason) : null,
+    evidenceCount: asNumber(row.evidence_count),
+    evidenceIds,
+  };
+  assertCanonicalDeliverableActionRecord(action);
+  return action;
 }
 
 function isIsoTimestamp(value: unknown): value is string {

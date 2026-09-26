@@ -1,0 +1,32 @@
+{
+  "taskId": "P0-05A-T2a-R2F13",
+  "parentTaskId": "P0-05A-T2a",
+  "previousRepairTaskId": "P0-05A-T2a-R2F12",
+  "riskClass": "R2",
+  "worker": "internal worker (Antigravity control unavailable)",
+  "status": "READY_FOR_CODEX_R2_REVIEW_CYCLE_14",
+  "baseCommit": "0598ad482c02876de6f4e804033bdba906b9d6c7",
+  "goal": "Bind aggregate update times and terminal versions to replay commands, and replace the synthetic version fixture with a legally committed security migration.",
+  "findings": [
+    "Submit/accept/waive replay did not bind authoritative requirement updatedAtUtc to command occurredAtUtc",
+    "Accept/waive replay did not require authoritative and receipt versions to equal command.expectedVersion + 1",
+    "The v2 to v3 submit replay regression directly edited requirement version instead of executing and committing a legal security migration"
+  ],
+  "constraints": [
+    "Fix only Cycle 13 findings",
+    "Preserve R2F1-R2F12 evidence",
+    "Do not commit or push",
+    "Do not start T2b",
+    "Run all gates and refresh artifacts"
+  ],
+  "packet": "docs/agent-tasks/P0-05A-T2a-R2F13.md",
+  "blocker": null,
+  "verification": {
+    "targeted": "PASS 33/33 tests/deliverable-evidence.test.ts; PASS 21/21 tests/product-api.test.ts",
+    "pnpmCheck": "PASS 346/346 (typecheck, tests, Huly image lock 14 images linux/arm64, Huly extension verify upstream ccefccd8d0361d3c8612d508071b777aa833826d)",
+    "gitDiffCheck": "PASS",
+    "credentialScan": "PASS (high-confidence changed-worktree scan, no matches)",
+    "jsonValidation": "PASS (45 JSON files; known Markdown diff artifact excluded)"
+  },
+  "nextAction": "Commission independent short-context read-only Codex R2 Review Cycle 14. Do not modify code during review; do not commit, push, or start T2b before PASS and final Gate."
+}

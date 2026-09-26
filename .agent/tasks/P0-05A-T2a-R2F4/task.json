@@ -1,0 +1,45 @@
+{
+  "taskId": "P0-05A-T2a-R2F4",
+  "parentTaskId": "P0-05A-T2a",
+  "previousRepairTaskId": "P0-05A-T2a-R2F3",
+  "riskClass": "R2",
+  "worker": "antigravity",
+  "status": "IMPLEMENTED",
+  "baseCommit": "0598ad482c02876de6f4e804033bdba906b9d6c7",
+  "goal": "Apply only the three minimal fixes from Codex R2 Cycle 4 without circular test evidence.",
+  "findings": [
+    "Remove the production-visible testExecutionId bypass and prove CAS using independent execution contexts with a version-conflict loser",
+    "Build v11 upgrade evidence from a frozen independent v11 schema/reader rather than the current v12 adapter",
+    "Fix first-accept zero-residue tests to inspect the mutated backend and verify event, outbox and receipt absence"
+  ],
+  "constraints": [
+    "No unrelated feature expansion",
+    "Do not commit or push",
+    "Preserve all valid R2F1 through R2F3 fixes",
+    "Run targeted tests and pnpm check before handoff",
+    "Refresh reports and artifacts to match the actual worktree"
+  ],
+  "packet": "docs/agent-tasks/P0-05A-T2a-R2F4.md",
+  "changedFiles": [
+    "packages/adapters/src/sqlite/persistence.ts (removed testExecutionId + test-exec lock-key branch; added tx-context events.list / outbox.list)",
+    "packages/adapters/src/sqlite/schema/v11-schema.ts (NEW frozen v11 DDL + frozen v11 reader guard, verbatim from commit 0598ad4)",
+    "packages/adapters/src/memory/persistence.ts (added tx-context events.list / outbox.list)",
+    "packages/application/src/ports/persistence.ts (DomainEventWriter.list / OutboxWriter.list)",
+    "tests/helpers/test-persistence-bundle.ts (removed testExecutionId forwarding)",
+    "tests/helpers/cas-independent-worker.ts (NEW child-process CAS worker)",
+    "tests/deliverable-evidence.test.ts (R2F1-4 sec 4 + R2F2-4/5 sec 4 cross-process CAS; R2F2-4/5 + R2F3-4 frozen v11 fixture & frozen reader guard; R2F3-1 zero-residue on mutator instance with event/outbox/receipt assertions)"
+  ],
+  "findingEvidence": {
+    "R2F4-1": "SqlitePersistenceOptions.testExecutionId and the `test-exec:` path-lock bypass branch removed; the in-process pathLocks map remains with a fixed key (resolved path / per-instance UUID for :memory:), so the production concurrency contract is unchanged. The second real SqlitePersistence in the CAS evidence now runs in a fresh Node child process (tests/helpers/cas-independent-worker.ts) that owns its own module-level pathLocks map and its own DatabaseSync handle: the two submits share no in-process lock and no synchronous connection. Exactly one of the two independent contexts wins; the loser is asserted to have reached the version check and failed closed with DELIVERABLE_VERSION_CONFLICT (SQLITE_BUSY / database-locked outcomes are explicitly NOT accepted as CAS evidence); the shared database holds exactly one evidence link and one submitted action afterwards. Covered by R2F1-4 section 4 and R2F2-4/5 section 4 in tests/deliverable-evidence.test.ts.",
+    "R2F4-2": "New frozen module packages/adapters/src/sqlite/schema/v11-schema.ts transcribes the v11 DDL verbatim from base commit 0598ad4 (v1-v10 block, marker rows 2-10, v11 role-slot block, v11 marker) and freezes the v11 reader version guard (v11SchemaVersionGuard: same MAX(version) read + same fail-closed SQLITE_SCHEMA_VERSION_UNSUPPORTED contract as the v11 assertSupportedSchema). R2F3-4 now builds its fixture solely from that frozen module via raw DatabaseSync seeding (tenant, principals, memberships, node with leader, asset) — no current v12 adapter creates or strips the fixture. The current SqlitePersistence upgrades v11->v12, is re-instantiated (reopen), and the old v11 rows plus a full init+submit scenario are verified. Old-reader rejection in both R2F2-4/5 and R2F3-4 executes the frozen v11 guard, replacing the previous test-local MAX+manual-throw substitutes.",
+    "R2F4-3": "R2F3-1 now reads the post-failure state from the actual executing instance mutatorPersistence (memory: the snapshot-derived MemoryPersistence the handler ran on; sqlite: the fixture persistence the handler ran on), never from the pre-tamper fixture instance. For both backends and both tamper shapes (delete-link / equal-count replace-link) it asserts: aggregate stays submitted at version 2, links/actions unchanged (exactly init+submit, one submitted action), and no NEW event / outbox message / command receipt for this command/event/receipt identity (cmd-accept-r2f3-* / evt:cmd-accept-r2f3-* / accept_deliverable + idem-accept-r2f3-*). To make that direct evidence possible, the transaction-context DomainEventWriter and OutboxWriter ports gained read-only list(tenantId), implemented in both adapters."
+  },
+  "verification": {
+    "targeted": "PASS 21/21 tests/deliverable-evidence.test.ts (3 consecutive runs)",
+    "targetedSuites": "PASS 143/143 across tests/deliverable-evidence.test.ts, tests/task-upgrade-compatibility.test.ts, tests/security-migration-batch.test.ts, tests/security-root.test.ts, tests/security-grant.test.ts, tests/node-owner.test.ts, tests/task-reviewer-resolution.test.ts, tests/product-api.test.ts",
+    "pnpmCheck": "PASS 334/334 (typecheck, tests, huly:images 14 linux/arm64, huly:extension:verify upstream ccefccd8d0361d3c8612d508071b777aa833826d)",
+    "gitDiffCheck": "PASS",
+    "credentialScan": "PASS (changed files only, high-confidence credential pattern scan, no hits)"
+  },
+  "nextAction": "Cindy reruns Gate and a fresh independent short-context Codex R2 review (Cycle 5) on the R2F4 worktree; do not commit or push before PASS."
+}

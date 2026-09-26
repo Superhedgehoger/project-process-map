@@ -787,10 +787,10 @@ test("TC-SEC-004A SQLite schema v9 to v10 migration, null backfill, restart and 
     assert.equal(loaded.leaderPrincipalId, null);
     assert.equal(loaded.title, "Old Title");
 
-    // Verify schema_migrations has upgraded to current version (11)
+    // Verify schema_migrations has upgraded to current version (12)
     const checkDb = new DatabaseSync(path, { readOnly: true });
     const maxVer = (checkDb.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version;
-    assert.equal(maxVer, 11);
+    assert.equal(maxVer, 12);
     checkDb.close();
 
     // 3. Simulated v9 check rejects upgraded database
@@ -804,7 +804,7 @@ test("TC-SEC-004A SQLite schema v9 to v10 migration, null backfill, restart and 
       }
       db.close();
     };
-    assert.throws(() => v9SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:11/);
+    assert.throws(() => v9SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:12/);
 
     // 4. Two independent connections CAS concurrency
     const bundle2 = createTestSqliteBundle({ path });

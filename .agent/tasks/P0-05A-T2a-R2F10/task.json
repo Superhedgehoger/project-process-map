@@ -1,0 +1,37 @@
+{
+  "taskId": "P0-05A-T2a-R2F10",
+  "parentTaskId": "P0-05A-T2a",
+  "previousRepairTaskId": "P0-05A-T2a-R2F9",
+  "riskClass": "R2",
+  "worker": "internal worker (Antigravity control unavailable)",
+  "status": "REVIEW_FAIL_SUPERSEDED_BY_R2F11",
+  "baseCommit": "0598ad482c02876de6f4e804033bdba906b9d6c7",
+  "goal": "Restore public action retry idempotency after occurredAtUtc fingerprinting and make initialize replay bind every immutable initialization fact.",
+  "findings": [
+    "Public submit/accept/waive routes generate a fresh occurredAtUtc on each retry, causing same-key same-payload HTTP retries to mismatch",
+    "Initialize replay does not bind all immutable aggregate/action facts to the fingerprinted command and allows extra unique action types"
+  ],
+  "constraints": [
+    "Fix only Cycle 10 findings",
+    "Preserve R2F1-R2F9 evidence",
+    "Do not commit or push",
+    "Do not start T2b",
+    "Run all gates and refresh artifacts"
+  ],
+  "packet": "docs/agent-tasks/P0-05A-T2a-R2F10.md",
+  "implementation": [
+    "Public submit/accept/waive retries reuse the authoritative receipt createdAtUtc while preserving payload mismatch and trusted-clock authorization semantics",
+    "Initialize replay exactly binds normalized immutable aggregate facts, receipt time, and the single initialized action",
+    "Memory/SQLite coordinated tamper and Product API replay regressions added"
+  ],
+  "verification": {
+    "targeted": "PASS 28/28 tests/deliverable-evidence.test.ts",
+    "productApi": "PASS 21/21 tests/product-api.test.ts",
+    "pnpmCheck": "PASS 341/341; typecheck and Huly checks PASS",
+    "gitDiffCheck": "PASS",
+    "credentialScan": "PASS",
+    "jsonValidation": "PASS (42 JSON files; known Markdown diff artifact excluded)"
+  },
+  "blocker": null,
+  "nextAction": "See P0-05A-T2a-R2F11 for the Cycle 11 finding and repair evidence."
+}

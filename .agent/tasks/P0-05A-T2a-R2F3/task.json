@@ -1,0 +1,38 @@
+{
+  "taskId": "P0-05A-T2a-R2F3",
+  "parentTaskId": "P0-05A-T2a",
+  "previousRepairTaskId": "P0-05A-T2a-R2F2",
+  "riskClass": "R2",
+  "worker": "antigravity",
+  "status": "IMPLEMENTED",
+  "baseCommit": "0598ad482c02876de6f4e804033bdba906b9d6c7",
+  "goal": "Apply only the four minimal fixes from Codex R2 Cycle 3 on the current uncommitted worktree.",
+  "findings": [
+    "First-run accept must validate the exact authoritative submitted action and EvidenceLink set before mutation",
+    "SQLite v12 UNIQUE schema validation must reject partial or otherwise weakened unique indexes",
+    "CAS evidence must use genuinely independent SQLite execution contexts that do not share the in-process path lock",
+    "v11 to v12 evidence must use a complete realistic v11 fixture, preserve data, and reopen through current SqlitePersistence"
+  ],
+  "constraints": [
+    "No unrelated feature expansion",
+    "Do not commit or push",
+    "Preserve all R2F1 and R2F2 fixes",
+    "Run targeted tests and pnpm check before handoff",
+    "Refresh reports and artifacts to match the actual worktree"
+  ],
+  "packet": "docs/agent-tasks/P0-05A-T2a-R2F3.md",
+  "blocker": "Resolved: previous Antigravity attempts failed pre-implementation due to quota/rate limits; R2F3 now fully implemented on the current worktree (previous partial edits preserved and R2F3-4 fixed minimally).",
+  "nextAction": "Cindy reruns Gate and a fresh independent short-context Codex R2 review on the current diff; do not commit or push before PASS.",
+  "verification": {
+    "target": "PASS 21/21 tests/deliverable-evidence.test.ts (including R2F3-1/R2F3-2/R2F3-4 and R2F2-4/5 CAS + schema cases)",
+    "pnpmCheck": "PASS 334/334",
+    "gitDiffCheck": "PASS",
+    "credentialScan": "PASS (changed files only)"
+  },
+  "findingEvidence": {
+    "R2F3-1": "AcceptDeliverableHandler first-accept path calls validateAuthoritativeSubmission strictly after CAS status/version gates and before the first aggregate save: exact 1-initialized + 1-submitted action count, evidence IDs/count match, no duplicate natural keys, link ID/scope/actor/time canonicality, and per-asset availability re-check. Regression test R2F3-1 covers delete-link and equal-count replace-link on both backends; aggregate stays submitted/version 2 with only 2 actions and no event/outbox/receipt residue.",
+    "R2F3-2": "SqlitePersistence v12 schema validation reads PRAGMA index_list partial flag and requires partial=0 for uq_deliverable_requirements_key and uq_deliverable_evidence_natural_key; regression test R2F3-2 replaces each target UNIQUE with a same-column partial unique index and asserts reopen fails closed (\"must cover the full table\").",
+    "R2F3-3": "CAS contention evidence uses two SqlitePersistence connections with distinct testExecutionId lock keys (cas-conn-1 / cas-conn-2) so they do NOT share the in-process pathLocks map; only the SQLite database CAS decides the winner. Evidence lives in tests/deliverable-evidence.test.ts section 4 of R2F2-4/5: exactly one of the two same-version submits succeeds, the loser fails closed with DELIVERABLE_VERSION_CONFLICT or SQLite busy, and no duplicate evidence link or submitted action is created.",
+    "R2F3-4": "Realistic v11 fixture built by seeding a full v12 database through SqlitePersistence with v11-valid representative data (principals, memberships, node with application-path leader assignment at v2, asset), then stripping the three v12 deliverable tables/indexes and the schema_migrations v12 row to produce a genuine max-version-11 database. Reopening via createTestSqliteBundle upgrades v11 to v12, preserves all v11 rows, allows a full init+submit scenario, and a second reopen re-verifies deliverable facts. A v11-style reader rejects the upgraded DB with SQLITE_SCHEMA_VERSION_UNSUPPORTED:12."
+  }
+}

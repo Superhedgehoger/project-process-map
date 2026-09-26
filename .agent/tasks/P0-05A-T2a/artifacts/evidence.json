@@ -1,0 +1,86 @@
+{
+  "taskId": "P0-05A-T2a",
+  "repairTaskId": "P0-05A-T2a-R2F13",
+  "baseCommit": "0598ad482c02876de6f4e804033bdba906b9d6c7",
+  "riskClass": "R2",
+  "review": {
+    "cycle": 14,
+    "reviewType": "independent_cross_model_r2_review",
+    "verdict": "PASS",
+    "findings": {
+      "blocker": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0
+    },
+    "disposition": "Independent cross-model R2 review PASS; R2F10-R2F13 verified; ready to commit"
+  },
+  "reviewEvidence": {
+    "reviewType": "independent_cross_model_r2_review",
+    "result": "PASS",
+    "findings": {
+      "blocker": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0
+    },
+    "verifiedRepairs": [
+      "P0-05A-T2a-R2F10",
+      "P0-05A-T2a-R2F11",
+      "P0-05A-T2a-R2F12",
+      "P0-05A-T2a-R2F13"
+    ]
+  },
+  "cycle10Findings": {
+    "R2F10_1": "apps/product-api/src/routes/project.ts generates a fresh occurredAtUtc for every submit/accept/waive HTTP attempt. Since handlers fingerprint this field, same-key same-payload public retries can fail with IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD instead of replaying.",
+    "R2F10_2": "initialize replay does not bind every immutable requirement/action fact to the normalized command and receipt, and the generic replay fact validator permits extra unique action types. Coordinated authoritative aggregate plus receipt tamper can pass."
+  },
+  "cycle11Finding": {
+    "R2F11_1": "Initialize replay compared requirement security facts only with the current node, so coordinated node plus requirement securityEpoch/domain tamper could pass while the initialized event retained the original facts."
+  },
+  "priorR2F9Evidence": {
+    "R2F9_1": "All four command fingerprints include normalized occurredAtUtc; Memory/SQLite regression tests passed.",
+    "R2F9_2": "Production SqlitePersistence contains no 517 mapping; controlled CAS helper requires a fresh target-version advancement proof."
+  },
+  "r2f10Evidence": {
+    "R2F10_1": "Public submit/accept/waive routes reuse an existing scoped receipt createdAtUtc; same-key same-payload HTTP retries replay, different payloads still mismatch, client occurredAtUtc is rejected, and authorization continues to use persistence trusted time.",
+    "R2F10_2": "Initialize replay binds the full normalized pending@v1 aggregate, current node security facts, receipt creation time and exactly one initialized action; Memory/SQLite coordinated reviewer and extra-action tamper fail closed without new durable facts.",
+    "executionChannel": "internal worker; Antigravity control remained unavailable and no Antigravity output was attributed"
+  },
+  "r2f11Evidence": {
+    "R2F11_1": "Initialize replay requires one exact initialized event and binds its original security domain/epoch to both requirement and current node; Memory/SQLite coordinated epoch tamper fails closed without new durable facts.",
+    "executionChannel": "internal worker; Antigravity control remained unavailable"
+  },
+  "lastGate": {
+    "executedAt": "2026-09-26T18:14:00+08:00",
+    "targeted": "PASS 33/33 tests/deliverable-evidence.test.ts",
+    "productApi": "PASS 21/21 tests/product-api.test.ts",
+    "pnpmCheck": "PASS 346/346",
+    "huly": "PASS 14 linux/arm64 images; extension upstream ccefccd8d0361d3c8612d508071b777aa833826d",
+    "gitDiffCheck": "PASS",
+    "credentialScan": "PASS",
+    "jsonValidation": "PASS (44 JSON files; known non-JSON Markdown diff artifact excluded)"
+  },
+  "executionBlocker": null,
+  "verdict": "READY_TO_COMMIT",
+  "cycle12Findings": {
+    "R2F12_1": "Submit replay hardcoded authoritative submitted version 2, rejecting a valid same-key replay after security migration advanced pending to version 2 and submit committed version 3.",
+    "R2F12_2": "Submit/accept/waive replay trusted mutable receipt createdAtUtc and did not anchor action time to the unique DomainEvent/Outbox, allowing coordinated T2 rewrites while audit facts remained at T1."
+  },
+  "r2f12Evidence": {
+    "R2F12_1": "Submit replay requires command.expectedVersion + 1 and exact receipt/authoritative version agreement; Memory/SQLite v2 to v3 replay regression passes.",
+    "R2F12_2": "Replay normalizes command occurredAtUtc and binds receipt, aggregate/action/link, the unique lifecycle DomainEvent and its corresponding Outbox payload; Memory/SQLite coordinated timestamp rewrites fail closed without residue.",
+    "executionChannel": "internal worker; no failed external worker call is attributed as implementation"
+  },
+  "cycle13Findings": {
+    "R2F13_1": "Action replay did not bind authoritative requirement updatedAtUtc to normalized command time.",
+    "R2F13_2": "Accept/waive replay versions were internally cross-checked but not anchored to command.expectedVersion + 1.",
+    "R2F13_3": "Post-migration submit test directly edited requirement version rather than executing and committing a legal migration."
+  },
+  "r2f13Evidence": {
+    "R2F13_1": "Submit/accept/waive replay require aggregate updatedAtUtc equal command occurredAtUtc; aggregate-only Memory/SQLite tamper fails closed without residue.",
+    "R2F13_2": "Accept/waive require authoritative and receipt versions equal expectedVersion + 1; coordinated aggregate/receipt/event/outbox version rewrite returns version conflict.",
+    "R2F13_3": "Regression executes real inventory, batch, begin-verification, readiness evidence and CommitSecurityMigrationHandler, verifies ownership/epoch/version, then tests v2-to-v3 replay and later stale rejection.",
+    "executionChannel": "internal worker; independent Cycle 13 reviewer made no modifications"
+  }
+}

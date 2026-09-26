@@ -13,6 +13,7 @@ import {
 import { buildResumableSecurityMigrationInventory } from "../packages/application/src/security/build-security-migration-inventory.ts";
 import type { Persistence, TransactionContext } from "../packages/application/src/ports/persistence.ts";
 import type { Asset } from "../packages/domain/src/assets.ts";
+import type { DeliverableRequirement } from "../packages/domain/src/deliverables.ts";
 import { principalId, tenantId } from "../packages/domain/src/identity.ts";
 import type { ProjectNode } from "../packages/domain/src/project-structure.ts";
 import { transitionSecurityMigration, type SecurityDomainMigration } from "../packages/domain/src/security-migration.ts";
@@ -22,7 +23,7 @@ const tenant = tenantId("tenant-migration-batch");
 const projectId = "migration-batch-project";
 const sourceDomainId = "batch-source";
 const targetDomainId = "batch-target";
-const totalItems = 6;
+const totalItems = 7; // 2 nodes + 2 tasks + 2 assets + 1 deliverable
 
 type Fixture = Readonly<{
   name: "memory" | "sqlite";
@@ -102,6 +103,36 @@ function asset(id: string, ownerNodeId: string): Asset {
   };
 }
 
+function deliverable(id: string, ownerNodeId: string): DeliverableRequirement {
+  const now = "2026-09-10T08:00:00.000Z";
+  return {
+    tenantId: tenant,
+    id,
+    projectId,
+    ownerNodeId,
+    securityDomainId: sourceDomainId,
+    securityEpoch: 1,
+    requirementKey: id.replace(/[^a-zA-Z0-9_-]/g, "_"),
+    title: `Deliverable ${id}`,
+    description: null,
+    required: true,
+    acceptedSourceTypes: ["file"],
+    minCount: 1,
+    reviewerPrincipalId: principalId("batch-reviewer"),
+    status: "pending",
+    acceptedByPrincipalId: null,
+    acceptedAtUtc: null,
+    acceptedReason: null,
+    waivedByPrincipalId: null,
+    waivedAtUtc: null,
+    waivedReason: null,
+    version: 1,
+    createdAtUtc: now,
+    updatedAtUtc: now,
+    deletedAtUtc: null,
+  };
+}
+
 function plannedMigration(overrides: Partial<SecurityDomainMigration> = {}): SecurityDomainMigration {
   return {
     tenantId: tenant,
@@ -135,6 +166,7 @@ async function prepare(persistence: Persistence, activate = true, overrides: Par
     await transaction.nodes.insert(node("child", "root"));
     await transaction.tasks.insert(task("task-child", "child"));
     await transaction.assets.insert(asset("asset-child", "child"));
+    await transaction.deliverables.insert(deliverable("dlv-child", "child"));
     await transaction.tasks.insert(task("task-root", "root"));
     await transaction.assets.insert(asset("asset-root", "root"));
     await transaction.securityMigrations.insert(planned);
@@ -159,11 +191,12 @@ async function state(persistence: Persistence) {
     nodes: await transaction.nodes.listForSecurityMigration(),
     tasks: await transaction.tasks.listForSecurityMigration(),
     assets: await transaction.assets.listForSecurityMigration(),
+    deliverables: await transaction.deliverables.listForSecurityMigration(),
   }));
 }
 
 test("TC-SEC-002F Memory and SQLite execute stable bounded batches and resume to completion", async () => {
-  const expectedOrder = ["node:child", "task:task-child", "asset:asset-child", "node:root", "task:task-root", "asset:asset-root"];
+  const expectedOrder = ["node:child", "task:task-child", "asset:asset-child", "deliverable:dlv-child", "node:root", "task:task-root", "asset:asset-root"];
   for (const name of ["memory", "sqlite"] as const) {
     const current = await fixture(name);
     try {
@@ -177,7 +210,7 @@ test("TC-SEC-002F Memory and SQLite execute stable bounded batches and resume to
         expectedOrder,
         name,
       );
-      assert.deepEqual([first.migratedItems, second.migratedItems, final.migratedItems], [2, 4, 6], name);
+      assert.deepEqual([first.migratedItems, second.migratedItems, final.migratedItems], [2, 4, 7], name);
       assert.equal(final.complete, true, name);
       const noOp = await handler.execute(command(final.migrationVersion, 10, 5));
       assert.equal(noOp.processedItems.length, 0, name);
@@ -185,7 +218,7 @@ test("TC-SEC-002F Memory and SQLite execute stable bounded batches and resume to
       assert.equal(noOp.cursor, final.cursor, name);
       const stored = await state(current.persistence);
       assert.equal(stored.migration?.migratedItems, totalItems, name);
-      for (const object of [...stored.nodes, ...stored.tasks, ...stored.assets]) {
+      for (const object of [...stored.nodes, ...stored.tasks, ...stored.assets, ...stored.deliverables]) {
         assert.equal(object.securityDomainId, targetDomainId, `${name}:${object.id}:domain`);
         assert.equal(object.securityEpoch, 2, `${name}:${object.id}:epoch`);
         assert.equal(object.version, 2, `${name}:${object.id}:version`);
@@ -198,7 +231,7 @@ test("TC-SEC-002F Memory and SQLite execute stable bounded batches and resume to
 
 test("TC-SEC-002F every object write and checkpoint failure rolls back the entire batch", async () => {
   for (const name of ["memory", "sqlite"] as const) {
-    for (const failure of ["node", "task", "asset", "checkpoint"] as const) {
+    for (const failure of ["node", "task", "asset", "deliverable", "checkpoint"] as const) {
       const current = await fixture(name);
       try {
         await prepare(current.persistence);
@@ -311,10 +344,11 @@ test("TC-SEC-002F bounded batches support migration back to public ownership", a
       await prepare(current.persistence, true, { targetSecurityDomainId: null });
       const handler = new ExecuteSecurityMigrationBatchHandler(current.persistence);
       const first = await handler.execute(command(2, 3, 2));
-      const final = await handler.execute(command(first.migrationVersion, 3, 3));
+      const second = await handler.execute(command(first.migrationVersion, 3, 3));
+      const final = await handler.execute(command(second.migrationVersion, 10, 4));
       assert.equal(final.complete, true, name);
       const stored = await state(current.persistence);
-      assert.equal([...stored.nodes, ...stored.tasks, ...stored.assets]
+      assert.equal([...stored.nodes, ...stored.tasks, ...stored.assets, ...stored.deliverables]
         .every((object) => object.securityDomainId === null && object.securityEpoch === 2 && object.version === 2), true, name);
     } finally {
       await current.cleanup();
@@ -348,7 +382,7 @@ test("TC-SEC-002F SQLite concurrent batches commit once and restart resumes with
       assert.equal(final.complete, true);
       const stored = await state(restarted);
       assert.equal(stored.migration?.cursor, final.cursor);
-      assert.equal([...stored.nodes, ...stored.tasks, ...stored.assets]
+      assert.equal([...stored.nodes, ...stored.tasks, ...stored.assets, ...stored.deliverables]
         .every((object) => object.securityDomainId === targetDomainId && object.securityEpoch === 2 && object.version === 2), true);
     } finally {
       await restarted.close();
@@ -363,7 +397,7 @@ function isCode(code: string): (error: unknown) => boolean {
   return (error) => error instanceof ApplicationError && error.code === code;
 }
 
-function failingPersistence(base: Persistence, failure: "node" | "task" | "asset" | "checkpoint"): Persistence {
+function failingPersistence(base: Persistence, failure: "node" | "task" | "asset" | "deliverable" | "checkpoint"): Persistence {
   return {
     nowUtc: () => new Date().toISOString(),
     transaction: async (tenantId, work) => await base.transaction(tenantId, async (transaction) => {
@@ -373,6 +407,7 @@ function failingPersistence(base: Persistence, failure: "node" | "task" | "asset
         nodes: failure === "node" ? { ...transaction.nodes, migrateSecurityOwnership: async () => injected() } : transaction.nodes,
         tasks: failure === "task" ? { ...transaction.tasks, migrateSecurityOwnership: async () => injected() } : transaction.tasks,
         assets: failure === "asset" ? { ...transaction.assets, migrateSecurityOwnership: async () => injected() } : transaction.assets,
+        deliverables: failure === "deliverable" ? { ...transaction.deliverables, migrateSecurityOwnership: async () => injected() } : transaction.deliverables,
         securityMigrations: failure === "checkpoint"
           ? {
               ...transaction.securityMigrations,

@@ -101,6 +101,70 @@ export type AttachAssetRequest = Readonly<{
   fileId?: string;
   sha256?: string;
 }>;
+
+export type ApiEvidenceLink = Readonly<{
+  id: string;
+  sourceType: "file" | "process_record";
+  sourceId: string;
+  submittedByPrincipalId: string;
+  linkedAtUtc: string;
+  version: number;
+}>;
+
+export type ApiDeliverableAction = Readonly<{
+  id: string;
+  action: "initialized" | "submitted" | "accepted" | "waived";
+  actorPrincipalId: string;
+  occurredAtUtc: string;
+  reason: string | null;
+  evidenceCount: number;
+  evidenceIds: readonly string[];
+}>;
+
+export type ApiDeliverableSummary = Readonly<{
+  id: string;
+  projectId: string;
+  nodeId: string;
+  requirementKey: string;
+  title: string;
+  description: string | null;
+  required: boolean;
+  acceptedSourceTypes: readonly ("file" | "process_record")[];
+  minCount: number;
+  reviewerPrincipalId: string;
+  status: "pending" | "submitted" | "accepted" | "waived" | "evidence_due";
+  acceptedByPrincipalId: string | null;
+  acceptedAtUtc: string | null;
+  acceptedReason: string | null;
+  waivedByPrincipalId: string | null;
+  waivedAtUtc: string | null;
+  waivedReason: string | null;
+  version: number;
+}>;
+
+export type ApiDeliverable = ApiDeliverableSummary & Readonly<{
+  evidenceLinks: readonly ApiEvidenceLink[];
+  actionHistory: readonly ApiDeliverableAction[];
+}>;
+
+export type SubmitDeliverableEvidenceRequest = Readonly<{
+  expectedVersion: number;
+  evidence: ReadonlyArray<{
+    sourceType: "file" | "process_record";
+    sourceId: string;
+  }>;
+}>;
+
+export type AcceptDeliverableRequest = Readonly<{
+  expectedVersion: number;
+  reason?: string | null | undefined;
+}>;
+
+export type WaiveDeliverableRequest = Readonly<{
+  expectedVersion: number;
+  reason: string;
+}>;
+
 export type CommandResult<T> = Readonly<{ value: T; replayed: boolean }>;
 export type ApiError = Readonly<{ code: string; message: string }>;
 export type HealthResponse = HealthReport & Readonly<{ collaborationMode: "disabled" | "huly" }>;
@@ -223,6 +287,83 @@ export function decodeSecurityGrant(value: unknown): ApiSecurityGrant {
     grantVersion: positiveInteger(record.grantVersion, "securityGrant.grantVersion"),
     permissionVersion: positiveInteger(record.permissionVersion, "securityGrant.permissionVersion"),
     domainVersion: positiveInteger(record.domainVersion, "securityGrant.domainVersion"),
+  };
+}
+
+export function decodeDeliverableList(value: unknown): ApiDeliverable[] {
+  if (!Array.isArray(value)) throw new ContractDecodeError("deliverable list must be an array");
+  return value.map(decodeDeliverable);
+}
+
+export function decodeDeliverable(value: unknown): ApiDeliverable {
+  const record = object(value, "deliverable");
+  if (!Array.isArray(record.evidenceLinks)) throw new ContractDecodeError("deliverable evidenceLinks must be an array");
+  if (!Array.isArray(record.actionHistory)) throw new ContractDecodeError("deliverable actionHistory must be an array");
+  return {
+    ...decodeDeliverableSummary(record),
+    evidenceLinks: record.evidenceLinks.map(decodeEvidenceLink),
+    actionHistory: record.actionHistory.map(decodeDeliverableAction),
+  };
+}
+
+export function decodeDeliverableSummary(value: unknown): ApiDeliverableSummary {
+  const record = object(value, "deliverable");
+  if (!Array.isArray(record.acceptedSourceTypes)) throw new ContractDecodeError("deliverable acceptedSourceTypes must be an array");
+  return {
+    id: string(record.id, "deliverable.id"),
+    projectId: string(record.projectId, "deliverable.projectId"),
+    nodeId: string(record.nodeId, "deliverable.nodeId"),
+    requirementKey: string(record.requirementKey, "deliverable.requirementKey"),
+    title: string(record.title, "deliverable.title"),
+    description: record.description === null ? null : string(record.description, "deliverable.description"),
+    required: boolean(record.required, "deliverable.required"),
+    acceptedSourceTypes: record.acceptedSourceTypes.map((st) =>
+      oneOf(st, ["file", "process_record"] as const, "deliverable acceptedSourceType"),
+    ),
+    minCount: positiveInteger(record.minCount, "deliverable.minCount"),
+    reviewerPrincipalId: string(record.reviewerPrincipalId, "deliverable.reviewerPrincipalId"),
+    status: oneOf(
+      record.status,
+      ["pending", "submitted", "accepted", "waived", "evidence_due"] as const,
+      "deliverable.status",
+    ),
+    acceptedByPrincipalId: nullableNonEmptyString(record.acceptedByPrincipalId, "deliverable.acceptedByPrincipalId"),
+    acceptedAtUtc: nullableUtcString(record.acceptedAtUtc, "deliverable.acceptedAtUtc"),
+    acceptedReason: nullableNonEmptyString(record.acceptedReason, "deliverable.acceptedReason"),
+    waivedByPrincipalId: nullableNonEmptyString(record.waivedByPrincipalId, "deliverable.waivedByPrincipalId"),
+    waivedAtUtc: nullableUtcString(record.waivedAtUtc, "deliverable.waivedAtUtc"),
+    waivedReason: nullableNonEmptyString(record.waivedReason, "deliverable.waivedReason"),
+    version: positiveInteger(record.version, "deliverable.version"),
+  };
+}
+
+export function decodeEvidenceLink(value: unknown): ApiEvidenceLink {
+  const record = object(value, "evidence link");
+  return {
+    id: string(record.id, "evidenceLink.id"),
+    sourceType: oneOf(record.sourceType, ["file", "process_record"] as const, "evidenceLink.sourceType"),
+    sourceId: string(record.sourceId, "evidenceLink.sourceId"),
+    submittedByPrincipalId: string(record.submittedByPrincipalId, "evidenceLink.submittedByPrincipalId"),
+    linkedAtUtc: string(record.linkedAtUtc, "evidenceLink.linkedAtUtc"),
+    version: positiveInteger(record.version, "evidenceLink.version"),
+  };
+}
+
+export function decodeDeliverableAction(value: unknown): ApiDeliverableAction {
+  const record = object(value, "deliverable action");
+  if (!Array.isArray(record.evidenceIds)) throw new ContractDecodeError("evidenceIds must be an array");
+  return {
+    id: string(record.id, "deliverableAction.id"),
+    action: oneOf(
+      record.action,
+      ["initialized", "submitted", "accepted", "waived"] as const,
+      "deliverableAction.action",
+    ),
+    actorPrincipalId: string(record.actorPrincipalId, "deliverableAction.actorPrincipalId"),
+    occurredAtUtc: string(record.occurredAtUtc, "deliverableAction.occurredAtUtc"),
+    reason: nullableNonEmptyString(record.reason, "deliverableAction.reason"),
+    evidenceCount: nonNegativeInteger(record.evidenceCount, "deliverableAction.evidenceCount"),
+    evidenceIds: record.evidenceIds.map((item) => string(item, "deliverableAction.evidenceId")),
   };
 }
 

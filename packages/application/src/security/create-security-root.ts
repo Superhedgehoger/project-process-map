@@ -97,7 +97,9 @@ export class CreateSecurityRootHandler {
       const projectNodes = await transaction.nodes.listByProject(command.projectId);
       const hasDescendant = projectNodes.some((candidate) => candidate.parentId === node.id);
       const hasTask = (await transaction.tasks.listByNode(node.id)).length > 0;
-      if (hasDescendant || hasTask || await transaction.assets.hasForNode(node.id)) {
+      const hasAsset = await transaction.assets.hasForNode(node.id);
+      const hasDeliverable = (await transaction.deliverables.listByNode(node.id)).length > 0;
+      if (hasDescendant || hasTask || hasAsset || hasDeliverable) {
         throw new ApplicationError(
           "SECURITY_ROOT_REQUIRES_EMPTY_LEAF",
           "This phase only supports making an empty leaf node sensitive",
@@ -107,6 +109,7 @@ export class CreateSecurityRootHandler {
         await transaction.nodes.hasSecurityDomainReference(command.securityDomainId)
         || await transaction.tasks.hasSecurityDomainReference(command.securityDomainId)
         || await transaction.assets.hasSecurityDomainReference(command.securityDomainId)
+        || await transaction.deliverables.hasSecurityDomainReference(command.securityDomainId)
       ) {
         throw new ApplicationError("SECURITY_DOMAIN_ID_IN_USE", "Security domain ID is already referenced by legacy data");
       }

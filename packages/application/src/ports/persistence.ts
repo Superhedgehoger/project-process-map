@@ -17,6 +17,12 @@ import type {
   ProjectRoleSlotAuditEntry,
   RoleSlotsInitializedPayload,
 } from "../../../domain/src/role-slots.ts";
+import type {
+  DeliverableRequirement,
+  EvidenceLink,
+  DeliverableActionRecord,
+  EvidenceSourceType,
+} from "../../../domain/src/deliverables.ts";
 
 import type { SecurityMigrationReadinessEvidence } from "./integrations.ts";
 
@@ -129,6 +135,116 @@ export type AssignProjectRoleBindingFailurePoint =
   | "after_outbox"
   | "after_idempotency";
 
+export type DeliverableRequirementView = Readonly<{
+  id: string;
+  projectId: string;
+  nodeId: string;
+  requirementKey: string;
+  title: string;
+  description: string | null;
+  required: boolean;
+  acceptedSourceTypes: readonly EvidenceSourceType[];
+  minCount: number;
+  reviewerPrincipalId: PrincipalId;
+  status: DeliverableRequirement["status"];
+  acceptedByPrincipalId: PrincipalId | null;
+  acceptedAtUtc: string | null;
+  acceptedReason: string | null;
+  waivedByPrincipalId: PrincipalId | null;
+  waivedAtUtc: string | null;
+  waivedReason: string | null;
+  version: number;
+  evidenceLinks: readonly EvidenceLink[];
+  actionHistory: readonly DeliverableActionRecord[];
+}>;
+
+export type DeliverableFailurePoint =
+  | "after_aggregate"
+  | "after_evidence"
+  | "after_action"
+  | "after_event"
+  | "after_outbox"
+  | "after_idempotency";
+
+export type InitializeDeliverableRequirementCommand = Readonly<{
+  tenantId: TenantId;
+  commandId: string;
+  idempotencyKey: string;
+  correlationId: string;
+  principalId: PrincipalId;
+  projectId: string;
+  nodeId: string;
+  deliverableId: string;
+  requirementKey: string;
+  title: string;
+  description?: string | null | undefined;
+  required: boolean;
+  acceptedSourceTypes: readonly EvidenceSourceType[];
+  minCount: number;
+  reviewerPrincipalId: PrincipalId;
+  occurredAtUtc: string;
+  failurePoint?: DeliverableFailurePoint | undefined;
+}>;
+
+export type InitializeDeliverableRequirementResult = Readonly<{
+  value: DeliverableRequirementView;
+  replayed: boolean;
+}>;
+
+export type SubmitDeliverableEvidenceCommand = Readonly<{
+  tenantId: TenantId;
+  commandId: string;
+  idempotencyKey: string;
+  correlationId: string;
+  principalId: PrincipalId;
+  deliverableId: string;
+  expectedVersion: number;
+  evidence: readonly { sourceType: EvidenceSourceType; sourceId: string }[];
+  occurredAtUtc: string;
+  failurePoint?: DeliverableFailurePoint | undefined;
+}>;
+
+export type SubmitDeliverableEvidenceResult = Readonly<{
+  value: DeliverableRequirementView;
+  replayed: boolean;
+}>;
+
+export type AcceptDeliverableCommand = Readonly<{
+  tenantId: TenantId;
+  commandId: string;
+  idempotencyKey: string;
+  correlationId: string;
+  principalId: PrincipalId;
+  deliverableId: string;
+  expectedVersion: number;
+  note?: string | null | undefined;
+  occurredAtUtc: string;
+  failurePoint?: DeliverableFailurePoint | undefined;
+}>;
+
+export type AcceptDeliverableResult = Readonly<{
+  value: DeliverableRequirementView;
+  replayed: boolean;
+}>;
+
+export type WaiveDeliverableCommand = Readonly<{
+  tenantId: TenantId;
+  commandId: string;
+  idempotencyKey: string;
+  correlationId: string;
+  principalId: PrincipalId;
+  deliverableId: string;
+  expectedVersion: number;
+  reason: string;
+  occurredAtUtc: string;
+  failurePoint?: DeliverableFailurePoint | undefined;
+}>;
+
+export type WaiveDeliverableResult = Readonly<{
+  value: DeliverableRequirementView;
+  replayed: boolean;
+}>;
+
 export type CreateNodeCommand = Readonly<{
   tenantId: TenantId;
   commandId: string;
@@ -216,6 +332,35 @@ export interface AssetRepository {
   listBindings(targetType: AssetBinding["targetType"], targetId: string): Promise<AssetBinding[]>;
 }
 
+export interface DeliverableRepository {
+  get(deliverableId: string): Promise<DeliverableRequirement | undefined>;
+  getByKey(projectId: string, ownerNodeId: string, requirementKey: string): Promise<DeliverableRequirement | undefined>;
+  listByNode(nodeId: string): Promise<DeliverableRequirement[]>;
+  listByProject(projectId: string): Promise<DeliverableRequirement[]>;
+  listForSecurityMigration(): Promise<DeliverableRequirement[]>;
+  hasSecurityDomainReference(securityDomainId: string): Promise<boolean>;
+  insert(requirement: DeliverableRequirement): Promise<void>;
+  savePreservingSecurityOwnership(
+    requirementId: string,
+    requirement: DeliverableRequirement,
+    expectedVersion: number,
+  ): Promise<void>;
+  migrateSecurityOwnership(
+    migrationId: string,
+    requirementId: string,
+    expectedVersion: number,
+  ): Promise<DeliverableRequirement>;
+  rollbackSecurityOwnership(
+    migrationId: string,
+    requirementId: string,
+    expectedVersion: number,
+  ): Promise<DeliverableRequirement>;
+  appendEvidenceLink(link: EvidenceLink): Promise<void>;
+  listEvidenceLinks(requirementId: string): Promise<EvidenceLink[]>;
+  appendAction(action: DeliverableActionRecord): Promise<void>;
+  listActions(requirementId: string): Promise<DeliverableActionRecord[]>;
+}
+
 export interface ExternalBindingRepository {
   getByOwner(ownerType: ExternalBinding["ownerType"], ownerId: string, role: ExternalBinding["role"]): Promise<ExternalBinding | undefined>;
   insert(binding: ExternalBinding): Promise<void>;
@@ -293,7 +438,7 @@ export interface SecurityGrantAuditRepository {
 }
 
 export type SecurityMigrationManifestItem = Readonly<{
-  kind: "node" | "task" | "asset";
+  kind: "node" | "task" | "asset" | "deliverable";
   id: string;
   ownerNodeId: string;
   version: number;
@@ -449,10 +594,12 @@ export interface ProjectSequenceRepository {
 
 export interface DomainEventWriter {
   append(event: DomainEvent): Promise<void>;
+  list(tenantId: TenantId): Promise<DomainEvent[]>;
 }
 
 export interface OutboxWriter {
   enqueue(message: OutboxMessage): Promise<void>;
+  list(tenantId: TenantId): Promise<OutboxMessage[]>;
 }
 
 export interface JobWriter {
@@ -465,6 +612,7 @@ export type TransactionContext = Readonly<{
   nodes: ProjectNodeRepository;
   tasks: TaskRepository;
   assets: AssetRepository;
+  deliverables: DeliverableRepository;
   externalBindings: ExternalBindingRepository;
   integrationOperations: IntegrationOperationRepository;
   outboundProjectionFences: OutboundProjectionFenceRepository;

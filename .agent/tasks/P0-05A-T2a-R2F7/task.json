@@ -1,0 +1,51 @@
+{
+  "taskId": "P0-05A-T2a-R2F7",
+  "parentTaskId": "P0-05A-T2a",
+  "previousRepairTaskId": "P0-05A-T2a-R2F6",
+  "riskClass": "R2",
+  "worker": "antigravity",
+  "status": "IMPLEMENTED",
+  "baseCommit": "0598ad482c02876de6f4e804033bdba906b9d6c7",
+  "goal": "Apply only the three minimal fixes from Codex R2 Cycle 7.",
+  "findings": [
+    "Precisely bind accept and waive terminal replay actions to aggregate, command and receipt",
+    "Coordinate independent contenders at the actual stale CAS update boundary",
+    "Compare tenant-wide deliverable link/action snapshots in accept zero-residue tests"
+  ],
+  "implemented": {
+    "R2F7-1": "Accept/waive replay now requires the exact legal action lifecycle and binds the terminal action actor/time/reason to the authoritative aggregate, replay principal, receipt original createdAtUtc and normalized command payload. Waive without submit is exactly initialized+waived; waive after submit is exactly initialized+submitted+waived; accept is exactly initialized+submitted+accepted. Memory/SQLite regressions cover coordinated terminal-action+receipt tamper and initialized-action deletion.",
+    "R2F7-2": "The CAS regression now runs two independent child-process product handlers. Test-layer-only SQLite method instrumentation lets both actual handler write transactions read v1 and blocks immediately before each real CAS UPDATE. The parent releases only after both update-boundary markers report v1. The loser executes the stale WHERE version=1 update after winner commit and surfaces only DELIVERABLE_VERSION_CONFLICT; six durable fact categories remain unique. No production hook, permission or bypass was added.",
+    "R2F7-3": "The no-residue snapshot helper now captures every deliverable evidence link and action for the tenant, plus tenant-wide events, outbox and receipts. Memory reads its actual snapshot; SQLite uses one independent read-only connection. Requirement ID is never used as a filter, and pre/post sets are complete deepEqual values."
+  },
+  "changedFiles": [
+    "packages/application/src/deliverables/initialize-deliverable-requirement.ts",
+    "packages/application/src/deliverables/accept-deliverable.ts",
+    "packages/application/src/deliverables/waive-deliverable.ts",
+    "tests/helpers/cas-independent-worker.ts",
+    "tests/helpers/deliverable-record-snapshot.ts",
+    "tests/deliverable-evidence.test.ts",
+    "docs/agent-tasks/P0-05A-T2a-R2F7.md",
+    "docs/reports/P0-05A-T2a-deliverable-evidence.md",
+    ".agent/current.json",
+    ".agent/tasks/P0-05A-T2a/task.json",
+    ".agent/tasks/P0-05A-T2a/artifacts/diff.json",
+    ".agent/tasks/P0-05A-T2a/artifacts/test-result.json",
+    ".agent/tasks/P0-05A-T2a/artifacts/evidence.json"
+  ],
+  "verification": {
+    "targeted": "PASS 25/25 tests/deliverable-evidence.test.ts",
+    "targetedSuites": "PASS 147/147 across 8 target suites",
+    "pnpmCheck": "PASS 338/338 (typecheck, tests, Huly image lock 14 images linux/arm64, Huly extension verify upstream ccefccd8d0361d3c8612d508071b777aa833826d)",
+    "gitDiffCheck": "PASS",
+    "credentialScan": "PASS (R2F7 implementation files; no private keys or credential assignments)"
+  },
+  "constraints": [
+    "No unrelated expansion",
+    "Do not commit or push",
+    "Preserve prior fixes",
+    "Run all gates",
+    "Refresh artifacts"
+  ],
+  "packet": "docs/agent-tasks/P0-05A-T2a-R2F7.md",
+  "nextAction": "Cindy reruns Gate and a fresh independent Codex R2 review (Cycle 8); do not commit or push before PASS."
+}

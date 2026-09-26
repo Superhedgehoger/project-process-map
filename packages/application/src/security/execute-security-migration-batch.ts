@@ -84,7 +84,9 @@ export class ExecuteSecurityMigrationBatchHandler {
           ? await transaction.nodes.migrateSecurityOwnership(migration.id, current.id, current.version)
           : current.kind === "task"
             ? await transaction.tasks.migrateSecurityOwnership(migration.id, current.id, current.version)
-            : await transaction.assets.migrateSecurityOwnership(migration.id, current.id, current.version);
+            : current.kind === "asset"
+              ? await transaction.assets.migrateSecurityOwnership(migration.id, current.id, current.version)
+              : await transaction.deliverables.migrateSecurityOwnership(migration.id, current.id, current.version);
         processed.push({ kind: current.kind, id: current.id, cursor: current.cursor, version: updated.version });
         if (failurePoint === "after_first_object" && index === 0) throw new Error("INJECTED_FAILURE:after_first_object");
       }

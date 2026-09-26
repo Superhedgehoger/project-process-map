@@ -1,0 +1,31 @@
+{
+  "taskId": "P0-05A-T2a-R2F12",
+  "parentTaskId": "P0-05A-T2a",
+  "previousRepairTaskId": "P0-05A-T2a-R2F11",
+  "riskClass": "R2",
+  "worker": "internal worker (Antigravity control unavailable)",
+  "status": "READY_FOR_CODEX_R2_REVIEW_CYCLE_13",
+  "baseCommit": "0598ad482c02876de6f4e804033bdba906b9d6c7",
+  "goal": "Make submit replay version-relative after migration and anchor all action replay times to the fingerprinted command plus unique durable event/outbox facts.",
+  "findings": [
+    "Submit replay hardcodes authoritative version 2 and rejects a valid same-key replay when submission began after security migration at expectedVersion 2",
+    "Submit/accept/waive replay validators use mutable receipt createdAtUtc instead of the fingerprinted command time and do not bind the corresponding event/outbox, allowing coordinated time rewriting"
+  ],
+  "constraints": [
+    "Fix only Cycle 12 findings",
+    "Preserve R2F1-R2F11 evidence",
+    "Do not commit or push",
+    "Do not start T2b",
+    "Run all gates and refresh artifacts"
+  ],
+  "packet": "docs/agent-tasks/P0-05A-T2a-R2F12.md",
+  "blocker": null,
+  "nextAction": "Commission independent short-context read-only Codex R2 Review Cycle 13. Do not modify code during review; do not commit, push, or start T2b before PASS and final Gate.",
+  "verification": {
+    "targeted": "PASS 31/31 tests/deliverable-evidence.test.ts; PASS 21/21 tests/product-api.test.ts",
+    "pnpmCheck": "PASS 344/344 (typecheck, tests, Huly image lock 14 images linux/arm64, Huly extension verify upstream ccefccd8d0361d3c8612d508071b777aa833826d)",
+    "gitDiffCheck": "PASS",
+    "credentialScan": "PASS (high-confidence changed-worktree scan, no matches)",
+    "jsonValidation": "PASS (44 JSON files; known Markdown diff artifact excluded)"
+  }
+}

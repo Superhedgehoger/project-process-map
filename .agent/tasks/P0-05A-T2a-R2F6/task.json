@@ -1,0 +1,46 @@
+{
+  "taskId": "P0-05A-T2a-R2F6",
+  "parentTaskId": "P0-05A-T2a",
+  "previousRepairTaskId": "P0-05A-T2a-R2F5",
+  "riskClass": "R2",
+  "worker": "antigravity",
+  "status": "IMPLEMENTED",
+  "baseCommit": "0598ad482c02876de6f4e804033bdba906b9d6c7",
+  "goal": "Apply only the four minimal fixes from Codex R2 Cycle 6.",
+  "findings": [
+    "Bind submit replay to the exact canonical initialized/submitted action and link metadata",
+    "Revalidate full file-evidence semantics during accept and waive replay",
+    "Use a three-phase independent-process CAS barrier proving both contenders observed stale v1 before release",
+    "Compare complete pre/post tamper backend snapshots for zero-residue accept failure"
+  ],
+  "implemented": {
+    "R2F6-1": "Submit replay now calls assertExactSubmitReplayCommandFacts (new helper in initialize-deliverable-requirement.ts): the authoritative action set is exactly initialized+submitted; the submitted action's actor equals the replaying command principal; every link's submitter/time equals the submitted action; each link ID is the canonical link:<reqId>:<sourceType>:<sourceId> form; the receipt's action/link records must also satisfy the same consistency against the command. The submitted action's occurredAtUtc is bound to the receipt's original recorded time (previous.createdAtUtc), not the replay command's timestamp. New regression test R2F6-1 (memory+sqlite) tampers the submitted action's actor+time, the link's submitter+time+ID and the receipt records together while keeping the new values internally consistent, and asserts the re-submit replay fails closed with DELIVERABLE_RECORD_CORRUPT.",
+    "R2F6-2": "Accept replay now calls validateReplaySubmissionFacts (new export in accept-deliverable.ts), which reuses the complete first-accept authoritative submission semantics (validateAuthoritativeSubmission) on the submit portion of the action set, tolerating the terminal accepted/waived action. Waive replay calls the same helper when a submitted action exists; when no submitted action exists, the link set must be exactly empty. A file -> process_record double tamper of the authoritative link and the terminal receipt now fails closed in both the accept and waive replay paths. New regression test R2F6-2 (memory+sqlite, accept+waive) covers the link+receipt process_record double tamper.",
+    "R2F6-3": "The cross-process CAS barrier in tests/helpers/cas-independent-worker.ts is now three-phase: Phase 1 — both contenders independently read and record the same stale v1 deliverable aggregate version (parent via its own persistence read, child via its own SqlitePersistence.read) before entering the race window. Phase 2 — the child writes a .worker.stale marker with its observed version plus the .worker ready marker; the parent's waitForChildReadyMarker returns the child's observed stale version. Phase 3 — only after the parent has confirmed BOTH stale-v1 observations does writeCasReleaseMarker release both contenders; the child unblocks on the release marker and the parent immediately starts its own submit. The R2F1-4 section 4 test asserts mainStaleVersion === 1, childStaleVersion === 1 and releasePhaseReached before the six-category fact uniqueness check. No production lock bypass or permission change is introduced.",
+    "R2F6-4": "R2F3-1 now captures the complete post-tamper baseline (links, actions, events, outbox, receipts — full record sets, no field projection, no targeted ID filtering) via the new test-layer helper tests/helpers/deliverable-record-snapshot.ts, then deep-equals the post-failure record set against that baseline with assertNoRecordResidue. Receipt inspection lives in the helper layer only; no production read permission was added. Memory capture uses the persistence snapshot(); SQLite capture opens a separate read-only handle over the same database file. Memory/SQLite parity is preserved."},
+  "changedFiles": [
+    "packages/application/src/deliverables/submit-deliverable-evidence.ts (R2F6-1: assertExactSubmitReplayCommandFacts call in replay branch)",
+    "packages/application/src/deliverables/initialize-deliverable-requirement.ts (R2F6-1: new assertExactSubmitReplayCommandFacts helper)",
+    "packages/application/src/deliverables/accept-deliverable.ts (R2F6-2: new validateReplaySubmissionFacts; accept replay uses it instead of the old per-link asset-availability loop)",
+    "packages/application/src/deliverables/waive-deliverable.ts (R2F6-2: waive replay uses validateReplaySubmissionFacts when a submitted action exists; empty-links requirement otherwise)",
+    "tests/helpers/cas-independent-worker.ts (R2F6-3: three-phase barrier — stale-version read/record, parent-confirmed ready, release marker; waitForChildReadyMarker now returns the child's observed stale version)",
+    "tests/helpers/deliverable-record-snapshot.ts (R2F6-4: NEW test-layer helper — full record-set snapshot capture and deep-equal no-residue assertion)",
+    "tests/deliverable-evidence.test.ts (R2F6-1 + R2F6-2 new regression tests; R2F3-1 rewritten to use captureSnapshot/assertNoRecordResidue; R2F1-4 section 4 updated to assert the three-phase stale-v1 proof)"
+  ],
+  "verification": {
+    "targeted": "PASS 24/24 tests/deliverable-evidence.test.ts (3 consecutive runs, including R2F6-1, R2F6-2 and the three-phase CAS barrier race)",
+    "targetedSuites": "PASS 146/146 across 8 target suites",
+    "pnpmCheck": "PASS 337/337 (typecheck, tests, Huly image lock 14 images linux/arm64, Huly extension verify upstream ccefccd8d0361d3c8612d508071b777aa833826d)",
+    "gitDiffCheck": "PASS",
+    "credentialScan": "PASS (changed files only; hits are pre-existing sensitive-field rejection lists and test fixtures, no actual secrets or keys)"
+  },
+  "constraints": [
+    "No unrelated feature expansion",
+    "Do not commit or push",
+    "Preserve valid R2F1 through R2F5 fixes",
+    "Run targeted tests and pnpm check before handoff",
+    "Refresh reports and artifacts to match the actual worktree"
+  ],
+  "packet": "docs/agent-tasks/P0-05A-T2a-R2F6.md",
+  "nextAction": "Cindy reruns Gate and a fresh independent short-context Codex R2 review (Cycle 7) on the R2F6 worktree; do not commit or push before PASS."
+}

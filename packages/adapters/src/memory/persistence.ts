@@ -33,6 +33,14 @@ import {
   type RoleSlotsInitializedPayload,
 } from "../../../domain/src/role-slots.ts";
 import {
+  assertCanonicalDeliverableRequirement,
+  assertCanonicalEvidenceLink,
+  assertCanonicalDeliverableActionRecord,
+  type DeliverableRequirement,
+  type EvidenceLink,
+  type DeliverableActionRecord,
+} from "../../../domain/src/deliverables.ts";
+import {
   type AssignNodeLeaderCommand,
   type AssignNodeLeaderFailurePoint,
   type AssignNodeLeaderResult,
@@ -131,6 +139,9 @@ type MemoryState = {
   roleSlotAudits: Map<string, ProjectRoleSlotAuditEntry>;
   roleSlots: Map<string, TemplateRoleSlot>;
   roleBindings: Map<string, ProjectRoleBinding>;
+  deliverables: Map<string, DeliverableRequirement>;
+  evidenceLinks: Map<string, EvidenceLink>;
+  deliverableActions: Map<string, DeliverableActionRecord>;
   receipts: Map<string, CommandReceipt>;
   sequences: Map<string, number>;
   events: Map<string, DomainEvent>;
@@ -168,6 +179,9 @@ function emptyState(): MemoryState {
     roleSlotAudits: new Map(),
     roleSlots: new Map(),
     roleBindings: new Map(),
+    deliverables: new Map(),
+    evidenceLinks: new Map(),
+    deliverableActions: new Map(),
     receipts: new Map(),
     sequences: new Map(),
     events: new Map(),
@@ -206,6 +220,9 @@ function cloneState(state: MemoryState): MemoryState {
     roleSlotAudits: new Map(structuredClone([...state.roleSlotAudits])),
     roleSlots: new Map(structuredClone([...state.roleSlots])),
     roleBindings: new Map(structuredClone([...state.roleBindings])),
+    deliverables: new Map(structuredClone([...state.deliverables])),
+    evidenceLinks: new Map(structuredClone([...state.evidenceLinks])),
+    deliverableActions: new Map(structuredClone([...state.deliverableActions])),
     receipts: new Map(structuredClone([...state.receipts])),
     sequences: new Map(state.sequences),
     events: new Map(structuredClone([...state.events])),
@@ -1508,6 +1525,15 @@ export class MemoryPersistence implements Persistence {
   }
 }
 
+function canonicalDeliverableClone(
+  requirement: DeliverableRequirement | undefined,
+  expectedScope: { tenantId?: TenantId; projectId?: string; ownerNodeId?: string; id?: string },
+): DeliverableRequirement | undefined {
+  if (requirement === undefined) return undefined;
+  assertCanonicalDeliverableRequirement(requirement, expectedScope);
+  return structuredClone(requirement);
+}
+
 function context(
   state: MemoryState,
   tenantId: TenantId,
@@ -1836,6 +1862,152 @@ function context(
       listBindings: async (targetType, targetId) => [...state.assetBindings.values()]
         .filter((binding) => binding.tenantId === tenantId && binding.targetType === targetType && binding.targetId === targetId)
         .map((binding) => structuredClone(binding)),
+    },
+    deliverables: {
+      get: async (deliverableId) => canonicalDeliverableClone(
+        state.deliverables.get(`${tenantPrefix}${deliverableId}`),
+        { tenantId, id: deliverableId },
+      ),
+      getByKey: async (projectId, ownerNodeId, requirementKey) => canonicalDeliverableClone(
+        [...state.deliverables.values()].find(
+          (d) => d.tenantId === tenantId && d.projectId === projectId && d.ownerNodeId === ownerNodeId && d.requirementKey === requirementKey,
+        ),
+        { tenantId, projectId, ownerNodeId },
+      ),
+      listByNode: async (nodeId) => [...state.deliverables.values()]
+        .filter((d) => d.tenantId === tenantId && d.ownerNodeId === nodeId)
+        .sort((a, b) => a.requirementKey.localeCompare(b.requirementKey))
+        .map((d) => canonicalDeliverableClone(d, { tenantId, ownerNodeId: nodeId })!),
+      listByProject: async (projectId) => [...state.deliverables.values()]
+        .filter((d) => d.tenantId === tenantId && d.projectId === projectId)
+        .sort((a, b) => a.ownerNodeId.localeCompare(b.ownerNodeId) || a.requirementKey.localeCompare(b.requirementKey))
+        .map((d) => canonicalDeliverableClone(d, { tenantId, projectId })!),
+      listForSecurityMigration: async () => [...state.deliverables.values()]
+        .filter((d) => d.tenantId === tenantId)
+        .sort((a, b) => a.id.localeCompare(b.id))
+        .map((d) => canonicalDeliverableClone(d, { tenantId })!),
+      hasSecurityDomainReference: async (securityDomainId) => [...state.deliverables.values()].some(
+        (d) => d.tenantId === tenantId && d.securityDomainId === securityDomainId,
+      ),
+      insert: async (requirement) => {
+        assertTenant(tenantId, requirement.tenantId);
+        assertCanonicalDeliverableRequirement(requirement, { tenantId });
+        const key = `${tenantPrefix}${requirement.id}`;
+        if (state.deliverables.has(key)) throw new Error("DELIVERABLE_ALREADY_EXISTS");
+        const naturalKeyExists = [...state.deliverables.values()].some(
+          (d) => d.tenantId === tenantId && d.projectId === requirement.projectId && d.ownerNodeId === requirement.ownerNodeId && d.requirementKey === requirement.requirementKey,
+        );
+        if (naturalKeyExists) throw new Error("DELIVERABLE_ALREADY_EXISTS");
+        state.deliverables.set(key, structuredClone(requirement));
+      },
+      savePreservingSecurityOwnership: async (requirementId, requirement, expectedVersion) => {
+        const key = `${tenantPrefix}${requirementId}`;
+        const existing = state.deliverables.get(key);
+        if (existing === undefined) throw new Error("DELIVERABLE_NOT_FOUND");
+        if (existing.version !== expectedVersion || requirement.version !== expectedVersion + 1) {
+          throw new Error("DELIVERABLE_VERSION_CONFLICT");
+        }
+        if (
+          requirement.tenantId !== tenantId ||
+          requirement.id !== requirementId ||
+          requirement.projectId !== existing.projectId ||
+          requirement.ownerNodeId !== existing.ownerNodeId ||
+          requirement.requirementKey !== existing.requirementKey ||
+          requirement.securityDomainId !== existing.securityDomainId ||
+          requirement.securityEpoch !== existing.securityEpoch
+        ) {
+          throw new Error("DELIVERABLE_SECURITY_OWNERSHIP_IMMUTABLE");
+        }
+        assertCanonicalDeliverableRequirement(requirement, { tenantId, id: requirementId });
+        state.deliverables.set(key, structuredClone(requirement));
+      },
+      migrateSecurityOwnership: async (migrationId, requirementId, expectedVersion) => {
+        const migration = migrationForObjectWrite(migrationId);
+        const key = `${tenantPrefix}${requirementId}`;
+        const current = state.deliverables.get(key);
+        if (current === undefined) throw new Error("DELIVERABLE_NOT_FOUND");
+        if (current.version !== expectedVersion) throw new Error("DELIVERABLE_VERSION_CONFLICT");
+        assertMigrationScope(migration, current.ownerNodeId);
+        if (
+          current.projectId !== migration.projectId ||
+          current.securityDomainId !== migration.sourceSecurityDomainId ||
+          current.securityEpoch !== migration.sourceSecurityEpoch
+        ) {
+          throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+        }
+        const updated: DeliverableRequirement = {
+          ...current,
+          securityDomainId: migration.targetSecurityDomainId,
+          securityEpoch: migration.targetSecurityEpoch,
+          version: current.version + 1,
+        };
+        state.deliverables.set(key, structuredClone(updated));
+        return structuredClone(updated);
+      },
+      rollbackSecurityOwnership: async (migrationId, requirementId, expectedVersion) => {
+        const migration = migrationForObjectRollback(migrationId);
+        const key = `${tenantPrefix}${requirementId}`;
+        const current = state.deliverables.get(key);
+        if (current === undefined) throw new Error("DELIVERABLE_NOT_FOUND");
+        if (current.version !== expectedVersion) throw new Error("DELIVERABLE_VERSION_CONFLICT");
+        assertMigrationScope(migration, current.ownerNodeId);
+        if (
+          current.projectId !== migration.projectId ||
+          current.securityDomainId !== migration.targetSecurityDomainId ||
+          current.securityEpoch !== migration.targetSecurityEpoch
+        ) {
+          throw new Error("SECURITY_MIGRATION_OBJECT_NOT_ELIGIBLE");
+        }
+        const updated: DeliverableRequirement = {
+          ...current,
+          securityDomainId: migration.sourceSecurityDomainId,
+          securityEpoch: migration.sourceSecurityEpoch,
+          version: current.version + 1,
+        };
+        state.deliverables.set(key, structuredClone(updated));
+        return structuredClone(updated);
+      },
+      appendEvidenceLink: async (link) => {
+        assertTenant(tenantId, link.tenantId);
+        assertCanonicalEvidenceLink(link, { tenantId });
+        const key = `${tenantPrefix}${link.id}`;
+        if (state.evidenceLinks.has(key)) throw new Error("EVIDENCE_LINK_ALREADY_EXISTS");
+        if ([...state.evidenceLinks.values()].some((existing) =>
+          existing.tenantId === tenantId
+          && existing.requirementId === link.requirementId
+          && existing.sourceType === link.sourceType
+          && existing.sourceId === link.sourceId)) {
+          throw new Error("EVIDENCE_LINK_ALREADY_EXISTS");
+        }
+        state.evidenceLinks.set(key, structuredClone(link));
+      },
+      listEvidenceLinks: async (requirementId) => {
+        const links = [...state.evidenceLinks.values()]
+          .filter((l) => l.tenantId === tenantId && l.requirementId === requirementId)
+          .sort((a, b) => a.linkedAtUtc.localeCompare(b.linkedAtUtc) || a.id.localeCompare(b.id));
+        const naturalKeys = new Set<string>();
+        return links.map((link) => {
+          assertCanonicalEvidenceLink(link, { tenantId, requirementId });
+          const naturalKey = `${link.sourceType}\u0000${link.sourceId}`;
+          if (naturalKeys.has(naturalKey)) throw new Error("EVIDENCE_LINK_RECORD_CORRUPT: duplicate natural key");
+          naturalKeys.add(naturalKey);
+          return structuredClone(link);
+        });
+      },
+      appendAction: async (action) => {
+        assertTenant(tenantId, action.tenantId);
+        assertCanonicalDeliverableActionRecord(action, { tenantId });
+        const key = `${tenantPrefix}${action.id}`;
+        if (state.deliverableActions.has(key)) throw new Error("DELIVERABLE_ACTION_ALREADY_EXISTS");
+        state.deliverableActions.set(key, structuredClone(action));
+      },
+      listActions: async (requirementId) => [...state.deliverableActions.values()]
+        .filter((a) => a.tenantId === tenantId && a.requirementId === requirementId)
+        .sort((a, b) => a.occurredAtUtc.localeCompare(b.occurredAtUtc) || a.id.localeCompare(b.id))
+        .map((a) => {
+          assertCanonicalDeliverableActionRecord(a, { tenantId, requirementId });
+          return structuredClone(a);
+        }),
     },
     externalBindings: {
       getByOwner: async (ownerType, ownerId, role) => clone([...state.externalBindings.values()].find(
@@ -2506,8 +2678,16 @@ function context(
           };
           state.readinessEvidence.set(evidenceKey, updatedEvidence);
 
-          // Restore objects in reverse order using immutable manifest snapshot (asset -> task -> node)
-          // 1. Assets
+          // Restore objects in reverse order using immutable manifest snapshot (deliverable -> asset -> task -> node)
+          // 1. Deliverables (roll back first, since they are leaves owned by nodes)
+          for (const item of snapshot.items.filter((i) => i.kind === "deliverable")) {
+            const deliverable = await context.deliverables.get(item.id);
+            if (deliverable !== undefined && deliverable.securityDomainId === current.targetSecurityDomainId && deliverable.securityEpoch === current.targetSecurityEpoch) {
+              await context.deliverables.rollbackSecurityOwnership(current.id, deliverable.id, deliverable.version);
+              rolledBackItems++;
+            }
+          }
+          // 2. Assets
           for (const item of snapshot.items.filter((i) => i.kind === "asset")) {
             const asset = await context.assets.get(item.id);
             if (asset !== undefined && asset.securityDomainId === current.targetSecurityDomainId && asset.securityEpoch === current.targetSecurityEpoch) {
@@ -2515,7 +2695,7 @@ function context(
               rolledBackItems++;
             }
           }
-          // 2. Tasks
+          // 3. Tasks
           for (const item of snapshot.items.filter((i) => i.kind === "task")) {
             const task = await context.tasks.get(item.id);
             if (task !== undefined && task.securityDomainId === current.targetSecurityDomainId && task.securityEpoch === current.targetSecurityEpoch) {
@@ -2523,7 +2703,7 @@ function context(
               rolledBackItems++;
             }
           }
-          // 3. Nodes in reverse depth order (leaves before root)
+          // 4. Nodes in reverse depth order (leaves before root)
           const nodeDepths = collectSubtreeDepths(current.projectId, current.rootNodeId);
           const nodeItems = snapshot.items
             .filter((i) => i.kind === "node")
@@ -2848,6 +3028,7 @@ function context(
         state.aggregateVersions.add(aggregateKey);
         state.projectEventSequences.add(sequenceKey);
       },
+      list: async () => [...state.events.values()].filter((event) => event.tenantId === tenantId).map((event) => structuredClone(event)),
     },
     outbox: {
       enqueue: async (message) => {
@@ -2865,6 +3046,9 @@ function context(
         }
         state.outbox.set(key, structuredClone(message));
       },
+      list: async () => [...state.outbox.values()]
+        .filter((message) => message.tenantId === tenantId)
+        .map((message) => structuredClone(message)),
     },
     jobs: {
       schedule: async (job) => {
@@ -3205,6 +3389,16 @@ function hasIncompleteInventoryObjectsInMigrationScope(
     }
   }
 
+  for (const deliverable of state.deliverables.values()) {
+    if (deliverable.tenantId !== tenantId || deliverable.projectId !== migration.projectId || deliverable.deletedAtUtc !== null) continue;
+    if (subtree.has(deliverable.ownerNodeId)) {
+      if (deliverable.securityDomainId !== migration.targetSecurityDomainId
+        || deliverable.securityEpoch !== migration.targetSecurityEpoch) {
+        return true;
+      }
+    }
+  }
+
   return false;
 }
 
@@ -3241,6 +3435,16 @@ function hasObjectsNotRevertedToSourceInMigrationScope(
     if (subtree.has(asset.ownerNodeId)) {
       if (asset.securityDomainId !== migration.sourceSecurityDomainId
         || asset.securityEpoch !== migration.sourceSecurityEpoch) {
+        return true;
+      }
+    }
+  }
+
+  for (const deliverable of state.deliverables.values()) {
+    if (deliverable.tenantId !== tenantId || deliverable.projectId !== migration.projectId || deliverable.deletedAtUtc !== null) continue;
+    if (subtree.has(deliverable.ownerNodeId)) {
+      if (deliverable.securityDomainId !== migration.sourceSecurityDomainId
+        || deliverable.securityEpoch !== migration.sourceSecurityEpoch) {
         return true;
       }
     }
