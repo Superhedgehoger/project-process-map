@@ -4,10 +4,13 @@ export type ApiNode = Readonly<{
   id: string;
   projectId: string;
   parentId: string | null;
-  leaderPrincipalId?: string | null;
+  leaderPrincipalId?: string | null | undefined;
   title: string;
   kind: "stage" | "work_package" | "milestone";
   version: number;
+  status?: ("planned" | "in_progress" | "completed") | undefined;
+  completedAtUtc?: string | null | undefined;
+  completedByPrincipalId?: string | null | undefined;
 }>;
 
 export type ApiAsset = Readonly<{
@@ -164,6 +167,18 @@ export type WaiveDeliverableRequest = Readonly<{
   expectedVersion: number;
   reason: string;
 }>;
+
+export type CompleteNodeRequest = Readonly<{
+  expectedVersion: number;
+}>;
+
+export function decodeCompleteNodeRequest(value: unknown): CompleteNodeRequest {
+  const record = object(value, "complete node request");
+  exactKeys(record, ["expectedVersion"], "complete node request");
+  return {
+    expectedVersion: positiveInteger(record.expectedVersion, "completeNode.expectedVersion"),
+  };
+}
 
 export type CommandResult<T> = Readonly<{ value: T; replayed: boolean }>;
 export type ApiError = Readonly<{ code: string; message: string }>;
@@ -374,7 +389,7 @@ export class ContractDecodeError extends Error {
   }
 }
 
-function decodeNode(value: unknown): ApiNode {
+export function decodeNode(value: unknown): ApiNode {
   const record = object(value, "node");
   return {
     id: string(record.id, "node.id"),
@@ -386,6 +401,13 @@ function decodeNode(value: unknown): ApiNode {
     title: string(record.title, "node.title"),
     kind: oneOf(record.kind, ["stage", "work_package", "milestone"] as const, "node.kind"),
     version: positiveInteger(record.version, "node.version"),
+    ...(record.status !== undefined
+      ? {
+          status: oneOf(record.status, ["planned", "in_progress", "completed"] as const, "node.status"),
+          completedAtUtc: record.completedAtUtc === null || record.completedAtUtc === undefined ? null : nullableUtcString(record.completedAtUtc, "node.completedAtUtc"),
+          completedByPrincipalId: record.completedByPrincipalId === null || record.completedByPrincipalId === undefined ? null : string(record.completedByPrincipalId, "node.completedByPrincipalId"),
+        }
+      : {}),
   };
 }
 

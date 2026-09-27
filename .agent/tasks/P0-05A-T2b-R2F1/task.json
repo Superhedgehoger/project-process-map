@@ -1,0 +1,52 @@
+{
+  "taskId": "P0-05A-T2b-R2F1",
+  "parentTaskId": "P0-05A-T2b",
+  "riskClass": "R2",
+  "goal": "Repair the confirmed P0-05A-T2b R2 findings without expanding scope: enforce SQLite v13 fresh/upgrade schema parity, normalize node-completion application errors, preserve sensitive-node concealment before project mismatch, and apply the approved canceled/promoted completion semantics.",
+  "status": "CLOSED",
+  "findings": [
+    "MEDIUM-01 SQLite v13 fresh and upgraded project_nodes status enforcement are not equivalent",
+    "LOW-01 node-completion error codes are absent from asApplicationError knownCodes",
+    "LOW-02 sensitive-node project mismatch is exposed before authorization concealment"
+  ],
+  "findingClosure": {
+    "MEDIUM-01": "CLOSED",
+    "LOW-01": "CLOSED",
+    "LOW-02": "CLOSED"
+  },
+  "productDecision": "For ProjectNode completion only, non-deleted Tasks with executionState canceled or promoted are non-blocking terminal states, regardless of requiresAcceptance. Soft-deleted Tasks remain ignored. No other Task lifecycle behavior changes.",
+  "productDecisionStatus": "CORRECTLY_IMPLEMENTED",
+  "scope": [
+    "SQLite v13 schema parity, validation, fail-closed status decoding, and migration/reopen regression coverage",
+    "ApplicationError knownCodes and normalization regression coverage",
+    "Sensitive-node wrong-project concealment ordering with Memory/SQLite parity tests",
+    "Minimal completion-guard handling and tests for canceled/promoted Tasks"
+  ],
+  "nonGoals": [
+    "Any other Task lifecycle transition change",
+    "Unrelated refactoring"
+  ],
+  "baseCommit": "22e9f83ff8cb733de748ebe08f55d6ac60e4157d",
+  "reviewHistory": [
+    {
+      "review": "Independent Codex R2 Repair Review",
+      "verdict": "PASS",
+      "findings": {
+        "blocker": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      }
+    }
+  ],
+  "verification": {
+    "nodeCompletionGuard": "PASS 26/26 tests/node-completion-guard.test.ts",
+    "upgradeCompatibility": "PASS 13/13 tests/task-upgrade-compatibility.test.ts",
+    "pnpmCheck": "PASS 376/376 plus typecheck, Huly image lock and extension verification",
+    "gitDiffCheck": "PASS",
+    "jsonValidation": "PASS",
+    "credentialScan": "PASS"
+  },
+  "blocker": null,
+  "nextAction": "Closed by independent Codex R2 Repair Review PASS; include with the parent product slice closeout commit."
+}

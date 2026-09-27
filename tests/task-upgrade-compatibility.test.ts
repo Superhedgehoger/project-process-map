@@ -10,11 +10,194 @@ import { ApplicationError } from "../packages/application/src/errors.ts";
 import { ActOnTaskHandler } from "../packages/application/src/tasks/act-on-task.ts";
 import { CreateTaskHandler } from "../packages/application/src/tasks/create-task.ts";
 import { SqlitePersistence } from "../packages/adapters/src/sqlite/persistence.ts";
+import { applyFrozenV12Schema } from "../packages/adapters/src/sqlite/schema/v12-schema.ts";
 import { principalId, tenantId } from "../packages/domain/src/identity.ts";
 import { grantProjectMembership } from "./support/project-membership.ts";
 
 const tenant = tenantId("tenant-upgrade");
 const manager = principalId("manager-upgrade");
+
+function assertV13ProjectNodeSchema(database: DatabaseSync): void {
+  const status = (database.prepare("PRAGMA table_info(project_nodes)").all() as Array<{
+    name: string;
+    type: string;
+    notnull: number;
+    dflt_value: unknown;
+  }>).find((column) => column.name === "status");
+  assert.deepEqual(status && { type: status.type, notnull: status.notnull, defaultValue: status.dflt_value }, {
+    type: "TEXT",
+    notnull: 1,
+    defaultValue: "'planned'",
+  });
+  const ddl = database.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'project_nodes'",
+  ).get() as { sql: string };
+  assert.match(ddl.sql, /CHECK\s*\(\s*status\s+IN\s*\(\s*'planned'\s*,\s*'in_progress'\s*,\s*'completed'\s*\)\s*\)/i);
+  const indexColumns = (database.prepare("PRAGMA index_info(project_nodes_by_project)").all() as Array<{
+    seqno: number;
+    name: string;
+  }>).sort((left, right) => left.seqno - right.seqno).map((column) => column.name);
+  assert.deepEqual(indexColumns, ["tenant_id", "project_id", "node_id"]);
+}
+
+test("P0-05A-T2b-R2F1 fresh SQLite v13 enforces ProjectNode status and reopens", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppm-v13-fresh-"));
+  const path = join(directory, "fresh.sqlite");
+  try {
+    const persistence = new SqlitePersistence({ path });
+    await persistence.transaction(tenant, async (tx) => {
+      await tx.nodes.insert({
+        tenantId: tenant, id: "fresh-node", projectId: "fresh-project", parentId: null,
+        leaderPrincipalId: null, title: "Fresh", kind: "work_package", status: "planned",
+        completedAtUtc: null, completedByPrincipalId: null,
+        securityDomainId: null, securityEpoch: 1, version: 1, deletedAtUtc: null,
+      });
+    });
+    await persistence.close();
+
+    const raw = new DatabaseSync(path);
+    assertV13ProjectNodeSchema(raw);
+    assert.throws(
+      () => raw.prepare("UPDATE project_nodes SET status = 'illegal' WHERE tenant_id = ? AND node_id = ?").run(tenant, "fresh-node"),
+      /CHECK constraint failed/,
+    );
+    assert.throws(
+      () => raw.prepare(`
+        INSERT INTO project_nodes (
+          tenant_id, node_id, project_id, parent_node_id, leader_principal_id, title, kind,
+          status, completed_at_utc, completed_by_principal_id,
+          security_domain_id, security_epoch, version, deleted_at_utc
+        ) VALUES (?, ?, ?, NULL, NULL, ?, 'work_package', 'illegal', NULL, NULL, NULL, 1, 1, NULL)
+      `).run(tenant, "fresh-invalid", "fresh-project", "Invalid"),
+      /CHECK constraint failed/,
+    );
+    raw.close();
+
+    const reopened = new SqlitePersistence({ path });
+    await reopened.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("P0-05A-T2b-R2F1 frozen v12 upgrades to constrained v13 without data or FK loss", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppm-v12-v13-"));
+  const path = join(directory, "v12.sqlite");
+  try {
+    const v12 = new DatabaseSync(path);
+    applyFrozenV12Schema(v12);
+    v12.exec("PRAGMA foreign_keys = ON");
+    v12.prepare("INSERT INTO tenants (tenant_id, state, created_at_utc) VALUES (?, 'active', ?)")
+      .run(tenant, "2026-09-25T00:00:00.000Z");
+    v12.prepare(`
+      INSERT INTO project_nodes (
+        tenant_id, node_id, project_id, parent_node_id, leader_principal_id, title, kind,
+        security_domain_id, security_epoch, version, deleted_at_utc
+      ) VALUES (?, ?, ?, NULL, NULL, ?, 'stage', NULL, 1, 7, NULL)
+    `).run(tenant, "v12-root", "v12-project", "Preserved Root");
+    v12.prepare(`
+      INSERT INTO project_nodes (
+        tenant_id, node_id, project_id, parent_node_id, leader_principal_id, title, kind,
+        security_domain_id, security_epoch, version, deleted_at_utc
+      ) VALUES (?, ?, ?, ?, NULL, ?, 'work_package', NULL, 1, 3, NULL)
+    `).run(tenant, "v12-child", "v12-project", "v12-root", "Preserved Child");
+    v12.prepare(`
+      INSERT INTO deliverable_requirements (
+        tenant_id, deliverable_id, project_id, owner_node_id, security_domain_id,
+        security_epoch, requirement_key, status, version, deliverable_json
+      ) VALUES (?, ?, ?, ?, NULL, 1, 'preserved', 'pending', 1, '{}')
+    `).run(tenant, "v12-deliverable", "v12-project", "v12-child");
+    v12.close();
+
+    const upgraded = new SqlitePersistence({ path });
+    await upgraded.close();
+
+    const evidence = new DatabaseSync(path);
+    assertV13ProjectNodeSchema(evidence);
+    const root = evidence.prepare("SELECT * FROM project_nodes WHERE tenant_id = ? AND node_id = ?")
+      .get(tenant, "v12-root") as Record<string, unknown>;
+    assert.equal(root.title, "Preserved Root");
+    assert.equal(root.kind, "stage");
+    assert.equal(root.version, 7);
+    assert.equal(root.status, "planned");
+    assert.equal(root.completed_at_utc, null);
+    assert.equal(root.completed_by_principal_id, null);
+    const child = evidence.prepare("SELECT parent_node_id, status FROM project_nodes WHERE tenant_id = ? AND node_id = ?")
+      .get(tenant, "v12-child") as Record<string, unknown>;
+    assert.equal(child.parent_node_id, "v12-root");
+    assert.equal(child.status, "planned");
+    assert.ok(evidence.prepare("SELECT 1 FROM deliverable_requirements WHERE tenant_id = ? AND deliverable_id = ?")
+      .get(tenant, "v12-deliverable"));
+    assert.deepEqual(evidence.prepare("PRAGMA foreign_key_check").all(), []);
+    assert.throws(
+      () => evidence.prepare("UPDATE project_nodes SET status = 'illegal' WHERE tenant_id = ? AND node_id = ?").run(tenant, "v12-root"),
+      /CHECK constraint failed/,
+    );
+    evidence.close();
+
+    const reopened = new SqlitePersistence({ path });
+    const restored = await reopened.read(tenant, async (tx) => await tx.nodes.get("v12-root"));
+    assert.equal(restored?.title, "Preserved Root");
+    assert.equal(restored?.status, "planned");
+    await reopened.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("P0-05A-T2b-R2F1 v13 marker cannot hide a missing ProjectNode status CHECK", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppm-v13-malformed-"));
+  const path = join(directory, "malformed.sqlite");
+  try {
+    const malformed = new DatabaseSync(path);
+    applyFrozenV12Schema(malformed);
+    malformed.exec(`
+      ALTER TABLE project_nodes ADD COLUMN status TEXT NOT NULL DEFAULT 'planned';
+      ALTER TABLE project_nodes ADD COLUMN completed_at_utc TEXT;
+      ALTER TABLE project_nodes ADD COLUMN completed_by_principal_id TEXT;
+      INSERT INTO schema_migrations (version, applied_at_utc) VALUES (13, '2026-09-26T00:00:00.000Z');
+    `);
+    malformed.close();
+    assert.throws(
+      () => new SqlitePersistence({ path }),
+      /SQLITE_SCHEMA_INCOMPATIBLE: table project_nodes status CHECK enum mismatch/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("P0-05A-T2b-R2F1 illegal persisted ProjectNode status fails closed instead of becoming planned", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppm-v13-corrupt-status-"));
+  const path = join(directory, "corrupt.sqlite");
+  try {
+    const initial = new SqlitePersistence({ path });
+    await initial.transaction(tenant, async (tx) => {
+      await tx.nodes.insert({
+        tenantId: tenant, id: "corrupt-node", projectId: "corrupt-project", parentId: null,
+        leaderPrincipalId: null, title: "Corrupt", kind: "work_package", status: "planned",
+        completedAtUtc: null, completedByPrincipalId: null,
+        securityDomainId: null, securityEpoch: 1, version: 1, deletedAtUtc: null,
+      });
+    });
+    await initial.close();
+
+    const corrupt = new DatabaseSync(path);
+    corrupt.exec("PRAGMA ignore_check_constraints = ON");
+    corrupt.prepare("UPDATE project_nodes SET status = 'illegal' WHERE tenant_id = ? AND node_id = ?")
+      .run(tenant, "corrupt-node");
+    corrupt.close();
+
+    const reopened = new SqlitePersistence({ path });
+    await assert.rejects(
+      reopened.read(tenant, async (tx) => await tx.nodes.get("corrupt-node")),
+      /SQLITE_NODE_STATUS_INVALID/,
+    );
+    await reopened.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("P0-05A-T1a SQLite upgrades a legacy Task and receipt without stranding the task", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ppm-task-upgrade-"));
@@ -121,7 +304,7 @@ test("P0-05A-T1a SQLite upgrades a legacy Task and receipt without stranding the
     await upgraded.close();
 
     const evidence = new DatabaseSync(path, { readOnly: true });
-    assert.equal((evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version, 12);
+    assert.equal((evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version, 13);
     evidence.close();
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -189,10 +372,19 @@ test("TC-SEC-002J schema v6 to v7 migration and rejection by v6 binary", async (
     });
     await persistence.close();
 
-    const evidence = new DatabaseSync(path, { readOnly: true });
+    const evidence = new DatabaseSync(path);
     const maxVersion = (evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version;
-    assert.equal(maxVersion, 12);
+    assert.equal(maxVersion, 13);
+    assertV13ProjectNodeSchema(evidence);
+    assert.throws(
+      () => evidence.prepare("UPDATE project_nodes SET status = 'illegal' WHERE tenant_id = ? AND node_id = ?").run(tenant, "node-v6"),
+      /CHECK constraint failed/,
+    );
+    assert.deepEqual(evidence.prepare("PRAGMA foreign_key_check").all(), []);
     evidence.close();
+
+    const reopened = new SqlitePersistence({ path });
+    await reopened.close();
 
     const v6SimulatedCheck = (dbPath: string) => {
       const db = new DatabaseSync(dbPath);
@@ -204,7 +396,7 @@ test("TC-SEC-002J schema v6 to v7 migration and rejection by v6 binary", async (
       }
       db.close();
     };
-    assert.throws(() => v6SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:12/);
+    assert.throws(() => v6SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:13/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -249,7 +441,7 @@ test("TC-SEC-002K schema v7 to v8 migration and rejection by v7 binary", async (
 
     const evidence = new DatabaseSync(path, { readOnly: true });
     const maxVersion = (evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version;
-    assert.equal(maxVersion, 12);
+    assert.equal(maxVersion, 13);
     const tableCheck = evidence.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='security_migration_audits'").get();
     assert.ok(tableCheck);
     evidence.close();
@@ -264,7 +456,7 @@ test("TC-SEC-002K schema v7 to v8 migration and rejection by v7 binary", async (
       }
       db.close();
     };
-    assert.throws(() => v7SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:12/);
+    assert.throws(() => v7SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:13/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -310,7 +502,7 @@ test("TC-SEC-002K schema v8 to v9 migration and rejection by v8 binary", async (
 
     const evidence = new DatabaseSync(path, { readOnly: true });
     const maxVersion = (evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version;
-    assert.equal(maxVersion, 12);
+    assert.equal(maxVersion, 13);
     const tableCheck = evidence.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='consumed_security_migration_evidence'").get();
     assert.ok(tableCheck);
     evidence.close();
@@ -325,7 +517,7 @@ test("TC-SEC-002K schema v8 to v9 migration and rejection by v8 binary", async (
       }
       db.close();
     };
-    assert.throws(() => v8SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:12/);
+    assert.throws(() => v8SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:13/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -372,7 +564,7 @@ test("TC-SEC-004A schema v9 to v10 migration and rejection by v9 binary", async 
 
     const evidence = new DatabaseSync(path, { readOnly: true });
     const maxVersion = (evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version;
-    assert.equal(maxVersion, 12);
+    assert.equal(maxVersion, 13);
     const tableInfo = evidence.prepare("PRAGMA table_info(project_nodes)").all() as Array<{ name: string }>;
     assert.ok(tableInfo.some((col) => col.name === "leader_principal_id"));
     evidence.close();
@@ -387,7 +579,7 @@ test("TC-SEC-004A schema v9 to v10 migration and rejection by v9 binary", async 
       }
       db.close();
     };
-    assert.throws(() => v9SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:12/);
+    assert.throws(() => v9SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:13/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -435,7 +627,7 @@ test("TC-SEC-004B schema v10 to v11 migration and rejection by v10 binary", asyn
 
     const evidence = new DatabaseSync(path, { readOnly: true });
     const maxVersion = (evidence.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version;
-    assert.equal(maxVersion, 12);
+    assert.equal(maxVersion, 13);
     const slotsTable = evidence.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='project_role_slots'").get();
     assert.ok(slotsTable);
     const bindingsTable = evidence.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='project_role_bindings'").get();
@@ -457,7 +649,7 @@ test("TC-SEC-004B schema v10 to v11 migration and rejection by v10 binary", asyn
       }
       db.close();
     };
-    assert.throws(() => v10SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:12/);
+    assert.throws(() => v10SimulatedCheck(path), /SQLITE_SCHEMA_VERSION_UNSUPPORTED:13/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -657,10 +849,10 @@ test("TC-SEC-004B (sqlite): Cycle 4 Finding 3 - Reopening database already marke
     const initial = new SqlitePersistence({ path });
     await initial.close();
 
-    // Verify it is already marked v11 with 11 migrations
+    // Verify it is already marked v13 with 13 migrations
     const checkDb = new DatabaseSync(path);
     const countRow = checkDb.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number };
-    assert.equal(countRow.count, 12);
+    assert.equal(countRow.count, 13);
     checkDb.close();
 
     // 2. Normal reopen succeeds

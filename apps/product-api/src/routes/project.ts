@@ -10,6 +10,7 @@ import {
   canViewProjectObjectDuringMigration,
 } from "../../../../packages/application/src/access/project-security.ts";
 import { executeAssignNodeLeader } from "../../../../packages/application/src/create-node.ts";
+import { CompleteProjectNodeHandler } from "../../../../packages/application/src/complete-node.ts";
 import type { AssetContentPort } from "../../../../packages/application/src/ports/integrations.ts";
 import type {
   AssignNodeLeaderCommand,
@@ -169,6 +170,40 @@ export async function routeProjectRequest(
     const result = await (dependencies.assignNodeLeader
       ? dependencies.assignNodeLeader(command)
       : executeAssignNodeLeader(persistence, command));
+    sendJson(response, 200, { value: publicNode(result.node), replayed: result.replayed });
+    return true;
+  }
+  const completeNodeMatch = url.pathname.match(/^\/api\/nodes\/([^/]+)\/actions\/complete$/);
+  if (request.method === "POST" && completeNodeMatch?.[1] !== undefined) {
+    const nodeId = decodeURIComponent(completeNodeMatch[1]);
+    const body = await readJson(request);
+    assertExactFields(body, ["expectedVersion"]);
+    const expectedVersion = requiredPositiveInteger(body, "expectedVersion");
+    const idempotencyKey = requiredHeader(request, "idempotency-key");
+    const principalKey = commandKey(identity, idempotencyKey);
+    const nodeProject = await persistence.read(identity.tenantId, async (tx) => {
+      const node = await tx.nodes.get(nodeId);
+      return node?.projectId ?? "phase0-project";
+    });
+
+    const handler = new CompleteProjectNodeHandler(persistence);
+    const result = await executePublicNodeCommand(
+      persistence,
+      identity,
+      "complete_project_node",
+      idempotencyKey,
+      async (occurredAtUtc) => await handler.execute({
+        tenantId: identity.tenantId,
+        commandId: deterministicPublicId("cmd-complete-node", principalKey),
+        idempotencyKey,
+        correlationId: request.headers["x-correlation-id"]?.toString() ?? randomUUID(),
+        principalId: identity.principalId,
+        projectId: nodeProject,
+        nodeId,
+        expectedVersion,
+        occurredAtUtc,
+      }),
+    );
     sendJson(response, 200, { value: publicNode(result.node), replayed: result.replayed });
     return true;
   }
@@ -644,6 +679,35 @@ async function executePublicDeliverableCommand<TResult>(
   }
 }
 
+async function executePublicNodeCommand<TResult>(
+  persistence: Persistence,
+  identity: ProductRequestIdentity,
+  operation: "complete_project_node",
+  idempotencyKey: string,
+  execute: (occurredAtUtc: string) => Promise<TResult>,
+): Promise<TResult> {
+  const scope = { principalId: identity.principalId, operation, idempotencyKey };
+  const previous = await persistence.read(identity.tenantId, async (transaction) => {
+    return await transaction.receipts.get(scope);
+  });
+  const occurredAtUtc = previous?.createdAtUtc ?? new Date().toISOString();
+  try {
+    return await execute(occurredAtUtc);
+  } catch (error) {
+    if (
+      previous === undefined
+      && error instanceof ApplicationError
+      && error.code === "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD"
+    ) {
+      const concurrent = await persistence.read(identity.tenantId, async (transaction) => {
+        return await transaction.receipts.get(scope);
+      });
+      if (concurrent !== undefined) return await execute(concurrent.createdAtUtc);
+    }
+    throw error;
+  }
+}
+
 function securityGrantAction(value: string): "set" | "revoke" {
   if (value === "set" || value === "revoke") return value;
   throw new ApplicationError("NOT_FOUND", "Security grant action not found");
@@ -723,5 +787,8 @@ function publicNode(node: ProjectNode): ApiNode {
     title: node.title,
     kind: node.kind,
     version: node.version,
+    status: node.status ?? "planned",
+    completedAtUtc: node.completedAtUtc ?? null,
+    completedByPrincipalId: node.completedByPrincipalId ?? null,
   };
 }

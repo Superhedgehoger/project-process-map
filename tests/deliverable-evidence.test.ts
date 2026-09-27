@@ -3991,7 +3991,7 @@ test("R2F2-4/5 (sqlite): exact v12 schema validation, real v11 upgrade and v11 r
     const upgraded = new SqlitePersistence({ path: v11Path });
     await upgraded.close();
     const upgradedRaw = new DatabaseSync(v11Path, { readOnly: true });
-    assert.equal(upgradedRaw.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()!.version, 12);
+    assert.equal(upgradedRaw.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()!.version, 13);
     const evidenceIndexes = upgradedRaw.prepare("PRAGMA index_list(deliverable_evidence_links)").all() as Array<{ name: string; unique: number }>;
     assert.equal(evidenceIndexes.find((index) => index.name === "uq_deliverable_evidence_natural_key")?.unique, 1);
     upgradedRaw.close();
@@ -4003,7 +4003,7 @@ test("R2F2-4/5 (sqlite): exact v12 schema validation, real v11 upgrade and v11 r
     // handle fail-closed.
     assert.throws(
       () => new FrozenV11SqlitePersistenceReader({ path: v11Path }),
-      /SQLITE_SCHEMA_VERSION_UNSUPPORTED:12/,
+      /SQLITE_SCHEMA_VERSION_UNSUPPORTED:13/,
       "Frozen v11 reader startup path must reject the upgraded v12 database",
     );
 
@@ -4578,7 +4578,7 @@ test("R2F3-4 (sqlite): realistic v11 fixture with full data upgrades to v12, reo
     // close contract), not a test-local MAX(version)+manual-throw substitute.
     assert.throws(
       () => new FrozenV11SqlitePersistenceReader({ path: v11Path }),
-      /SQLITE_SCHEMA_VERSION_UNSUPPORTED:12/,
+      /SQLITE_SCHEMA_VERSION_UNSUPPORTED:13/,
       "Frozen v11 reader startup path must reject the upgraded v12 database",
     );
 

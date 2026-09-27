@@ -67,6 +67,37 @@ export type AssignNodeLeaderResult = Readonly<{
 
 export type AssignNodeLeaderFailurePoint = "after_aggregate" | "after_event" | "after_outbox" | "after_idempotency";
 
+export type CompleteProjectNodeCommand = Readonly<{
+  tenantId: TenantId;
+  commandId: string;
+  idempotencyKey: string;
+  correlationId: string;
+  principalId: PrincipalId;
+  projectId: string;
+  nodeId: string;
+  expectedVersion: number;
+  occurredAtUtc: string;
+}>;
+
+export type NodeCompletedPayload = Readonly<{
+  nodeId: string;
+  completedByPrincipalId: PrincipalId;
+  completedAtUtc: string;
+}>;
+
+export type CompleteProjectNodeResult = Readonly<{
+  node: ProjectNode;
+  event: DomainEvent<NodeCompletedPayload>;
+  outbox: OutboxMessage;
+  replayed: boolean;
+}>;
+
+export type CompleteProjectNodeFailurePoint =
+  | "after_aggregate"
+  | "after_event"
+  | "after_outbox"
+  | "after_idempotency";
+
 export type TemplateRoleSlotInit = Readonly<{
   slotKey: string;
   name: string;
@@ -657,6 +688,11 @@ export interface Persistence {
     command: AssignProjectRoleBindingCommand,
     failurePoint?: AssignProjectRoleBindingFailurePoint,
   ): Promise<AssignProjectRoleBindingResult>;
+
+  executeCompleteProjectNode(
+    command: CompleteProjectNodeCommand,
+    failurePoint?: CompleteProjectNodeFailurePoint,
+  ): Promise<CompleteProjectNodeResult>;
 }
 
 export type ClaimOptions = Readonly<{

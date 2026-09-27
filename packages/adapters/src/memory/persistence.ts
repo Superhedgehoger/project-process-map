@@ -5,10 +5,10 @@ import type { ExternalBinding } from "../../../domain/src/external-reference.ts"
 import type { TenantId, PrincipalId } from "../../../domain/src/identity.ts";
 import type { ExternalIdentityMapping, Principal } from "../../../domain/src/identity.ts";
 import type { IntegrationOperation, IntegrationStepAttempt } from "../../../domain/src/integration-operations.ts";
-import type { ProjectNode } from "../../../domain/src/project-structure.ts";
+import { isNodeLeader, type ProjectNode } from "../../../domain/src/project-structure.ts";
 import type { OutboundProjectionFence } from "../../../domain/src/outbound-projection-fence.ts";
 import { isProjectManager, type ProjectMembership, type ProjectMembershipSecurityAuditEntry } from "../../../domain/src/project-access.ts";
-import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
+import { taskLifecycle, type ProductTask, type TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import {
   assertSecurityMigrationInitialPlan,
   assertSecurityMigrationProgressChange,
@@ -57,10 +57,14 @@ import {
   type CommandScope,
   type CommitSecurityMigrationResult,
   type CommitWithReadinessEvidenceParams,
+  type CompleteProjectNodeCommand,
+  type CompleteProjectNodeFailurePoint,
+  type CompleteProjectNodeResult,
   type CreateNodeCommand,
   type CreateNodeFailurePoint,
   type CreateNodeResult,
   type JobConsumer,
+  type NodeCompletedPayload,
   type NodeCreatedPayload,
   type NodeLeaderAssignedPayload,
   type OutboxConsumer,
@@ -73,6 +77,7 @@ import {
   type SecurityMigrationReadinessEvidenceRecord,
   type TransactionContext,
 } from "../../../application/src/ports/persistence.ts";
+import { validateCompleteProjectNode } from "../../../application/src/complete-node.ts";
 import {
   assertEligibleNodeLeader,
   hash,
@@ -386,6 +391,34 @@ export class MemoryPersistence implements Persistence {
     return structuredClone(updated);
   }
 
+  #mutateNodeCompletion(
+    transaction: TransactionContext,
+    nodeId: string,
+    projectId: string,
+    completedByPrincipalId: PrincipalId,
+    completedAtUtc: string,
+    expectedVersion: number,
+  ): ProjectNode {
+    const state = transactionStateRegistry.get(transaction);
+    if (state === undefined) throw new Error("Invalid or unmanaged transaction context");
+    const tenantId = transaction.tenantId;
+    const tenantPrefix = `${tenantId}\u0000`;
+    const key = `${tenantPrefix}${nodeId}`;
+    const current = state.nodes.get(key);
+    if (current === undefined || current.deletedAtUtc !== null) throw new ApplicationError("NODE_NOT_FOUND", "Node not found");
+    if (current.projectId !== projectId) throw new ApplicationError("PROJECT_MISMATCH", "Project mismatch");
+    if (current.version !== expectedVersion) throw new ApplicationError("NODE_VERSION_CONFLICT", "Node version conflict");
+    const updated: ProjectNode = {
+      ...current,
+      status: "completed",
+      completedAtUtc,
+      completedByPrincipalId,
+      version: current.version + 1,
+    };
+    state.nodes.set(key, structuredClone(updated));
+    return structuredClone(updated);
+  }
+
   #mutateProjectRoleBinding(
     transaction: TransactionContext,
     command: AssignProjectRoleBindingCommand,
@@ -569,6 +602,9 @@ export class MemoryPersistence implements Persistence {
         leaderPrincipalId: null,
         title: command.title,
         kind: command.kind ?? "work_package",
+        status: "planned",
+        completedAtUtc: null,
+        completedByPrincipalId: null,
         securityDomainId: inheritance.securityDomainId,
         securityEpoch: inheritance.securityEpoch,
         version: 1,
@@ -841,6 +877,206 @@ export class MemoryPersistence implements Persistence {
       inject(failurePoint, "after_outbox");
 
       const result: AssignNodeLeaderResult = {
+        node: updatedNode,
+        event,
+        outbox,
+        replayed: false,
+      };
+      await transaction.receipts.insert({
+        scope,
+        fingerprint,
+        result: {
+          node: updatedNode,
+          event,
+          outbox,
+        },
+        createdAtUtc: command.occurredAtUtc,
+      });
+      inject(failurePoint, "after_idempotency");
+      return result;
+    });
+  }
+
+  async executeCompleteProjectNode(
+    command: CompleteProjectNodeCommand,
+    failurePoint?: CompleteProjectNodeFailurePoint,
+  ): Promise<CompleteProjectNodeResult> {
+    validateCompleteProjectNode(command);
+    const scope: CommandScope = {
+      principalId: command.principalId,
+      operation: "complete_project_node",
+      idempotencyKey: command.idempotencyKey,
+    };
+    const fingerprint = hash({
+      projectId: command.projectId,
+      nodeId: command.nodeId,
+      expectedVersion: command.expectedVersion,
+      occurredAtUtc: command.occurredAtUtc,
+    });
+
+    return await this.transaction(command.tenantId, async (transaction) => {
+      const currentNode = await transaction.nodes.get(command.nodeId);
+      if (currentNode === undefined || currentNode.deletedAtUtc !== null) {
+        throw new ApplicationError("NODE_NOT_FOUND", "Node not found");
+      }
+      if (currentNode.securityDomainId === null && currentNode.projectId !== command.projectId) {
+        throw new ApplicationError("PROJECT_MISMATCH", "Project mismatch");
+      }
+
+      const authorizationProjectId = currentNode.securityDomainId === null ? command.projectId : currentNode.projectId;
+      const actorPrincipal = await transaction.principals.get(command.principalId);
+      const actorMembership = await transaction.memberships.get(authorizationProjectId, command.principalId);
+      if (
+        actorPrincipal === undefined ||
+        actorPrincipal.tenantId !== command.tenantId ||
+        actorPrincipal.status !== "active" ||
+        actorPrincipal.kind !== "user" ||
+        actorMembership === undefined ||
+        actorMembership.tenantId !== command.tenantId ||
+        actorMembership.projectId !== authorizationProjectId ||
+        actorMembership.status !== "active"
+      ) {
+        if (currentNode.securityDomainId !== null) {
+          throw new ApplicationError("NODE_NOT_FOUND", "Node not found");
+        }
+        throw new ApplicationError("FORBIDDEN", "Only active project members can complete nodes");
+      }
+
+      const isPm = isProjectManager(actorMembership);
+      const isOwner = isNodeLeader(currentNode, command.principalId);
+      if (!isPm && !isOwner) {
+        if (currentNode.securityDomainId !== null) {
+          throw new ApplicationError("NODE_NOT_FOUND", "Node not found");
+        }
+        throw new ApplicationError("FORBIDDEN", "Only project managers or the node owner can complete the node");
+      }
+
+      const nowUtc = this.nowUtc();
+      if (currentNode.securityDomainId !== null) {
+        const canAccess = await canAccessProjectObjectDuringMigration(
+          transaction,
+          actorMembership,
+          command.principalId,
+          {
+            projectId: currentNode.projectId,
+            ownerNodeId: currentNode.id,
+            securityDomainId: currentNode.securityDomainId,
+            securityEpoch: currentNode.securityEpoch,
+          },
+          "edit",
+          nowUtc,
+        );
+        if (!canAccess) {
+          throw new ApplicationError("NODE_NOT_FOUND", "Node not found");
+        }
+      }
+
+      if (currentNode.projectId !== command.projectId) {
+        throw new ApplicationError("PROJECT_MISMATCH", "Project mismatch");
+      }
+
+      await assertProjectSecurityStable(transaction, command.projectId);
+
+      const previous = await transaction.receipts.get<Omit<CompleteProjectNodeResult, "replayed">>(scope);
+      if (previous !== undefined) {
+        if (previous.fingerprint !== fingerprint) {
+          throw new Error("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD");
+        }
+        return { ...structuredClone(previous.result), replayed: true };
+      }
+
+      if (currentNode.version !== command.expectedVersion) {
+        throw new ApplicationError("NODE_VERSION_CONFLICT", "Node version conflict");
+      }
+
+      if (currentNode.status === "completed") {
+        throw new ApplicationError("NODE_ALREADY_COMPLETED", "Node is already completed");
+      }
+
+      // Task completion guard
+      const tasks = await transaction.tasks.listByNode(currentNode.id);
+      for (const task of tasks) {
+        if (task.deletedAtUtc !== null) continue;
+        if (task.executionState === "canceled" || task.executionState === "promoted") continue;
+        if (task.requiresAcceptance) {
+          if (task.reviewState !== "accepted") {
+            throw new ApplicationError("NODE_TASKS_NOT_COMPLETED", "All tasks requiring review must be accepted before node completion");
+          }
+        } else {
+          if (taskLifecycle(task) !== "completed") {
+            throw new ApplicationError("NODE_TASKS_NOT_COMPLETED", "All tasks must be completed before node completion");
+          }
+        }
+      }
+
+      // Deliverable completion guard
+      const deliverables = await transaction.deliverables.listByNode(currentNode.id);
+      for (const dlv of deliverables) {
+        if (dlv.deletedAtUtc !== null) continue;
+        if (dlv.required) {
+          if (dlv.status !== "accepted" && dlv.status !== "waived") {
+            throw new ApplicationError("NODE_DELIVERABLES_NOT_SATISFIED", "All required deliverables must be accepted or waived before node completion");
+          }
+        }
+      }
+
+      const updatedNode = this.#mutateNodeCompletion(
+        transaction,
+        command.nodeId,
+        command.projectId,
+        command.principalId,
+        command.occurredAtUtc,
+        command.expectedVersion,
+      );
+      inject(failurePoint, "after_aggregate");
+
+      const projectSequence = await transaction.sequences.next(command.projectId);
+      const event: DomainEvent<NodeCompletedPayload> = {
+        tenantId: command.tenantId,
+        eventId: `evt:${command.commandId}`,
+        projectId: command.projectId,
+        projectSequence,
+        aggregateType: "project_node",
+        aggregateId: updatedNode.id,
+        aggregateVersion: updatedNode.version,
+        eventType: "project-map.node.completed",
+        schemaVersion: 1,
+        actorPrincipalId: command.principalId,
+        occurredAtUtc: command.occurredAtUtc,
+        correlationId: command.correlationId,
+        causationId: command.commandId,
+        originalSecurityDomainId: updatedNode.securityDomainId,
+        originalSecurityEpoch: updatedNode.securityEpoch,
+        payload: {
+          nodeId: updatedNode.id,
+          completedByPrincipalId: command.principalId,
+          completedAtUtc: command.occurredAtUtc,
+        },
+      };
+      await transaction.events.append(event);
+      inject(failurePoint, "after_event");
+
+      const outbox: OutboxMessage = {
+        tenantId: command.tenantId,
+        id: `outbox:${event.eventId}`,
+        eventId: event.eventId,
+        topic: eventTopic(event),
+        payload: event,
+        state: "pending",
+        availableAtUtc: command.occurredAtUtc,
+        attempts: 0,
+        maxAttempts: 8,
+        leaseOwner: null,
+        leaseToken: null,
+        leaseExpiresAtUtc: null,
+        lastError: null,
+        publishedAtUtc: null,
+        createdAtUtc: command.occurredAtUtc,
+      };
+      await transaction.outbox.enqueue(outbox);
+      inject(failurePoint, "after_outbox");
+
+      const result: CompleteProjectNodeResult = {
         node: updatedNode,
         event,
         outbox,
@@ -1656,7 +1892,12 @@ function context(
         }
         const key = `${tenantPrefix}${node.id}`;
         if (state.nodes.has(key)) throw new Error(`Aggregate already exists: ${node.id}`);
-        state.nodes.set(key, structuredClone(node));
+        state.nodes.set(key, structuredClone({
+          ...node,
+          status: node.status ?? "planned",
+          completedAtUtc: node.completedAtUtc ?? null,
+          completedByPrincipalId: node.completedByPrincipalId ?? null,
+        }));
       },
       assignSecurityDomain: async (nodeId, projectId, securityDomainId, expectedVersion) => {
         const key = `${tenantPrefix}${nodeId}`;

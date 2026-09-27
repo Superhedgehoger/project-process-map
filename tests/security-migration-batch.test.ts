@@ -423,6 +423,7 @@ function failingPersistence(base: Persistence, failure: "node" | "task" | "asset
     executeAssignNodeLeader: async (cmd, fp) => await base.executeAssignNodeLeader(cmd, fp),
     executeAssignProjectRoleBinding: async (cmd, fp) => await base.executeAssignProjectRoleBinding(cmd, fp),
     executeInitializeProjectRoleSlots: async (cmd, fp) => await base.executeInitializeProjectRoleSlots(cmd, fp),
+    executeCompleteProjectNode: async (cmd, fp) => await base.executeCompleteProjectNode(cmd, fp),
     close: async () => {},
 
   };

@@ -9,10 +9,15 @@
   ],
   "riskClass": "R2",
   "goal": "Implement the ProjectNode lifecycle state machine and authoritative node completion guard: require all non-deleted tasks completed and all required deliverable requirements accepted or waived before allowing a node to complete, preserving CAS, transaction boundaries, and Memory/SQLite parity.",
-  "status": "READY",
+  "status": "READY_TO_COMMIT",
+  "sliceStatus": [
+    "IMPLEMENTED",
+    "VERIFIED",
+    "CODEX_R2_REVIEW_PASS",
+    "READY_TO_COMMIT"
+  ],
   "branch": "main",
   "baseCommit": "46cc16b",
-  "reviewHistory": [],
   "dependencies": [
     "P0-05A-T1a",
     "P0-05A-T1b",
@@ -20,7 +25,45 @@
     "P0-07/TC-SEC-004A",
     "P0-07/TC-SEC-004B"
   ],
-  "verification": null,
+  "reviewHistory": [
+    {
+      "review": "Codex R2 Review",
+      "verdict": "FAIL",
+      "repairTaskId": "P0-05A-T2b-R2F1",
+      "findings": [
+        "MEDIUM-01 SQLite v13 fresh / upgrade schema enforcement not equivalent",
+        "LOW-01 node-completion ApplicationError codes absent from knownCodes",
+        "LOW-02 sensitive-node project mismatch exposed before concealment"
+      ],
+      "productDecisionRequired": "canceled / promoted Task semantics for ProjectNode completion"
+    },
+    {
+      "review": "Independent Codex R2 Repair Review",
+      "verdict": "PASS",
+      "repairTaskId": "P0-05A-T2b-R2F1",
+      "closure": {
+        "MEDIUM-01": "CLOSED",
+        "LOW-01": "CLOSED",
+        "LOW-02": "CLOSED",
+        "canceledPromotedDecision": "CORRECTLY_IMPLEMENTED"
+      },
+      "findings": {
+        "blocker": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      }
+    }
+  ],
+  "productDecision": "For ProjectNode completion only, non-deleted Tasks with executionState canceled or promoted are non-blocking terminal states regardless of requiresAcceptance. Soft-deleted Tasks remain ignored. No other Task lifecycle behavior changes.",
+  "verification": {
+    "targeted": "PASS 26/26 tests/node-completion-guard.test.ts",
+    "upgradeCompatibility": "PASS 13/13 tests/task-upgrade-compatibility.test.ts",
+    "pnpmCheck": "PASS 376/376 (typecheck, tests, Huly image lock 14 images linux/arm64, Huly extension verify upstream ccefccd8d0361d3c8612d508071b777aa833826d)",
+    "gitDiffCheck": "PASS",
+    "credentialScan": "PASS (changed and untracked worktree high-confidence scan, no matches)",
+    "jsonValidation": "PASS"
+  },
   "blocker": null,
-  "nextAction": "Start implementation of P0-05A-T2b (test harness and domain models) in the next dedicated implementation session."
+  "nextAction": "Commit and push the verified P0-05A-T2b product slice together with P0-05A-T2b-R2F1 repair history."
 }

@@ -1,5 +1,7 @@
 import type { PrincipalId, TenantId } from "./identity.ts";
 
+export type ProjectNodeStatus = "planned" | "in_progress" | "completed";
+
 export type ProjectNode = Readonly<{
   tenantId: TenantId;
   id: string;
@@ -8,6 +10,9 @@ export type ProjectNode = Readonly<{
   leaderPrincipalId: PrincipalId | null;
   title: string;
   kind: "stage" | "work_package" | "milestone";
+  status?: ProjectNodeStatus | undefined;
+  completedAtUtc?: string | null | undefined;
+  completedByPrincipalId?: PrincipalId | null | undefined;
   securityDomainId: string | null;
   securityEpoch: number;
   version: number;
@@ -26,6 +31,25 @@ export function isNodeLeader(node: ProjectNode, principalId: PrincipalId | null 
   return node.leaderPrincipalId !== null && node.leaderPrincipalId === principalId;
 }
 
+export function completeProjectNode(
+  node: ProjectNode,
+  options: Readonly<{
+    completedByPrincipalId: PrincipalId;
+    occurredAtUtc: string;
+  }>,
+): ProjectNode {
+  if (node.status === "completed") {
+    throw new Error("NODE_ALREADY_COMPLETED");
+  }
+  return {
+    ...node,
+    status: "completed",
+    completedAtUtc: options.occurredAtUtc,
+    completedByPrincipalId: options.completedByPrincipalId,
+    version: node.version + 1,
+  };
+}
+
 export const nodeEventSchemas = {
   created: {
     eventType: "project-map.node.created",
@@ -37,6 +61,12 @@ export const nodeEventSchemas = {
     eventType: "project-map.node.leader_assigned",
     schemaVersion: 1,
     requiredPayloadFields: ["nodeId", "previousLeaderPrincipalId", "leaderPrincipalId"],
+    optionalPayloadFields: [],
+  },
+  completed: {
+    eventType: "project-map.node.completed",
+    schemaVersion: 1,
+    requiredPayloadFields: ["nodeId", "completedByPrincipalId", "completedAtUtc"],
     optionalPayloadFields: [],
   },
 } as const;

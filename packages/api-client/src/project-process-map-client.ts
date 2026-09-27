@@ -15,6 +15,11 @@ class ProjectProcessMapBrowserClient {
   health() { return this.request('/health', {}, false, value => this.decodeHealth(value)); }
   listNodes() { return this.request('/api/nodes', {}, false, value => this.decodeNodes(value)); }
   getNode(nodeId) { return this.request('/api/nodes/' + encodeURIComponent(nodeId), {}, false, value => this.decodeNodeDetail(value)); }
+  completeNode(nodeId, input, idempotencyKey) {
+    return this.request('/api/nodes/' + encodeURIComponent(nodeId) + '/actions/complete', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': this.requiredKey(idempotencyKey) }, body: JSON.stringify(input)
+    }, true, value => this.decodeCommand(value, item => this.decodeNode(item)));
+  }
   createSecurityRoot(nodeId, input, idempotencyKey) {
     return this.request('/api/nodes/' + encodeURIComponent(nodeId) + '/security-domain', {
       method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': this.requiredKey(idempotencyKey) }, body: JSON.stringify(input)
@@ -123,6 +128,11 @@ class ProjectProcessMapBrowserClient {
     this.text(item.id, 'node.id'); this.text(item.projectId, 'node.projectId');
     if (item.parentId !== null) this.text(item.parentId, 'node.parentId');
     this.text(item.title, 'node.title'); this.oneOf(item.kind, ['stage','work_package','milestone'], 'node.kind'); this.positive(item.version, 'node.version');
+    if (item.status !== undefined) {
+      this.oneOf(item.status, ['planned', 'in_progress', 'completed'], 'node.status');
+      this.nullableUtc(item.completedAtUtc, 'node.completedAtUtc');
+      this.nullableText(item.completedByPrincipalId, 'node.completedByPrincipalId');
+    }
     return item;
   }
   decodeTask(value, withFiles) {

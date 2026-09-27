@@ -8,10 +8,10 @@ import type { ExternalBinding } from "../../../domain/src/external-reference.ts"
 import { principalId as parsePrincipalId, tenantId as parseTenantId, type TenantId, type PrincipalId } from "../../../domain/src/identity.ts";
 import type { ExternalIdentityMapping, Principal } from "../../../domain/src/identity.ts";
 import type { IntegrationOperation, IntegrationStepAttempt } from "../../../domain/src/integration-operations.ts";
-import type { ProjectNode } from "../../../domain/src/project-structure.ts";
+import { isNodeLeader, type ProjectNode } from "../../../domain/src/project-structure.ts";
 import type { OutboundProjectionFence } from "../../../domain/src/outbound-projection-fence.ts";
 import { isProjectManager, type ProjectMembership, type ProjectMembershipSecurityAuditEntry } from "../../../domain/src/project-access.ts";
-import type { ProductTask, TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
+import { taskLifecycle, type ProductTask, type TaskReviewActionRecord } from "../../../domain/src/tasks.ts";
 import {
   assertSecurityMigrationInitialPlan,
   assertSecurityMigrationProgressChange,
@@ -69,10 +69,14 @@ import {
   type CommandScope,
   type CommitSecurityMigrationResult,
   type CommitWithReadinessEvidenceParams,
+  type CompleteProjectNodeCommand,
+  type CompleteProjectNodeFailurePoint,
+  type CompleteProjectNodeResult,
   type CreateNodeCommand,
   type CreateNodeFailurePoint,
   type CreateNodeResult,
   type JobConsumer,
+  type NodeCompletedPayload,
   type NodeCreatedPayload,
   type NodeLeaderAssignedPayload,
   type OutboxConsumer,
@@ -83,6 +87,7 @@ import {
   type SecurityMigrationReadinessEvidenceRecord,
   type TransactionContext,
 } from "../../../application/src/ports/persistence.ts";
+import { validateCompleteProjectNode } from "../../../application/src/complete-node.ts";
 import {
   assertEligibleNodeLeader,
   hash,
@@ -134,7 +139,8 @@ export type SqlitePersistenceOptions = Readonly<{
 }>;
 
 const pathLocks = new Map<string, Promise<void>>();
-const currentSchemaVersion = 12;
+const currentSchemaVersion = 13;
+const projectNodeStatusCheckPattern = /\bCHECK\s*\(\s*status\s+IN\s*\(\s*'planned'\s*,\s*'in_progress'\s*,\s*'completed'\s*\)\s*\)/i;
 
 export class SqlitePersistence implements Persistence {
   readonly #database: DatabaseSync;
@@ -212,6 +218,28 @@ export class SqlitePersistence implements Persistence {
       SET leader_principal_id = ?, version = version + 1
       WHERE tenant_id = ? AND node_id = ? AND project_id = ? AND version = ?
     `).run(leaderPrincipalId ?? null, tenantId, nodeId, projectId, expectedVersion);
+    if (result.changes !== 1) {
+      throw new ApplicationError("NODE_VERSION_CONFLICT", "Node version conflict");
+    }
+    const row = this.#database.prepare(
+      "SELECT * FROM project_nodes WHERE tenant_id = ? AND node_id = ?",
+    ).get(tenantId, nodeId) as Record<string, unknown>;
+    return nodeFromRow(row);
+  }
+
+  #mutateNodeCompletion(
+    tenantId: TenantId,
+    nodeId: string,
+    projectId: string,
+    completedByPrincipalId: PrincipalId,
+    completedAtUtc: string,
+    expectedVersion: number,
+  ): ProjectNode {
+    const result = this.#database.prepare(`
+      UPDATE project_nodes
+      SET status = 'completed', completed_at_utc = ?, completed_by_principal_id = ?, version = version + 1
+      WHERE tenant_id = ? AND node_id = ? AND project_id = ? AND version = ?
+    `).run(completedAtUtc, completedByPrincipalId, tenantId, nodeId, projectId, expectedVersion);
     if (result.changes !== 1) {
       throw new ApplicationError("NODE_VERSION_CONFLICT", "Node version conflict");
     }
@@ -449,6 +477,9 @@ export class SqlitePersistence implements Persistence {
         leaderPrincipalId: null,
         title: command.title,
         kind: command.kind ?? "work_package",
+        status: "planned",
+        completedAtUtc: null,
+        completedByPrincipalId: null,
         securityDomainId: inheritance.securityDomainId,
         securityEpoch: inheritance.securityEpoch,
         version: 1,
@@ -721,6 +752,206 @@ export class SqlitePersistence implements Persistence {
       inject(failurePoint, "after_outbox");
 
       const result: AssignNodeLeaderResult = {
+        node: updatedNode,
+        event,
+        outbox,
+        replayed: false,
+      };
+      await transaction.receipts.insert({
+        scope,
+        fingerprint,
+        result: {
+          node: updatedNode,
+          event,
+          outbox,
+        },
+        createdAtUtc: command.occurredAtUtc,
+      });
+      inject(failurePoint, "after_idempotency");
+      return result;
+    });
+  }
+
+  async executeCompleteProjectNode(
+    command: CompleteProjectNodeCommand,
+    failurePoint?: CompleteProjectNodeFailurePoint,
+  ): Promise<CompleteProjectNodeResult> {
+    validateCompleteProjectNode(command);
+    const scope: CommandScope = {
+      principalId: command.principalId,
+      operation: "complete_project_node",
+      idempotencyKey: command.idempotencyKey,
+    };
+    const fingerprint = hash({
+      projectId: command.projectId,
+      nodeId: command.nodeId,
+      expectedVersion: command.expectedVersion,
+      occurredAtUtc: command.occurredAtUtc,
+    });
+
+    return await this.transaction(command.tenantId, async (transaction) => {
+      const currentNode = await transaction.nodes.get(command.nodeId);
+      if (currentNode === undefined || currentNode.deletedAtUtc !== null) {
+        throw new ApplicationError("NODE_NOT_FOUND", "Node not found");
+      }
+      if (currentNode.securityDomainId === null && currentNode.projectId !== command.projectId) {
+        throw new ApplicationError("PROJECT_MISMATCH", "Project mismatch");
+      }
+
+      const authorizationProjectId = currentNode.securityDomainId === null ? command.projectId : currentNode.projectId;
+      const actorPrincipal = await transaction.principals.get(command.principalId);
+      const actorMembership = await transaction.memberships.get(authorizationProjectId, command.principalId);
+      if (
+        actorPrincipal === undefined ||
+        actorPrincipal.tenantId !== command.tenantId ||
+        actorPrincipal.status !== "active" ||
+        actorPrincipal.kind !== "user" ||
+        actorMembership === undefined ||
+        actorMembership.tenantId !== command.tenantId ||
+        actorMembership.projectId !== authorizationProjectId ||
+        actorMembership.status !== "active"
+      ) {
+        if (currentNode.securityDomainId !== null) {
+          throw new ApplicationError("NODE_NOT_FOUND", "Node not found");
+        }
+        throw new ApplicationError("FORBIDDEN", "Only active project members can complete nodes");
+      }
+
+      const isPm = isProjectManager(actorMembership);
+      const isOwner = isNodeLeader(currentNode, command.principalId);
+      if (!isPm && !isOwner) {
+        if (currentNode.securityDomainId !== null) {
+          throw new ApplicationError("NODE_NOT_FOUND", "Node not found");
+        }
+        throw new ApplicationError("FORBIDDEN", "Only project managers or the node owner can complete the node");
+      }
+
+      const nowUtc = this.nowUtc();
+      if (currentNode.securityDomainId !== null) {
+        const canAccess = await canAccessProjectObjectDuringMigration(
+          transaction,
+          actorMembership,
+          command.principalId,
+          {
+            projectId: currentNode.projectId,
+            ownerNodeId: currentNode.id,
+            securityDomainId: currentNode.securityDomainId,
+            securityEpoch: currentNode.securityEpoch,
+          },
+          "edit",
+          nowUtc,
+        );
+        if (!canAccess) {
+          throw new ApplicationError("NODE_NOT_FOUND", "Node not found");
+        }
+      }
+
+      if (currentNode.projectId !== command.projectId) {
+        throw new ApplicationError("PROJECT_MISMATCH", "Project mismatch");
+      }
+
+      await assertProjectSecurityStable(transaction, command.projectId);
+
+      const previous = await transaction.receipts.get<Omit<CompleteProjectNodeResult, "replayed">>(scope);
+      if (previous !== undefined) {
+        if (previous.fingerprint !== fingerprint) {
+          throw new Error("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD");
+        }
+        return { ...structuredClone(previous.result), replayed: true };
+      }
+
+      if (currentNode.version !== command.expectedVersion) {
+        throw new ApplicationError("NODE_VERSION_CONFLICT", "Node version conflict");
+      }
+
+      if (currentNode.status === "completed") {
+        throw new ApplicationError("NODE_ALREADY_COMPLETED", "Node is already completed");
+      }
+
+      // Task completion guard
+      const tasks = await transaction.tasks.listByNode(currentNode.id);
+      for (const task of tasks) {
+        if (task.deletedAtUtc !== null) continue;
+        if (task.executionState === "canceled" || task.executionState === "promoted") continue;
+        if (task.requiresAcceptance) {
+          if (task.reviewState !== "accepted") {
+            throw new ApplicationError("NODE_TASKS_NOT_COMPLETED", "All tasks requiring review must be accepted before node completion");
+          }
+        } else {
+          if (taskLifecycle(task) !== "completed") {
+            throw new ApplicationError("NODE_TASKS_NOT_COMPLETED", "All tasks must be completed before node completion");
+          }
+        }
+      }
+
+      // Deliverable completion guard
+      const deliverables = await transaction.deliverables.listByNode(currentNode.id);
+      for (const dlv of deliverables) {
+        if (dlv.deletedAtUtc !== null) continue;
+        if (dlv.required) {
+          if (dlv.status !== "accepted" && dlv.status !== "waived") {
+            throw new ApplicationError("NODE_DELIVERABLES_NOT_SATISFIED", "All required deliverables must be accepted or waived before node completion");
+          }
+        }
+      }
+
+      const updatedNode = this.#mutateNodeCompletion(
+        command.tenantId,
+        command.nodeId,
+        command.projectId,
+        command.principalId,
+        command.occurredAtUtc,
+        command.expectedVersion,
+      );
+      inject(failurePoint, "after_aggregate");
+
+      const projectSequence = await transaction.sequences.next(command.projectId);
+      const event: DomainEvent<NodeCompletedPayload> = {
+        tenantId: command.tenantId,
+        eventId: `evt:${command.commandId}`,
+        projectId: command.projectId,
+        projectSequence,
+        aggregateType: "project_node",
+        aggregateId: updatedNode.id,
+        aggregateVersion: updatedNode.version,
+        eventType: "project-map.node.completed",
+        schemaVersion: 1,
+        actorPrincipalId: command.principalId,
+        occurredAtUtc: command.occurredAtUtc,
+        correlationId: command.correlationId,
+        causationId: command.commandId,
+        originalSecurityDomainId: updatedNode.securityDomainId,
+        originalSecurityEpoch: updatedNode.securityEpoch,
+        payload: {
+          nodeId: updatedNode.id,
+          completedByPrincipalId: command.principalId,
+          completedAtUtc: command.occurredAtUtc,
+        },
+      };
+      await transaction.events.append(event);
+      inject(failurePoint, "after_event");
+
+      const outbox: OutboxMessage = {
+        tenantId: command.tenantId,
+        id: `outbox:${event.eventId}`,
+        eventId: event.eventId,
+        topic: eventTopic(event),
+        payload: event,
+        state: "pending",
+        availableAtUtc: command.occurredAtUtc,
+        attempts: 0,
+        maxAttempts: 8,
+        leaseOwner: null,
+        leaseToken: null,
+        leaseExpiresAtUtc: null,
+        lastError: null,
+        publishedAtUtc: null,
+        createdAtUtc: command.occurredAtUtc,
+      };
+      await transaction.outbox.enqueue(outbox);
+      inject(failurePoint, "after_outbox");
+
+      const result: CompleteProjectNodeResult = {
         node: updatedNode,
         event,
         outbox,
@@ -1558,10 +1789,12 @@ export class SqlitePersistence implements Persistence {
           this.#database.prepare(`
             INSERT INTO project_nodes (
               tenant_id, node_id, project_id, parent_node_id, leader_principal_id, title, kind,
+              status, completed_at_utc, completed_by_principal_id,
               security_domain_id, security_epoch, version, deleted_at_utc
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).run(
             tenantId, node.id, node.projectId, node.parentId, node.leaderPrincipalId ?? null, node.title, node.kind,
+            node.status ?? "planned", node.completedAtUtc ?? null, node.completedByPrincipalId ?? null,
             node.securityDomainId, node.securityEpoch, node.version, node.deletedAtUtc,
           );
         },
@@ -3479,8 +3712,10 @@ export class SqlitePersistence implements Persistence {
   }
 
   private migrate(): void {
-    this.#database.exec("BEGIN IMMEDIATE");
+    this.#database.exec("PRAGMA foreign_keys = OFF");
     try {
+      this.#database.exec("BEGIN IMMEDIATE");
+      try {
       this.#database.exec(`
         CREATE TABLE IF NOT EXISTS schema_migrations (
           version INTEGER PRIMARY KEY,
@@ -3492,6 +3727,7 @@ export class SqlitePersistence implements Persistence {
       if (typeof maxRow?.version === "number" && maxRow.version >= currentSchemaVersion && countRow?.count === currentSchemaVersion) {
         this.#validateV11TableShapes(this.#database);
         this.#validateV12TableShapes(this.#database);
+        this.#validateV13TableShapes(this.#database);
         this.#database.exec("COMMIT");
         return;
       }
@@ -3610,6 +3846,9 @@ export class SqlitePersistence implements Persistence {
         leader_principal_id TEXT,
         title TEXT NOT NULL,
         kind TEXT NOT NULL CHECK (kind IN ('stage', 'work_package', 'milestone')),
+        status TEXT NOT NULL DEFAULT 'planned' CHECK (status IN ('planned', 'in_progress', 'completed')),
+        completed_at_utc TEXT,
+        completed_by_principal_id TEXT,
         security_domain_id TEXT,
         security_epoch INTEGER NOT NULL CHECK (security_epoch > 0),
         version INTEGER NOT NULL CHECK (version > 0),
@@ -4057,12 +4296,186 @@ export class SqlitePersistence implements Persistence {
     this.#database.prepare(`
       INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc) VALUES (12, ?)
     `).run(new Date().toISOString());
-    this.#database.exec("COMMIT");
-  } catch (error) {
-    this.#database.exec("ROLLBACK");
-    throw error;
+
+    this.ensureColumn("project_nodes", "status", "TEXT NOT NULL DEFAULT 'planned'");
+    this.ensureColumn("project_nodes", "completed_at_utc", "TEXT");
+    this.ensureColumn("project_nodes", "completed_by_principal_id", "TEXT");
+    this.#upgradeProjectNodesToV13(this.#database);
+    this.#validateV13TableShapes(this.#database);
+
+    this.#database.prepare(`
+      INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc) VALUES (13, ?)
+    `).run(new Date().toISOString());
+
+      this.#database.exec("COMMIT");
+      } catch (error) {
+        this.#database.exec("ROLLBACK");
+        throw error;
+      }
+    } finally {
+      this.#database.exec("PRAGMA foreign_keys = ON");
+    }
   }
-}
+
+  #upgradeProjectNodesToV13(db: DatabaseSync): void {
+    const ddl = db.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'project_nodes'",
+    ).get() as { sql?: string } | undefined;
+    if (ddl?.sql && projectNodeStatusCheckPattern.test(ddl.sql)) return;
+
+    this.#validateProjectNodesV13Shape(db, false);
+    db.exec(`
+      PRAGMA defer_foreign_keys = ON;
+      CREATE TABLE project_nodes_v13_rebuild (
+        tenant_id TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        parent_node_id TEXT,
+        leader_principal_id TEXT,
+        title TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('stage', 'work_package', 'milestone')),
+        status TEXT NOT NULL DEFAULT 'planned' CHECK (status IN ('planned', 'in_progress', 'completed')),
+        completed_at_utc TEXT,
+        completed_by_principal_id TEXT,
+        security_domain_id TEXT,
+        security_epoch INTEGER NOT NULL CHECK (security_epoch > 0),
+        version INTEGER NOT NULL CHECK (version > 0),
+        deleted_at_utc TEXT,
+        PRIMARY KEY (tenant_id, node_id),
+        FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id),
+        FOREIGN KEY (tenant_id, parent_node_id) REFERENCES project_nodes_v13_rebuild (tenant_id, node_id)
+      ) STRICT;
+
+      INSERT INTO project_nodes_v13_rebuild (
+        tenant_id, node_id, project_id, parent_node_id, leader_principal_id, title, kind,
+        status, completed_at_utc, completed_by_principal_id,
+        security_domain_id, security_epoch, version, deleted_at_utc
+      )
+      SELECT
+        tenant_id, node_id, project_id, parent_node_id, leader_principal_id, title, kind,
+        status, completed_at_utc, completed_by_principal_id,
+        security_domain_id, security_epoch, version, deleted_at_utc
+      FROM project_nodes;
+
+      DROP TABLE project_nodes;
+      ALTER TABLE project_nodes_v13_rebuild RENAME TO project_nodes;
+      CREATE INDEX project_nodes_by_project ON project_nodes (tenant_id, project_id, node_id);
+    `);
+    const foreignKeyFailures = db.prepare("PRAGMA foreign_key_check").all();
+    if (foreignKeyFailures.length > 0) {
+      throw new Error("SQLITE_SCHEMA_INCOMPATIBLE: project_nodes v13 rebuild failed foreign key check");
+    }
+  }
+
+  #validateV13TableShapes(db: DatabaseSync): void {
+    this.#validateProjectNodesV13Shape(db, true);
+  }
+
+  #validateProjectNodesV13Shape(db: DatabaseSync, requireStatusCheck: boolean): void {
+    const ddl = db.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'project_nodes'",
+    ).get() as { sql?: string } | undefined;
+    if (!ddl?.sql) throw new Error("SQLITE_SCHEMA_INCOMPATIBLE: table project_nodes missing");
+    if (!/\bSTRICT\b/i.test(ddl.sql)) {
+      throw new Error("SQLITE_SCHEMA_INCOMPATIBLE: table project_nodes not STRICT");
+    }
+    if (requireStatusCheck) {
+      if (!/\bCHECK\s*\(\s*kind\s+IN\s*\(\s*'stage'\s*,\s*'work_package'\s*,\s*'milestone'\s*\)\s*\)/i.test(ddl.sql)) {
+        throw new Error("SQLITE_SCHEMA_INCOMPATIBLE: table project_nodes kind CHECK enum mismatch");
+      }
+      if (!/\bCHECK\s*\(\s*security_epoch\s*>\s*0\s*\)/i.test(ddl.sql)) {
+        throw new Error("SQLITE_SCHEMA_INCOMPATIBLE: table project_nodes missing CHECK (security_epoch > 0)");
+      }
+      if (!/\bCHECK\s*\(\s*version\s*>\s*0\s*\)/i.test(ddl.sql)) {
+        throw new Error("SQLITE_SCHEMA_INCOMPATIBLE: table project_nodes missing CHECK (version > 0)");
+      }
+      if (!projectNodeStatusCheckPattern.test(ddl.sql)) {
+        throw new Error("SQLITE_SCHEMA_INCOMPATIBLE: table project_nodes status CHECK enum mismatch");
+      }
+    }
+
+    const expectedColumns: Record<string, { type: string; notnull: number; pk: number; defaultValue: unknown }> = {
+      tenant_id: { type: "TEXT", notnull: 1, pk: 1, defaultValue: null },
+      node_id: { type: "TEXT", notnull: 1, pk: 2, defaultValue: null },
+      project_id: { type: "TEXT", notnull: 1, pk: 0, defaultValue: null },
+      parent_node_id: { type: "TEXT", notnull: 0, pk: 0, defaultValue: null },
+      leader_principal_id: { type: "TEXT", notnull: 0, pk: 0, defaultValue: null },
+      title: { type: "TEXT", notnull: 1, pk: 0, defaultValue: null },
+      kind: { type: "TEXT", notnull: 1, pk: 0, defaultValue: null },
+      status: { type: "TEXT", notnull: 1, pk: 0, defaultValue: "'planned'" },
+      completed_at_utc: { type: "TEXT", notnull: 0, pk: 0, defaultValue: null },
+      completed_by_principal_id: { type: "TEXT", notnull: 0, pk: 0, defaultValue: null },
+      security_domain_id: { type: "TEXT", notnull: 0, pk: 0, defaultValue: null },
+      security_epoch: { type: "INTEGER", notnull: 1, pk: 0, defaultValue: null },
+      version: { type: "INTEGER", notnull: 1, pk: 0, defaultValue: null },
+      deleted_at_utc: { type: "TEXT", notnull: 0, pk: 0, defaultValue: null },
+    };
+    const columns = db.prepare("PRAGMA table_info(project_nodes)").all() as Array<{
+      name: string;
+      type: string;
+      notnull: number;
+      dflt_value: unknown;
+      pk: number;
+    }>;
+    if (columns.length !== Object.keys(expectedColumns).length) {
+      throw new Error(`SQLITE_SCHEMA_INCOMPATIBLE: table project_nodes column count mismatch: expected ${Object.keys(expectedColumns).length}, got ${columns.length}`);
+    }
+    const columnMap = new Map(columns.map((column) => [column.name, column]));
+    for (const [name, expected] of Object.entries(expectedColumns)) {
+      const actual = columnMap.get(name);
+      if (
+        actual === undefined
+        || actual.type.toUpperCase() !== expected.type
+        || actual.notnull !== expected.notnull
+        || actual.pk !== expected.pk
+        || actual.dflt_value !== expected.defaultValue
+      ) {
+        throw new Error(`SQLITE_SCHEMA_INCOMPATIBLE: table project_nodes column ${name} shape mismatch`);
+      }
+    }
+
+    if (!requireStatusCheck) return;
+
+    const foreignKeys = db.prepare("PRAGMA foreign_key_list(project_nodes)").all() as Array<{
+      table: string;
+      from: string;
+      to: string;
+    }>;
+    const expectedForeignKeys = [
+      { table: "tenants", from: "tenant_id", to: "tenant_id" },
+      { table: "project_nodes", from: "tenant_id", to: "tenant_id" },
+      { table: "project_nodes", from: "parent_node_id", to: "node_id" },
+    ];
+    if (
+      foreignKeys.length !== expectedForeignKeys.length
+      || expectedForeignKeys.some((expected) => !foreignKeys.some((actual) =>
+        actual.table === expected.table && actual.from === expected.from && actual.to === expected.to))
+    ) {
+      throw new Error("SQLITE_SCHEMA_INCOMPATIBLE: table project_nodes foreign key definition mismatch");
+    }
+
+    const indexes = db.prepare("PRAGMA index_list(project_nodes)").all() as Array<{
+      name: string;
+      unique: number;
+      partial: number;
+    }>;
+    const projectIndex = indexes.find((index) => index.name === "project_nodes_by_project");
+    if (projectIndex === undefined || projectIndex.unique !== 0 || projectIndex.partial !== 0) {
+      throw new Error("SQLITE_SCHEMA_INCOMPATIBLE: index project_nodes_by_project missing or incompatible");
+    }
+    const indexColumns = (db.prepare("PRAGMA index_info(project_nodes_by_project)").all() as Array<{
+      seqno: number;
+      name: string;
+    }>).sort((left, right) => left.seqno - right.seqno).map((column) => column.name);
+    if (
+      indexColumns.length !== 3
+      || indexColumns[0] !== "tenant_id"
+      || indexColumns[1] !== "project_id"
+      || indexColumns[2] !== "node_id"
+    ) {
+      throw new Error("SQLITE_SCHEMA_INCOMPATIBLE: index project_nodes_by_project definition mismatch");
+    }
+  }
 
   #validateV11TableShapes(db: DatabaseSync): void {
   const tableSchemas: Record<
@@ -5064,6 +5477,9 @@ function nodeFromRow(row: Record<string, unknown>): ProjectNode {
     leaderPrincipalId: nullablePrincipalId(row.leader_principal_id),
     title: asString(row.title),
     kind: asNodeKind(row.kind),
+    status: asNodeStatus(row.status),
+    completedAtUtc: nullableString(row.completed_at_utc),
+    completedByPrincipalId: nullablePrincipalId(row.completed_by_principal_id),
     securityDomainId: nullableString(row.security_domain_id),
     securityEpoch: asNumber(row.security_epoch),
     version: asNumber(row.version),
@@ -5592,6 +6008,11 @@ function asNumber(value: unknown): number {
 function asNodeKind(value: unknown): ProjectNode["kind"] {
   if (value === "stage" || value === "work_package" || value === "milestone") return value;
   throw new Error("SQLITE_NODE_KIND_INVALID");
+}
+
+function asNodeStatus(value: unknown): ProjectNode["status"] {
+  if (value === "planned" || value === "in_progress" || value === "completed") return value;
+  throw new Error("SQLITE_NODE_STATUS_INVALID");
 }
 
 function asOutboxState(value: unknown): OutboxMessage["state"] {

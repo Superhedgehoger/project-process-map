@@ -2,13 +2,36 @@
   "goal": "持续完成 project-process-map Phase 0 Backlog",
   "gate": "P0-05A 任务验收与交付物守卫",
   "task": "P0-05A-T2b",
-  "repairTask": null,
-  "status": "READY",
+  "repairTask": "P0-05A-T2b-R2F1",
+  "status": "READY_TO_COMMIT",
   "risk": "R2",
-  "worker": null,
+  "worker": "codex",
   "branch": "main",
-  "commit": "46cc16b",
-  "reviewHistory": [],
+  "commit": "22e9f83ff8cb733de748ebe08f55d6ac60e4157d",
+  "reviewHistory": [
+    {
+      "review": "Codex R2 Review",
+      "verdict": "FAIL",
+      "repairTaskId": "P0-05A-T2b-R2F1",
+      "findings": [
+        "MEDIUM-01 SQLite v13 fresh / upgrade schema enforcement not equivalent",
+        "LOW-01 node-completion ApplicationError codes absent from knownCodes",
+        "LOW-02 sensitive-node project mismatch exposed before concealment"
+      ],
+      "productDecisionRequired": "canceled / promoted Task semantics for ProjectNode completion"
+    },
+    {
+      "review": "Independent Codex R2 Repair Review",
+      "verdict": "PASS",
+      "repairTaskId": "P0-05A-T2b-R2F1",
+      "findings": {
+        "blocker": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      }
+    }
+  ],
   "dependencies": [
     "P0-05A-T1a",
     "P0-05A-T1b",
@@ -17,12 +40,17 @@
     "P0-07/TC-SEC-004B"
   ],
   "tests": [
-    "tests/node-completion-guard.test.ts"
+    "tests/node-completion-guard.test.ts",
+    "tests/task-upgrade-compatibility.test.ts"
   ],
   "evidence": [
     "docs/agent-tasks/P0-05A-T2b.md",
-    ".agent/tasks/P0-05A-T2b/task.json"
+    ".agent/tasks/P0-05A-T2b/task.json",
+    "docs/agent-tasks/P0-05A-T2b-R2F1.md",
+    ".agent/tasks/P0-05A-T2b-R2F1/task.json",
+    "docs/reports/P0-05A-T2b-node-completion-guard.md"
   ],
+  "productDecision": "For ProjectNode completion, canceled and promoted Tasks are non-blocking terminal states regardless of requiresAcceptance; no Task lifecycle transition changes.",
   "blocker": null,
-  "next_action": "Start implementation of P0-05A-T2b (Node state machine and completion guard) in the next dedicated implementation session."
+  "next_action": "Final closeout gate passed review closure; commit and push the complete P0-05A-T2b slice with P0-05A-T2b-R2F1 history."
 }

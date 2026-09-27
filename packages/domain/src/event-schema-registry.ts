@@ -37,6 +37,7 @@ function registerSchema(schema: EventSchema): void {
 // Register known schemas
 registerSchema(nodeEventSchemas.created);
 registerSchema(nodeEventSchemas.leaderAssigned);
+registerSchema(nodeEventSchemas.completed);
 registerSchema(projectMembershipRestrictionEventSchemas.demoted);
 registerSchema(projectMembershipRestrictionEventSchemas.revoked);
 registerSchema(roleBindingEventSchemas.assigned);
