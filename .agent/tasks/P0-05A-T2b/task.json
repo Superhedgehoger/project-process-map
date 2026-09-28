@@ -9,12 +9,15 @@
   ],
   "riskClass": "R2",
   "goal": "Implement the ProjectNode lifecycle state machine and authoritative node completion guard: require all non-deleted tasks completed and all required deliverable requirements accepted or waived before allowing a node to complete, preserving CAS, transaction boundaries, and Memory/SQLite parity.",
-  "status": "READY_TO_COMMIT",
+  "status": "CLOSED",
   "sliceStatus": [
     "IMPLEMENTED",
     "VERIFIED",
     "CODEX_R2_REVIEW_PASS",
-    "READY_TO_COMMIT"
+    "FINAL_GATE_PASS",
+    "COMMITTED",
+    "PUSHED",
+    "CLOSED"
   ],
   "branch": "main",
   "baseCommit": "46cc16b",
@@ -65,5 +68,7 @@
     "jsonValidation": "PASS"
   },
   "blocker": null,
-  "nextAction": "Commit and push the verified P0-05A-T2b product slice together with P0-05A-T2b-R2F1 repair history."
+  "closeoutCommit": "2d553b16eb80f4de64bf2fd07426a8bbb29b04e4",
+  "closeoutReceipt": ".agent/tasks/P0-05A-T2b/artifacts/closeout.json",
+  "nextAction": "Closed and pushed. Continue with P0-05A-T2c contract preflight; do not rewrite the original FAIL history."
 }

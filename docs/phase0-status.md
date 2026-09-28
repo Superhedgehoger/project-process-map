@@ -1,6 +1,6 @@
 # Phase 0 状态
 
-更新日期：2026-09-21
+更新日期：2026-09-26
 
 | 任务 | 状态 | 当前证据 | 下一闸门 |
 |---|---|---|---|
@@ -12,7 +12,7 @@
 | P0-07 敏感 ACL | 进行中 | `TC-SEC-001` 首根链路；`TC-SEC-002A～K` 已覆盖继承、归属守卫、持久计划、inventory、条件换域、原子批次、进入 verifying、核心 API、单 Asset 下载交集、外部协作出站冻结与全通道纪元就绪守卫；`TC-SEC-003A/B/C` Grant 与 Membership 原子守卫；`TC-SEC-004A` Node Owner/U2 与 `TC-SEC-004B` TemplateRoleSlot/ProjectRoleBinding 均经 Codex R2 PASS，状态 `ACCEPTED / DONE` | 真实 U7/U8 固定身份、嵌套域 |
 | P0-ND-01 无 Docker 原生发行可行性 | 完成 | 自包含浏览器入口、Product API 与 Worker 原生启动；版本化 Node 24 tarball、SHA-256；临时目录冒烟确认未调用 Docker，并完成页面 → 节点 → 任务 → Asset → 重启回读 | P0-ND-02 干净 Linux、备份恢复与升级/回滚 |
 | ARCH-GATE-01 架构修正 | 完成 | CR-003、ADR-003～ADR-008；42 项行为/故障测试；无 Docker 原生发行与重启恢复冒烟通过 | 恢复按单条纵向切片开发，从 P0-05A 开始 |
-| P0-05A 任务验收与交付物守卫 | 进行中 | `T1a` 已完成验收周期底座；`T1b` 已完成显式验收人 → 项目角色槽位 → 节点负责人三级解析、确定性多人仲裁、当前权限重校验和三代回执 fail-closed 兼容；Codex R2 Cycle 5 PASS，64/64 定向与 313/313 全量测试通过 | 进入 Deliverable / Evidence 与节点完成守卫 |
+| P0-05A 任务验收与交付物守卫 | 进行中 | `T1a/T1b` 验收闭环与三级验收人解析、`T2a` 文件 Evidence 接受/豁免、`T2b` ProjectNode 完成守卫均已验收并推送；`T2b` 提交 `2d553b1`，保留 Review FAIL → R2F1 → Repair Review PASS 历史 | `T2c` 契约已批准并初始化；先完成 Cindy Control Plane MVP，再启动产品代码 Builder |
 
 ## 启动条件
 
@@ -29,7 +29,7 @@ P0-01 至 P0-06 已按依赖顺序通过。产品运行骨架当前使用 SQLite
 
 CR-003 架构修正闸门已于 2026-09-04 通过。被否决的内存生产 Store、Huly Task 权威、同步跨系统事务和进程内 Saga 已从当前骨架移除；现在可以恢复 P0-05A，但仍须一次只实现一条小型纵向切片。
 
-P0-05A 是依赖 P0-07 的复合项，不能因 `T1a` 或 `T1b` 通过而整体关闭。`T1a` 覆盖验收周期底座、最小持久成员/安全域授权和项目经理改派；`T1b` 已接通显式验收人、项目模板角色槽位与节点负责人三级解析，并在创建回放时重新校验当前 Principal、Membership、Grant、权威 Task 与安全域纪元。正式成员管理与授权审计、全通道敏感 ACL、验收 UI、Deliverable/Evidence 与节点完成守卫仍待后续切片。详见 `docs/reports/P0-05A-T1a-task-review.md` 与 `docs/reports/P0-05A-T1b-reviewer-resolution.md`。
+P0-05A 是依赖 P0-07 的复合项，不能因单个子切片通过而整体关闭。`T1a/T1b` 已完成验收周期与三级验收人解析；`T2a` 已完成文件型 DeliverableRequirement / EvidenceLink 提交、接受和有理由豁免；`T2b` 已完成 ProjectNode 状态机与节点完成守卫。下一切片 `T2c` 处理 Asset 删除/隔离后的 Evidence 失效及项目完成/归档守卫；产品负责人已批准 Project completed/archived 分离、实时 Evidence/minCount 重算、completed node 不自动重开，以及隔离/删除 authority。Task 已 Ready，但排队在 Cindy Control Plane MVP 独立验收之后。详见 `docs/agent-tasks/P0-05A-T2c.md`。
 
 P0-07 的 `TC-SEC-001` 子切片已经建立正式 SecurityDomain/SecurityGrant 与首管理员原子创建链路，但 P0-07 总项保持进行中。为避免非空子树在迁移前泄漏，本期只接受空叶节点；创建后 Task/Asset 继承安全域，并拒绝创建可能保持公开的普通后代。v3 遗留域只保留查看兼容，且旧对象引用过的域 ID 不可被新正式域复用。详见 `docs/reports/P0-07-TC-SEC-001-first-security-root.md`。
 

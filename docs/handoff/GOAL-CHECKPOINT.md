@@ -22,15 +22,16 @@
 - 最新完成切片：P0-07 / TC-SEC-004B 模板角色槽位与项目角色绑定底座，提交 `9cadf1c72140e0f0bf572efab0e18d27abc77a30` 已推送并与 `origin/main` 一致。
 - 最新完成切片：P0-05A-T1b Task 验收人三级解析，提交 `0598ad482c02876de6f4e804033bdba906b9d6c7` 已推送并与 `origin/main` 一致；Codex R2 Cycle 5 PASS，64/64 定向与 313/313 全量门禁通过。
 - 最新完成切片：P0-05A-T2a 文件型 DeliverableRequirement / EvidenceLink 提交、接受与有理由豁免闭环（TC-DLV-001/003），提交 `46cc16b` 已推送并与 `origin/main` 一致；独立 cross-model R2 Review Cycle 14 PASS，33/33 定向、21/21 product-api 与 346/346 全量门禁通过。
-- 当前任务：P0-05A-T2b ProjectNode 状态机与节点完成守卫（TC-DLV-002）。
-- 当前状态：`READY_TO_COMMIT`；IMPLEMENTED / VERIFIED / CODEX_R2_REVIEW_PASS；当前 HEAD `22e9f83`，完整产品切片与 repair history 位于 dirty working tree，等待 closeout commit。
-- Review 历史：原 Codex R2 Review **FAIL**；修复任务 `P0-05A-T2b-R2F1`；Independent Codex R2 Repair Review **PASS**。不得将首次 FAIL 改写为 PASS。
+- 最新完成切片：P0-05A-T2b ProjectNode 状态机与节点完成守卫，提交 `2d553b16eb80f4de64bf2fd07426a8bbb29b04e4` 已推送并与 `origin/main` 一致。
+- Review 历史：原 Codex R2 Review **FAIL** → `P0-05A-T2b-R2F1` Repair → Independent Codex R2 Repair Review **PASS** → Final Gate PASS → Commit / Push PASS。不得将首次 FAIL 改写为 PASS。
 - Finding closure：MEDIUM-01 SQLite v13 parity、LOW-01 `knownCodes`、LOW-02 sensitive concealment 均 **CLOSED**；R2F1 状态 **CLOSED**。
 - 产品决定：仅对 ProjectNode completion，canceled 与 promoted Task 均为 non-blocking terminal；未改变 Task 自身 cancel/promote/review/lifecycle 规则。
-- 前置依赖：P0-05A-T1a、P0-05A-T1b、P0-05A-T2a、P0-07/TC-SEC-004A、P0-07/TC-SEC-004B 均已通过验收并推送到 origin/main。
-- 最终门禁结果：`tests/node-completion-guard.test.ts` 26/26 PASS；`tests/task-upgrade-compatibility.test.ts` 13/13 PASS；`pnpm check` 376/376 PASS；`git diff HEAD --check`、JSON 校验与凭据/私钥扫描 PASS。
+- 当前产品任务：P0-05A-T2c Evidence 失效与项目完成/归档守卫；Task Packet 已初始化于 `docs/agent-tasks/P0-05A-T2c.md` 与 `.agent/tasks/P0-05A-T2c/task.json`，状态 `READY_QUEUED`。
+- T2c 产品决定：Project completed/archived 分离且 PM-only；Evidence 低于 `minCount` 才回到 `evidence_due`，waived 不受影响且 completed node 不自动重开；隔离仅可信服务、删除仅 PM/Node Owner，均要求相应权限与 reason。
+- 当前优先任务：`CINDY-ORCH-MVP`；Task Packet 为 `docs/agent-tasks/CINDY-ORCH-MVP.md` 与 `.agent/tasks/CINDY-ORCH-MVP/task.json`，状态 `READY`。
+- Cindy 自动编排方案：`docs/development/cindy-orchestration.md`；Control Plane MVP 只实现 schema、reconcile、dirty-tree/digest、ignored runtime artifact 与幂等状态迁移，不开放自动 commit/push。
 - 当前 blocker：无。
-- next_action：将 P0-05A-T2b 与 R2F1 repair history 作为一个完整产品切片 commit 并 push。
+- next_action：下一专用实现会话启动 `CINDY-ORCH-MVP` Builder；独立验收前不启动已排队的 T2c 产品代码 Builder。
 
 旧会话 `e8e244ee-0c02-4769-8bd0-37f1ca8bd485` 仅是该 Git 工作树所在目录，不得作为聊天执行上下文恢复。原绑定的“project-process-map Goal 恢复”和“用量恢复后继续任务”自动任务已于 2026-09-05 暂停；后续不得把本 Goal 的恢复投递到该旧会话。
 

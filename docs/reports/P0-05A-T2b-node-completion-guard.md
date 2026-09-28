@@ -5,7 +5,7 @@
 - Base Commit：`46cc16b`
 - Functional Contracts：`FC-006`、`A4-03B`
 - Test Suites：`TC-DLV-002`（`tests/node-completion-guard.test.ts`）
-- 状态：`READY_TO_COMMIT`（IMPLEMENTED / VERIFIED / CODEX_R2_REVIEW_PASS）
+- 状态：`CLOSED`（IMPLEMENTED / VERIFIED / CODEX_R2_REVIEW_PASS / FINAL_GATE_PASS / COMMITTED / PUSHED）
 
 ---
 
@@ -141,4 +141,4 @@ Independent Codex R2 Repair Review 结论：**PASS**；MEDIUM-01、LOW-01、LOW-
 
 - P0-05A-T2b 实现了完整的节点状态机与完成守卫，Memory/SQLite 双后端保持严格一致，最终门禁全绿。
 - 原 Codex R2 Review 的 FAIL 历史已保留；`P0-05A-T2b-R2F1` 经独立 Repair Review PASS 后 CLOSED。
-- 父任务最终状态：IMPLEMENTED / VERIFIED / CODEX_R2_REVIEW_PASS / READY_TO_COMMIT。
+- 父任务最终状态：IMPLEMENTED / VERIFIED / CODEX_R2_REVIEW_PASS / FINAL_GATE_PASS / COMMITTED / PUSHED / CLOSED；closeout commit 为 `2d553b16eb80f4de64bf2fd07426a8bbb29b04e4`。

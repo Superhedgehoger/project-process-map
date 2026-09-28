@@ -1,0 +1,43 @@
+{
+  "taskId": "P0-05A-T2c",
+  "fc": [
+    "FC-006",
+    "A4-03B"
+  ],
+  "localTestId": [
+    "TC-DLV-004",
+    "TC-DLV-005"
+  ],
+  "riskClass": "R2",
+  "goal": "Invalidate file Evidence after authoritative Asset deletion or quarantine, recompute affected deliverables, enforce live Evidence validity in node and project guards, and implement separate project completion and archive transitions.",
+  "status": "READY_QUEUED",
+  "sliceStatus": [
+    "INITIALIZED",
+    "CONTRACT_PREFLIGHT_COMPLETE",
+    "PRODUCT_DECISIONS_APPROVED",
+    "QUEUED_AFTER_CINDY_CONTROL_PLANE_MVP"
+  ],
+  "branch": "main",
+  "baseCommit": "2d553b16eb80f4de64bf2fd07426a8bbb29b04e4",
+  "dependencies": [
+    "P0-05A-T2a",
+    "P0-05A-T2b",
+    "ADR-007",
+    "existing Asset/Evidence authority and security-domain boundary"
+  ],
+  "proposedSlices": [
+    "P0-05A-T2c-1 Asset deletion/quarantine to Evidence invalidation, deliverable recomputation, and live node-guard revalidation",
+    "P0-05A-T2c-2 Project completion/archive lifecycle and guard"
+  ],
+  "productDecisions": {
+    "projectLifecycle": "completed and archived are separate; only the current active PM may execute either transition; completion requires every non-deleted node completed and live Evidence validity; archive additionally requires no active migration, no unpublished project-scoped outbox, no non-terminal authority-changing project job, and freezes ordinary product writes",
+    "evidenceRecomputation": "Move a non-waived deliverable to evidence_due only when remaining valid Evidence is below minCount; waived remains unchanged; clear canonical acceptance fields while preserving immutable action history",
+    "completedNode": "Do not automatically reopen a completed node; invalid Evidence blocks later project completion/archive; mandatory security quarantine remains allowed after archive and does not implicitly unarchive",
+    "quarantineAuthority": "available to quarantined is allowed only for a trusted scanner/security service identity with a non-empty reason",
+    "deleteAuthority": "Only the current active PM or current active owner-node leader with target-domain permission may delete, with a non-empty reason; uploader status alone grants no delete authority"
+  },
+  "reviewHistory": [],
+  "verification": null,
+  "blocker": null,
+  "nextAction": "First implement and independently review the Cindy Control Plane MVP from docs/development/cindy-orchestration.md. Do not start the T2c product-code Builder before that automation slice closes."
+}

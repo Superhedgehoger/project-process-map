@@ -1,0 +1,33 @@
+{
+  "taskId": "CINDY-ORCH-MVP",
+  "type": "repository-development-automation",
+  "riskClass": "R2",
+  "goal": "Implement the first Cindy orchestration control-plane slice: schemas, deterministic Git reconciliation, dirty-tree ownership and digesting, ignored runtime artifact writing, and idempotent state transitions without automatic commit or push.",
+  "status": "READY",
+  "branch": "main",
+  "baseCommit": "2d553b16eb80f4de64bf2fd07426a8bbb29b04e4",
+  "dependencies": [
+    "docs/development/cindy-orchestration.md",
+    "reconciled P0-05A-T2b closeout state"
+  ],
+  "requiredGates": [
+    "tests/cindy-orchestrator.test.ts",
+    "pnpm check",
+    "git diff --check",
+    "JSON and schema validation",
+    "high-confidence credential and private-key scan",
+    "independent read-only Codex R2 Review bound to the final working-tree digest"
+  ],
+  "nonGoals": [
+    "Automatic Builder, Antigravity Desktop, or Reviewer invocation",
+    "Automatic full Gate, Repair, Closeout, commit, push, or Next Task selection",
+    "Product-domain, API, persistence-schema, migration, ACL, or authority changes",
+    "Tracked runtime evidence",
+    "Rewriting legacy Task or Review history"
+  ],
+  "reviewHistory": [],
+  "verification": null,
+  "blocker": null,
+  "queuedProductTask": "P0-05A-T2c",
+  "nextAction": "Start the dedicated Control Plane MVP Builder in the next implementation session; do not mix P0-05A-T2c product code into this slice."
+}

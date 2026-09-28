@@ -8,3 +8,4 @@ dist/
 !.env.example
 artifacts/huly/
 artifacts/fixtures/
+.agent/runtime/
