@@ -9,3 +9,4 @@ dist/
 artifacts/huly/
 artifacts/fixtures/
 .agent/runtime/
+.agent/.cindy-init-staging/

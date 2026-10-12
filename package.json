@@ -9,6 +9,9 @@
     "node": ">=24.0.0"
   },
   "scripts": {
+    "cindy:status": "node --experimental-strip-types tools/cindy-cli.ts status",
+    "cindy:reconcile": "node --experimental-strip-types tools/cindy-cli.ts reconcile",
+    "cindy:init": "node --experimental-strip-types tools/cindy-cli.ts init",
     "check": "pnpm typecheck && pnpm test && pnpm huly:images && pnpm huly:extension:verify",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test tests/**/*.test.ts",

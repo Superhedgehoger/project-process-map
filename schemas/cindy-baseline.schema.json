@@ -1,0 +1,32 @@
+{
+  "$schema": "https://cindy.control-plane.local/schemas/dialect/v1",
+  "title": "Cindy Baseline Schema",
+  "type": "object",
+  "required": [
+    "runId",
+    "taskId",
+    "branch",
+    "baseCommit",
+    "taskAuthorityCommit",
+    "upstreamRef",
+    "upstreamCommit",
+    "initialTreeClean",
+    "initialTreeDigest",
+    "recordedAt"
+  ],
+  "properties": {
+    "runId": { "type": "string" },
+    "taskId": { "type": "string" },
+    "branch": { "type": "string" },
+    "baseCommit": { "type": "string" },
+    "taskAuthorityCommit": { "type": "string" },
+    "upstreamSha": { "type": ["string", "null"] },
+    "upstreamRef": { "type": "string" },
+    "upstreamCommit": { "type": "string" },
+    "initialTreeClean": { "type": "boolean" },
+    "initialTreeDigest": { "type": "string" },
+    "recordedAt": { "type": "string", "format": "date-time" },
+    "trustClassification": { "enum": ["UNVERIFIED_EXTERNAL", "STRUCTURE_VALID_EXTERNAL"] }
+  },
+  "additionalProperties": false
+}

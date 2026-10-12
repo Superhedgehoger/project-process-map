@@ -1,0 +1,28 @@
+{
+  "$schema": "https://cindy.control-plane.local/schemas/dialect/v1",
+  "title": "Cindy Execution Inputs Schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "taskId",
+    "ignoredPaths"
+  ],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "CINDY_EXECUTION_INPUTS_V1"
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ignoredPaths": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

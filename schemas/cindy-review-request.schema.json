@@ -1,0 +1,39 @@
+{
+  "$schema": "https://cindy.control-plane.local/schemas/dialect/v1",
+  "title": "Cindy Review Request Schema",
+  "type": "object",
+  "required": [
+    "runId",
+    "taskId",
+    "baseCommit",
+    "cycle",
+    "reviewer",
+    "executionSnapshotVersion",
+    "executionSnapshotDigest",
+    "boundTreeDigest",
+    "requestedAt"
+  ],
+  "properties": {
+    "runId": { "type": "string" },
+    "taskId": { "type": "string" },
+    "baseCommit": { "type": "string" },
+    "cycle": { "type": "integer", "minimum": 1 },
+    "reviewer": {
+      "type": "object",
+      "required": ["identity", "session", "readOnlyRequired"],
+      "properties": {
+        "identity": { "type": "string" },
+        "session": { "type": "string" },
+        "readOnlyConfirmed": { "type": "boolean" },
+        "readOnlyRequired": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "executionSnapshotVersion": { "const": "CINDY_EXECUTION_SNAPSHOT_V1" },
+    "executionSnapshotDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "boundTreeDigest": { "type": "string" },
+    "requestedAt": { "type": "string", "format": "date-time" },
+    "trustClassification": { "enum": ["UNVERIFIED_EXTERNAL", "STRUCTURE_VALID_EXTERNAL"] }
+  },
+  "additionalProperties": false
+}

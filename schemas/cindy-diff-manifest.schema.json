@@ -1,0 +1,56 @@
+{
+  "$schema": "https://cindy.control-plane.local/schemas/dialect/v1",
+  "title": "Cindy Diff Manifest Schema",
+  "type": "object",
+  "required": [
+    "runId",
+    "taskId",
+    "baseCommit",
+    "changedFiles",
+    "untrackedFiles",
+    "stagedFiles",
+    "unstagedFiles",
+    "deletedFiles",
+    "renamedFiles",
+    "allowedScope",
+    "isWithinScope",
+    "unexplainedFiles",
+    "diffDigest",
+    "executionSnapshotVersion",
+    "executionSnapshotDigest",
+    "boundTreeDigest",
+    "recordedAt"
+  ],
+  "properties": {
+    "runId": { "type": "string" },
+    "taskId": { "type": "string" },
+    "baseCommit": { "type": "string" },
+    "changedFiles": { "type": "array", "items": { "type": "string" } },
+    "untrackedFiles": { "type": "array", "items": { "type": "string" } },
+    "stagedFiles": { "type": "array", "items": { "type": "string" } },
+    "unstagedFiles": { "type": "array", "items": { "type": "string" } },
+    "deletedFiles": { "type": "array", "items": { "type": "string" } },
+    "renamedFiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["from", "to"],
+        "properties": {
+          "from": { "type": "string" },
+          "to": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "allowedScope": { "type": "array", "items": { "type": "string" } },
+    "isWithinScope": { "type": "boolean" },
+    "unexplainedFiles": { "type": "array", "items": { "type": "string" } },
+    "diffDigest": { "type": "string" },
+    "executionSnapshotVersion": { "const": "CINDY_EXECUTION_SNAPSHOT_V1" },
+    "executionSnapshotDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "boundTreeDigest": { "type": "string" },
+    "recordedAt": { "type": "string", "format": "date-time" },
+    "trustClassification": { "enum": ["UNVERIFIED_EXTERNAL", "STRUCTURE_VALID_EXTERNAL"] }
+  },
+  "additionalProperties": false
+}

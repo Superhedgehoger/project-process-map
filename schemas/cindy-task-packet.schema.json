@@ -1,0 +1,64 @@
+{
+  "$schema": "https://cindy.control-plane.local/schemas/dialect/v1",
+  "title": "Cindy Task Packet Schema",
+  "type": "object",
+  "required": [
+    "taskId",
+    "branch",
+    "baseCommit",
+    "allowedScope"
+  ],
+  "properties": {
+    "taskId": { "type": "string" },
+    "branch": { "type": "string", "minLength": 1, "pattern": "^[a-zA-Z0-9_.-]+$" },
+    "baseCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "allowedScope": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "type": { "type": "string" },
+    "riskClass": { "type": "string" },
+    "goal": { "type": "string" },
+    "status": { "type": "string" },
+    "sliceStatus": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "fc": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "testId": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "localTestId": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "dependencies": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "requiredGates": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "nonGoals": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "reviewHistory": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "verification": { "type": ["object", "null"] },
+    "blocker": { "type": ["string", "null"] },
+    "queuedProductTask": { "type": "string" },
+    "nextAction": { "type": "string" },
+    "closeoutCommit": { "type": "string" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "title": { "type": "string" }
+  },
+  "additionalProperties": false
+}

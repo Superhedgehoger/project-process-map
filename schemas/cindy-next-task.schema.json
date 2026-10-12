@@ -1,0 +1,20 @@
+{
+  "$schema": "https://cindy.control-plane.local/schemas/dialect/v1",
+  "title": "Cindy Next Task Schema",
+  "type": "object",
+  "required": [
+    "runId",
+    "taskId",
+    "nextTaskId",
+    "selectedAt"
+  ],
+  "properties": {
+    "runId": { "type": "string" },
+    "taskId": { "type": "string" },
+    "nextTaskId": { "type": "string" },
+    "selectionReason": { "type": "string" },
+    "selectedAt": { "type": "string", "format": "date-time" },
+    "trustClassification": { "enum": ["UNVERIFIED_EXTERNAL", "STRUCTURE_VALID_EXTERNAL"] }
+  },
+  "additionalProperties": false
+}

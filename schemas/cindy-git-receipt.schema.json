@@ -1,0 +1,26 @@
+{
+  "$schema": "https://cindy.control-plane.local/schemas/dialect/v1",
+  "title": "Cindy Git Receipt Schema",
+  "type": "object",
+  "required": [
+    "runId",
+    "taskId",
+    "commit",
+    "branch",
+    "finalTreeClean",
+    "recordedAt"
+  ],
+  "properties": {
+    "runId": { "type": "string" },
+    "taskId": { "type": "string" },
+    "commit": { "type": "string" },
+    "branch": { "type": "string" },
+    "remote": { "type": "string" },
+    "prePushSha": { "type": ["string", "null"] },
+    "postPushSha": { "type": ["string", "null"] },
+    "finalTreeClean": { "type": "boolean" },
+    "recordedAt": { "type": "string", "format": "date-time" },
+    "trustClassification": { "enum": ["UNVERIFIED_EXTERNAL", "STRUCTURE_VALID_EXTERNAL"] }
+  },
+  "additionalProperties": false
+}

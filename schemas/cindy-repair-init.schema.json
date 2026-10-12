@@ -1,0 +1,30 @@
+{
+  "$schema": "https://cindy.control-plane.local/schemas/dialect/v1",
+  "title": "Cindy Repair Init Schema",
+  "type": "object",
+  "required": [
+    "runId",
+    "taskId",
+    "cycle",
+    "boundTreeDigest",
+    "reasons",
+    "recordedAt"
+  ],
+  "properties": {
+    "runId": { "type": "string" },
+    "taskId": { "type": "string" },
+    "cycle": { "type": "integer", "minimum": 1 },
+    "boundTreeDigest": { "type": "string" },
+    "reasons": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "findings": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "recordedAt": { "type": "string", "format": "date-time" },
+    "trustClassification": { "enum": ["UNVERIFIED_EXTERNAL", "STRUCTURE_VALID_EXTERNAL"] }
+  },
+  "additionalProperties": false
+}

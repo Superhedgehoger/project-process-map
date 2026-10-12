@@ -1,0 +1,139 @@
+{
+  "$schema": "https://cindy.control-plane.local/schemas/dialect/v1",
+  "title": "Cindy Run State Schema",
+  "type": "object",
+  "required": [
+    "runId",
+    "taskId",
+    "version",
+    "state",
+    "currentCycle",
+    "branch",
+    "baseCommit",
+    "headCommit",
+    "taskAuthorityCommit",
+    "upstreamRef",
+    "upstreamCommit",
+    "allowedScope",
+    "history",
+    "createdAt",
+    "updatedAt"
+  ],
+  "properties": {
+    "runId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]+$" },
+    "taskId": { "type": "string" },
+    "version": { "type": "integer", "minimum": 1 },
+    "state": {
+      "enum": [
+        "RECONCILING",
+        "TASK_INITIALIZED",
+        "READY_FOR_BUILDER",
+        "BUILDING",
+        "BUILDER_COMPLETE",
+        "TESTING",
+        "READY_FOR_REVIEW",
+        "REVIEWING",
+        "FINAL_GATE",
+        "READY_TO_COMMIT",
+        "COMMITTING",
+        "PUSHING",
+        "CLOSED",
+        "NEXT_TASK_SELECTED",
+        "REPAIR_INITIALIZED",
+        "REPAIR_BUILDING",
+        "PRODUCT_DECISION_REQUIRED",
+        "BLOCKED",
+        "CONTRACT_CONFLICT",
+        "DIRTY_TREE_UNEXPLAINED",
+        "GIT_SAFETY_STOP",
+        "MIGRATION_OR_SECURITY_AMBIGUITY"
+      ]
+    },
+    "currentCycle": { "type": "integer", "minimum": 1 },
+    "branch": { "type": "string" },
+    "baseCommit": { "type": "string" },
+    "headCommit": { "type": "string" },
+    "taskAuthorityCommit": { "type": "string" },
+    "upstreamSha": { "type": ["string", "null"] },
+    "upstreamRef": { "type": "string" },
+    "upstreamCommit": { "type": "string" },
+    "allowedScope": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "boundTreeDigest": { "type": "string" },
+    "boundDiffDigest": { "type": "string" },
+    "pausedFrom": {
+      "type": ["string", "null"],
+      "enum": [
+        null,
+        "RECONCILING",
+        "TASK_INITIALIZED",
+        "READY_FOR_BUILDER",
+        "BUILDING",
+        "BUILDER_COMPLETE",
+        "TESTING",
+        "READY_FOR_REVIEW",
+        "REVIEWING",
+        "FINAL_GATE",
+        "READY_TO_COMMIT",
+        "COMMITTING",
+        "PUSHING",
+        "CLOSED",
+        "NEXT_TASK_SELECTED",
+        "REPAIR_INITIALIZED",
+        "REPAIR_BUILDING"
+      ]
+    },
+    "stopReason": {
+      "type": ["string", "null"],
+      "enum": [
+        null,
+        "PRODUCT_DECISION_REQUIRED",
+        "BLOCKED",
+        "CONTRACT_CONFLICT",
+        "DIRTY_TREE_UNEXPLAINED",
+        "GIT_SAFETY_STOP",
+        "MIGRATION_OR_SECURITY_AMBIGUITY",
+        "HEAD_MISMATCH",
+        "HEAD_DRIFT",
+        "BASELINE_DRIFT",
+        "BASELINE_MISMATCH",
+        "BRANCH_MISMATCH",
+        "UPSTREAM_MISSING",
+        "UPSTREAM_DRIFT",
+        "UPSTREAM_AHEAD",
+        "UPSTREAM_BEHIND",
+        "UPSTREAM_DIVERGED",
+        "INVALID_COMMITTED_CLOSURE",
+        "TASK_PACKET_NOT_COMMITTED",
+        "AMBIGUOUS_ACTIVE_RUN",
+        "ACTIVE_RUN_EXISTS",
+        "INVALID_RUN_RECORD",
+        "RUN_GIT_SNAPSHOT_INCOMPLETE",
+        "TASK_BASELINE_DRIFT",
+        "TASK_PACKET_DRIFT",
+        "CONCURRENT_INIT",
+        "CURRENT_TASK_UNRESOLVED"
+      ]
+    },
+    "stopExplanation": { "type": ["string", "null"] },
+    "history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["fromState", "toState", "timestamp"],
+        "properties": {
+          "fromState": { "type": "string" },
+          "toState": { "type": "string" },
+          "timestamp": { "type": "string", "format": "date-time" },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": false
+}

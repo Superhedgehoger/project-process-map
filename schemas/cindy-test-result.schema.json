@@ -1,0 +1,35 @@
+{
+  "$schema": "https://cindy.control-plane.local/schemas/dialect/v1",
+  "title": "Cindy Test Result Schema",
+  "type": "object",
+  "required": [
+    "runId",
+    "taskId",
+    "cycle",
+    "command",
+    "startedAt",
+    "completedAt",
+    "exitCode",
+    "executionSnapshotVersion",
+    "executionSnapshotDigest",
+    "boundTreeDigest",
+    "logDigest",
+    "status"
+  ],
+  "properties": {
+    "runId": { "type": "string" },
+    "taskId": { "type": "string" },
+    "cycle": { "type": "integer", "minimum": 1 },
+    "command": { "type": "string" },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "completedAt": { "type": "string", "format": "date-time" },
+    "exitCode": { "type": "integer" },
+    "executionSnapshotVersion": { "const": "CINDY_EXECUTION_SNAPSHOT_V1" },
+    "executionSnapshotDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "boundTreeDigest": { "type": "string" },
+    "logDigest": { "type": "string" },
+    "status": { "enum": ["PASS", "FAIL"] },
+    "trustClassification": { "enum": ["UNVERIFIED_EXTERNAL", "STRUCTURE_VALID_EXTERNAL"] }
+  },
+  "additionalProperties": false
+}

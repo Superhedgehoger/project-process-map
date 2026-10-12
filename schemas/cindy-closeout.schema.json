@@ -1,0 +1,27 @@
+{
+  "$schema": "https://cindy.control-plane.local/schemas/dialect/v1",
+  "title": "Cindy Closeout Schema",
+  "type": "object",
+  "required": [
+    "runId",
+    "taskId",
+    "status",
+    "finalTreeDigest",
+    "finalGate",
+    "closedAt"
+  ],
+  "properties": {
+    "runId": { "type": "string" },
+    "taskId": { "type": "string" },
+    "status": { "const": "CLOSED" },
+    "finalTreeDigest": { "type": "string" },
+    "finalGate": { "const": "PASS" },
+    "reviewHistory": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "closedAt": { "type": "string", "format": "date-time" },
+    "trustClassification": { "enum": ["UNVERIFIED_EXTERNAL", "STRUCTURE_VALID_EXTERNAL"] }
+  },
+  "additionalProperties": false
+}

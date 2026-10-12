@@ -1,0 +1,60 @@
+{
+  "$schema": "https://cindy.control-plane.local/schemas/dialect/v1",
+  "title": "Cindy Review Result Schema",
+  "type": "object",
+  "required": [
+    "runId",
+    "taskId",
+    "cycle",
+    "reviewer",
+    "reviewedBaseCommit",
+    "executionSnapshotVersion",
+    "executionSnapshotDigest",
+    "reviewedTreeDigest",
+    "reviewedDiffDigest",
+    "verdict",
+    "findings",
+    "recordedAt"
+  ],
+  "properties": {
+    "runId": { "type": "string" },
+    "taskId": { "type": "string" },
+    "cycle": { "type": "integer", "minimum": 1 },
+    "reviewer": {
+      "type": "object",
+      "required": ["identity", "session", "readOnlyConfirmed"],
+      "properties": {
+        "identity": { "type": "string" },
+        "session": { "type": "string" },
+        "readOnlyConfirmed": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "reviewedBaseCommit": { "type": "string" },
+    "executionSnapshotVersion": { "const": "CINDY_EXECUTION_SNAPSHOT_V1" },
+    "executionSnapshotDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "reviewedTreeDigest": { "type": "string" },
+    "reviewedDiffDigest": { "type": "string" },
+    "verdict": { "enum": ["PASS", "FAIL"] },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "severity", "title"],
+        "properties": {
+          "id": { "type": "string" },
+          "severity": { "enum": ["BLOCKER", "HIGH", "MEDIUM", "LOW"] },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "reproduction": { "type": "string" },
+          "requirement": { "type": "string" },
+          "disposition": { "enum": ["OPEN", "CLOSED"] }
+        },
+        "additionalProperties": false
+      }
+    },
+    "recordedAt": { "type": "string", "format": "date-time" },
+    "trustClassification": { "enum": ["UNVERIFIED_EXTERNAL", "STRUCTURE_VALID_EXTERNAL"] }
+  },
+  "additionalProperties": false
+}
